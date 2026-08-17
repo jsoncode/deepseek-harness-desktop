@@ -12,6 +12,7 @@ export default function Preview() {
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
   const reloadKey = useUiStore((s) => s.reloadKey);
+  const bumpReload = useUiStore((s) => s.bumpReload);
 
   const [loaded, setLoaded] = useState(false);
   const [alive, setAlive] = useState(true);
@@ -37,10 +38,10 @@ export default function Preview() {
     };
   }, [url]);
 
-  // 标题栏"刷新"→ reloadKey 变化 → 重置加载态并重挂 iframe
+  // 标题栏"刷新"→ reloadKey 变化 / url 变化 → 重置加载态并重挂 iframe
   useEffect(() => {
     setLoaded(false);
-  }, [reloadKey]);
+  }, [reloadKey, url]);
 
   const recheck = useCallback(async () => {
     if (!url) return;
@@ -48,11 +49,14 @@ export default function Preview() {
     try {
       const ok = await api.probeService(url);
       setAlive(ok);
-      if (ok) message.success("服务连接正常");
+      if (ok) {
+        message.success("服务连接正常");
+        bumpReload(); // 重挂 iframe，让"重新连接"真正恢复内容
+      }
     } finally {
       setRechecking(false);
     }
-  }, [url, message]);
+  }, [url, message, bumpReload]);
 
   // 无 URL → 空态
   if (!url) {
@@ -73,7 +77,7 @@ export default function Preview() {
     <div className="page preview">
       <div className="preview-frame">
         <iframe
-          key={reloadKey}
+          key={`${url}|${reloadKey}`}
           src={url}
           title="Harness Preview"
           onLoad={() => setLoaded(true)}
@@ -86,6 +90,7 @@ export default function Preview() {
             background: "#fff",
           }}
           allow="clipboard-read; clipboard-write; fullscreen"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         />
 
         {!alive ? (
