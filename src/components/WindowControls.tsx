@@ -10,21 +10,23 @@ export default function WindowControls() {
     let unlisten: (() => void) | undefined;
     let alive = true;
 
+    const syncMaximized = () => {
+      void win
+        .isMaximized()
+        .then((v) => {
+          if (alive) setMaximized(v);
+        })
+        .catch(() => undefined);
+    };
+
+    syncMaximized();
     void win
-      .isMaximized()
-      .then(setMaximized)
-      .catch(() => undefined);
-    void win
-      .onResized(() => {
-        void win
-          .isMaximized()
-          .then(setMaximized)
-          .catch(() => undefined);
-      })
+      .onResized(syncMaximized)
       .then((fn) => {
         if (alive) unlisten = fn;
         else fn();
-      });
+      })
+      .catch(() => undefined);
 
     return () => {
       alive = false;
