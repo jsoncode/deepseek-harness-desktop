@@ -35,10 +35,10 @@ export default function TitleBar() {
     const target = e.target as Element;
     if (target.closest(NO_DRAG_CLOSEST)) return;
     if (e.detail === 2) {
-      void getCurrentWindow().toggleMaximize();
+      void getCurrentWindow().toggleMaximize().catch(() => undefined);
       return;
     }
-    void getCurrentWindow().startDragging();
+    void getCurrentWindow().startDragging().catch(() => undefined);
   };
 
   return (
@@ -49,24 +49,26 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        <button className="icon-btn" title="返回启动页" onClick={() => navigate("/")}>
+        <button className="icon-btn" type="button" title="返回启动页" aria-label="返回启动页" onClick={() => navigate("/")}>
           <ArrowLeftIcon />
         </button>
         <div className="url-pill">
           <span className="dot" />
           <span className="url-value">{url ?? "未检测到服务"}</span>
         </div>
-        <button className="icon-btn" title="刷新" onClick={bumpReload}>
+        <button className="icon-btn" type="button" title="刷新" aria-label="刷新" onClick={bumpReload}>
           <RefreshIcon />
         </button>
-        <button className="icon-btn" title="复制地址" onClick={() => void copyUrl()}>
+        <button className="icon-btn" type="button" title="复制地址" aria-label="复制地址" onClick={() => void copyUrl()}>
           <CopyIcon />
         </button>
         <button
           className="icon-btn"
+          type="button"
           title="在浏览器中打开"
+          aria-label="在浏览器中打开"
           onClick={() => {
-            if (url) void api.openInBrowser(url);
+            if (url) void api.openInBrowser(url).catch(() => message.error("打开失败"));
           }}
         >
           <ExternalIcon />
