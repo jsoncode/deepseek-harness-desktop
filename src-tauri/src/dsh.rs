@@ -574,6 +574,8 @@ pub fn stop_dsh_web(state: State<'_, AppState>) {
             kill_listener(port);
         }
     }
+    // 服务已停止，清除已探测 URL，避免托盘"浏览器中打开"打开死链
+    *state.detected_url.lock().unwrap() = None;
 }
 
 fn url_port(url: &str) -> Option<u16> {
