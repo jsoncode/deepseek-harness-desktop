@@ -71,13 +71,27 @@ pub struct StatusPayload {
 // 工具解析
 // ---------------------------------------------------------------------------
 
+/// Windows 下隐藏子进程的控制台窗口（防止黑窗口一闪而过），其他平台为 no-op。
+///
+/// GUI 父进程（本应用为 windows_subsystem=windows）派生的控制台子进程默认会
+/// 新建一个控制台窗口；设置 `CREATE_NO_WINDOW`（0x08000000）即可避免闪烁。
+fn hide_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// 通过 PATH 查找可执行文件（Windows: where.exe；类 Unix: which）
 fn run_where(name: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let result = {
         #[cfg(windows)]
         {
-            Command::new("where.exe").arg(name).output()
+            hide_window(Command::new("where.exe").arg(name)).output()
         }
         #[cfg(not(windows))]
         {
@@ -127,7 +141,9 @@ fn resolve_pnpm() -> Option<PathBuf> {
 /// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
 fn pnpm_global_bin() -> Option<PathBuf> {
     let pnpm = resolve_pnpm()?;
-    let output = Command::new(&pnpm).args(["global", "bin"]).output().ok()?;
+    let output = hide_window(Command::new(&pnpm).args(["global", "bin"]))
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -427,13 +443,15 @@ pub fn install_dsh(app: AppHandle) -> Result<(), String> {
         "system",
         &format!("$ {} add -g @deepseek-ai/dsh@latest", pnpm.display()),
     );
-    let child = Command::new(&pnpm)
-        .args(["add", "-g", "@deepseek-ai/dsh@latest"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
+    let child = hide_window(
+        Command::new(&pnpm)
+            .args(["add", "-g", "@deepseek-ai/dsh@latest"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null()),
+    )
+    .spawn()
+    .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
     let app2 = app.clone();
     std::thread::spawn(move || {
         pump_process(&app2, child, INSTALL_LOG_EVENT, INSTALL_EXIT_EVENT);
@@ -468,7 +486,9 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    let child = cmd.spawn().map_err(|e| format!("启动 dsh web 失败: {e}"))?;
+    let child = hide_window(&mut cmd)
+        .spawn()
+        .map_err(|e| format!("启动 dsh web 失败: {e}"))?;
     let pid = child.id();
     *state.child_pid.lock().unwrap() = Some(pid);
 
@@ -520,11 +540,13 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
 pub fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = hide_window(
+            Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .status();
     }
     #[cfg(not(windows))]
     {
@@ -564,8 +586,7 @@ fn url_port(url: &str) -> Option<u16> {
 
 /// 杀掉监听指定端口的进程（仅用于我们自己子进程输出过的端口）
 fn kill_listener(port: u16) {
-    let output = Command::new("netstat")
-        .args(["-ano", "-p", "tcp"])
+    let output = hide_window(Command::new("netstat").args(["-ano", "-p", "tcp"]))
         .output()
         .ok();
     let Some(out) = output else {
@@ -578,11 +599,13 @@ fn kill_listener(port: u16) {
         if l.contains(&needle) && l.contains("LISTENING") {
             if let Some(pid_str) = l.split_whitespace().last() {
                 if let Ok(pid) = pid_str.parse::<u32>() {
-                    let _ = Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/T", "/F"])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
+                    let _ = hide_window(
+                        Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null()),
+                    )
+                    .status();
                 }
             }
         }
@@ -594,8 +617,7 @@ fn kill_listener(port: u16) {
 pub fn open_in_browser(url: String) -> Result<(), String> {
     #[cfg(windows)]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", &url])
+        hide_window(Command::new("cmd").args(["/C", "start", "", &url]))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
