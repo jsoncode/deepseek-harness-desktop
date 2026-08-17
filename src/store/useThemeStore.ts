@@ -48,6 +48,7 @@ export const useThemeStore = create<ThemeState>((set, get) => {
       mq.addEventListener("change", onChange);
     },
     setMode: (m) => {
+      if (m !== "system" && m !== "light" && m !== "dark") return;
       try {
         localStorage.setItem(STORAGE_KEY, m);
       } catch {
