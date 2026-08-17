@@ -84,8 +84,9 @@ function notify(title, message) {
 
 function bump(v, kind) {
   // Strip any pre-release/build suffix first: "0.1.0-rc.1" would otherwise
-  // produce NaN in the patch position.
-  const core = v.replace(/[.-].*$/, '')
+  // produce NaN in the patch position. Only strip from the first `-` or `+`,
+  // never from the version dots themselves ("0.1.0" must stay intact).
+  const core = v.replace(/[-+].*$/, '')
   const [maj, min, pat] = core.split('.').map(Number)
   if (kind === 'major') return `${maj + 1}.0.0`
   if (kind === 'minor') return `${maj}.${min + 1}.0`
@@ -108,7 +109,7 @@ if (raw === '--tag-only') {
 }
 
 if (!/^\d+\.\d+\.\d+([.-][\w.-]+)?$/.test(version)) {
-  fail(`Invalid version: ${raw}`)
+  fail(`Invalid version: ${raw || version}`)
 }
 
 const tag = `v${version}`
