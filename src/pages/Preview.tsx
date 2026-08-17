@@ -1,17 +1,18 @@
 import { App as AntApp } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { ArrowLeftIcon, CopyIcon, ExternalIcon, RefreshIcon } from "../components/icons";
+import { ArrowLeftIcon } from "../components/icons";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
+import { useUiStore } from "../store/useUiStore";
 
 export default function Preview() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
+  const reloadKey = useUiStore((s) => s.reloadKey);
 
-  const [reloadKey, setReloadKey] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [alive, setAlive] = useState(true);
   const [rechecking, setRechecking] = useState(false);
@@ -36,20 +37,10 @@ export default function Preview() {
     };
   }, [url]);
 
-  const reload = useCallback(() => {
+  // 标题栏"刷新"→ reloadKey 变化 → 重置加载态并重挂 iframe
+  useEffect(() => {
     setLoaded(false);
-    setReloadKey((k) => k + 1);
-  }, []);
-
-  const copyUrl = useCallback(async () => {
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      message.success("地址已复制到剪贴板");
-    } catch {
-      message.error("复制失败");
-    }
-  }, [url]);
+  }, [reloadKey]);
 
   const recheck = useCallback(async () => {
     if (!url) return;
@@ -61,7 +52,7 @@ export default function Preview() {
     } finally {
       setRechecking(false);
     }
-  }, [url]);
+  }, [url, message]);
 
   // 无 URL → 空态
   if (!url) {
@@ -80,29 +71,6 @@ export default function Preview() {
 
   return (
     <div className="page preview">
-      <div className="preview-toolbar">
-        <button className="icon-btn" title="返回启动页" onClick={() => navigate("/")}>
-          <ArrowLeftIcon />
-        </button>
-        <div className="url-pill">
-          <span className="dot" />
-          <span className="url-value">{url}</span>
-        </div>
-        <button className="icon-btn" title="刷新" onClick={reload}>
-          <RefreshIcon />
-        </button>
-        <button className="icon-btn" title="复制地址" onClick={copyUrl}>
-          <CopyIcon />
-        </button>
-        <button
-          className="icon-btn"
-          title="在浏览器中打开"
-          onClick={() => void api.openInBrowser(url)}
-        >
-          <ExternalIcon />
-        </button>
-      </div>
-
       <div className="preview-frame">
         <iframe
           key={reloadKey}
@@ -129,7 +97,11 @@ export default function Preview() {
                 {phase === "stopped" ? "服务已被停止" : "服务无响应，可尝试重新连接"}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
-                <button className="btn-secondary" onClick={() => void recheck()} disabled={rechecking}>
+                <button
+                  className="btn-secondary"
+                  onClick={() => void recheck()}
+                  disabled={rechecking}
+                >
                   {rechecking ? "检测中…" : "重新连接"}
                 </button>
                 <button className="btn-secondary" onClick={() => navigate("/")}>
