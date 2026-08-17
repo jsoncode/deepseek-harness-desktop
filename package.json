@@ -1,0 +1,40 @@
+{
+  "name": "harness-launcher",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "node scripts/setup-nsis.mjs && tauri build",
+    "tauri:build:win": "node scripts/setup-nsis.mjs && tauri build --bundles nsis",
+    "nsis:setup": "node scripts/setup-nsis.mjs",
+    "tauri:build:mac": "tauri build --bundles dmg",
+    "tauri:build:mac:app": "tauri build --bundles app",
+    "tauri:build:mac:universal": "tauri build --target universal-apple-darwin --bundles dmg",
+    "version:sync": "node scripts/sync-version.mjs",
+    "release": "node scripts/release-tag.mjs",
+    "release:tag-only": "node scripts/release-tag.mjs --tag-only",
+    "tauri:preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "antd": "^6.6.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.0",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}

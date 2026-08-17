@@ -1,0 +1,611 @@
+//! dsh 进程管理：工具解析、全局安装、dsh web 启动/停止、服务探测与日志流式输出。
+
+use serde::Serialize;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+// ---------------------------------------------------------------------------
+// 事件名（前端通过 @tauri-apps/api/event 监听）
+// ---------------------------------------------------------------------------
+pub const INSTALL_LOG_EVENT: &str = "dsh://install-log";
+pub const INSTALL_EXIT_EVENT: &str = "dsh://install-exit";
+pub const WEB_LOG_EVENT: &str = "dsh://web-log";
+pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
+pub const URL_EVENT: &str = "dsh://url";
+
+// ---------------------------------------------------------------------------
+// 状态与负载
+// ---------------------------------------------------------------------------
+
+pub struct AppState {
+    /// 正在运行的 `dsh web` 子进程 pid（无则为 None）
+    pub child_pid: Mutex<Option<u32>>,
+    /// 已探测到的服务 URL
+    pub detected_url: Mutex<Option<String>>,
+    /// 子进程输出中出现的候选 URL（用于持续复探与停止时按端口兜底清理）
+    pub pending_urls: Mutex<Vec<String>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            child_pid: Mutex::new(None),
+            detected_url: Mutex::new(None),
+            pending_urls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+pub struct LogLine {
+    pub stream: String, // "system" | "stdout" | "stderr"
+    pub line: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ExitPayload {
+    pub code: i32,
+}
+
+#[derive(Serialize, Clone)]
+pub struct UrlPayload {
+    pub url: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct StatusPayload {
+    pub dsh_installed: bool,
+    pub service_running: bool,
+    pub child_running: bool,
+    pub url: Option<String>,
+    pub pnpm_path: Option<String>,
+    pub dsh_path: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// 工具解析
+// ---------------------------------------------------------------------------
+
+/// 通过 PATH 查找可执行文件（Windows: where.exe；类 Unix: which）
+fn run_where(name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let result = {
+        #[cfg(windows)]
+        {
+            Command::new("where.exe").arg(name).output()
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("which").arg(name).output()
+        }
+    };
+    if let Ok(output) = result {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let p = PathBuf::from(line.trim());
+                if p.exists() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn is_exec_shim(p: &PathBuf) -> bool {
+    let name = p.to_string_lossy().to_lowercase();
+    #[cfg(windows)]
+    {
+        name.ends_with(".exe") || name.ends_with(".cmd") || name.ends_with(".bat")
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix 下 `which` 返回的文件即视为可执行（含 dsh 的 shebang 脚本）
+        !name.ends_with(".ps1")
+    }
+}
+
+fn is_ps1(p: &PathBuf) -> bool {
+    p.to_string_lossy().to_lowercase().ends_with(".ps1")
+}
+
+fn resolve_pnpm() -> Option<PathBuf> {
+    for p in run_where("pnpm") {
+        if is_exec_shim(&p) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
+fn pnpm_global_bin() -> Option<PathBuf> {
+    let pnpm = resolve_pnpm()?;
+    let output = Command::new(&pnpm).args(["global", "bin"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let dir = text.lines().next()?.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(dir);
+    p.exists().then_some(p)
+}
+
+/// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）
+pub struct DshExec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub display: String,
+}
+
+fn resolve_dsh() -> Option<DshExec> {
+    let matches = run_where("dsh");
+    // 优先 .exe / .cmd / .bat
+    for p in &matches {
+        if is_exec_shim(p) {
+            return Some(DshExec {
+                program: p.to_string_lossy().into_owned(),
+                args: vec![],
+                display: p.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    // .ps1 → powershell -File 包装
+    for p in &matches {
+        if is_ps1(p) {
+            let path = p.to_string_lossy().into_owned();
+            return Some(DshExec {
+                program: "powershell".into(),
+                args: vec![
+                    "-NoProfile".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    path.clone(),
+                ],
+                display: path,
+            });
+        }
+    }
+    // 兜底：pnpm 全局 bin 目录
+    if let Some(bin) = pnpm_global_bin() {
+        #[cfg(windows)]
+        let names = ["dsh.exe", "dsh.cmd", "dsh.bat"];
+        #[cfg(not(windows))]
+        let names = ["dsh"];
+        for name in names {
+            let p = bin.join(name);
+            if p.exists() {
+                return Some(DshExec {
+                    program: p.to_string_lossy().into_owned(),
+                    args: vec![],
+                    display: p.to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// 服务探测（纯 std TCP 探活）
+// ---------------------------------------------------------------------------
+
+fn probe_url(url: &str, timeout_ms: u64) -> bool {
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"));
+    let Some(rest) = stripped else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let Some((host, port_str)) = host_port.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port_str.parse::<u16>() else {
+        return false;
+    };
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    for addr in addrs {
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
+            let req = format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: harness-launcher\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(req.as_bytes());
+            let mut buf = [0u8; 32];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n > 0 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 并行探测多个 URL，返回第一个成功的
+fn probe_parallel(urls: &[String], timeout_ms: u64) -> Option<String> {
+    let mut handles = Vec::new();
+    for u in urls {
+        let u = u.clone();
+        handles.push(std::thread::spawn(move || (u.clone(), probe_url(&u, timeout_ms))));
+    }
+    for h in handles {
+        if let Ok((u, true)) = h.join() {
+            return Some(u);
+        }
+    }
+    None
+}
+
+fn default_candidates() -> Vec<String> {
+    vec![
+        "http://127.0.0.1:3080".into(),
+        "http://127.0.0.1:3088".into(),
+        "http://localhost:3080".into(),
+        "http://localhost:3088".into(),
+    ]
+}
+
+/// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与默认 3080，
+/// 绝不把外部已存在的实例（如 3088）当作我们的服务
+fn child_candidates(pending: &[String]) -> Vec<String> {
+    let mut c = pending.to_vec();
+    c.push("http://127.0.0.1:3080".into());
+    c.push("http://localhost:3080".into());
+    c.dedup();
+    c
+}
+
+/// 从一行文本中提取 http://host:port 形式的 URL
+fn extract_urls(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(idx) = rest.find("http://") {
+        let tail = &rest[idx + 7..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<' | ','))
+            .unwrap_or(tail.len());
+        let host_port = &tail[..end];
+        if host_port.contains(':') && host_port.ends_with(|c: char| c.is_ascii_digit()) {
+            out.push(format!("http://{host_port}"));
+        }
+        rest = &tail[end..];
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 日志 / 进程泵
+// ---------------------------------------------------------------------------
+
+fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
+    let _ = app.emit(
+        event,
+        LogLine {
+            stream: stream.to_string(),
+            line: line.to_string(),
+        },
+    );
+}
+
+/// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件
+fn pump_process(
+    app: &AppHandle,
+    mut child: Child,
+    log_event: &'static str,
+    exit_event: &'static str,
+) {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let app_out = app.clone();
+    let h_out = std::thread::spawn(move || {
+        if let Some(out) = stdout {
+            let reader = BufReader::new(out);
+            for line in reader.lines().map_while(Result::ok) {
+                let line = line.trim_end_matches('\r').to_string();
+                emit_log(&app_out, log_event, "stdout", &line);
+                if log_event == WEB_LOG_EVENT {
+                    try_detect_url(&app_out, &line);
+                }
+            }
+        }
+    });
+
+    let app_err = app.clone();
+    let h_err = std::thread::spawn(move || {
+        if let Some(err) = stderr {
+            let reader = BufReader::new(err);
+            for line in reader.lines().map_while(Result::ok) {
+                let line = line.trim_end_matches('\r').to_string();
+                emit_log(&app_err, log_event, "stderr", &line);
+            }
+        }
+    });
+
+    let status = child.wait();
+    let _ = h_out.join();
+    let _ = h_err.join();
+    let code = status
+        .map(|s| s.code().unwrap_or(-1))
+        .unwrap_or(-1);
+    let _ = app.emit(exit_event, ExitPayload { code });
+}
+
+/// 从输出行里尝试探测 URL；记录候选并只处理一次成功
+fn try_detect_url(app: &AppHandle, line: &str) {
+    let urls = extract_urls(line);
+    if urls.is_empty() {
+        return;
+    }
+    // 记录到 pending，供 watcher 持续复探与 stop 时按端口兜底清理
+    if let Some(state) = app.try_state::<AppState>() {
+        let mut pending = state.pending_urls.lock().unwrap();
+        for u in &urls {
+            if !pending.contains(u) {
+                pending.push(u.clone());
+            }
+        }
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        if state.detected_url.lock().unwrap().is_some() {
+            return;
+        }
+    }
+    if let Some(url) = probe_parallel(&urls, 800) {
+        if let Some(state) = app.try_state::<AppState>() {
+            *state.detected_url.lock().unwrap() = Some(url.clone());
+        }
+        let _ = app.emit(URL_EVENT, UrlPayload { url });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 命令
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
+    let dsh = resolve_dsh();
+    let dsh_installed = dsh.is_some();
+    let dsh_path = dsh.map(|d| d.display);
+
+    let pnpm = resolve_pnpm();
+    let pnpm_path = pnpm.map(|p| p.to_string_lossy().into_owned());
+
+    let child_running = {
+        let guard = state.child_pid.lock().unwrap();
+        guard.is_some()
+    };
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(url) = state.detected_url.lock().unwrap().clone() {
+        candidates.push(url);
+    }
+    candidates.extend(default_candidates());
+    candidates.dedup();
+
+    let url = probe_parallel(&candidates, 400);
+    if let Some(ref u) = url {
+        *state.detected_url.lock().unwrap() = Some(u.clone());
+    }
+    let service_running = url.is_some();
+
+    StatusPayload {
+        dsh_installed,
+        service_running,
+        child_running,
+        url,
+        pnpm_path,
+        dsh_path,
+    }
+}
+
+#[tauri::command]
+pub fn probe_service(url: String) -> bool {
+    probe_url(&url, 800)
+}
+
+/// 全局安装 @deepseek-ai/dsh@latest（流式输出）
+#[tauri::command]
+pub fn install_dsh(app: AppHandle) -> Result<(), String> {
+    let pnpm = resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+    emit_log(
+        &app,
+        INSTALL_LOG_EVENT,
+        "system",
+        &format!("$ {} add -g @deepseek-ai/dsh@latest", pnpm.display()),
+    );
+    let child = Command::new(&pnpm)
+        .args(["add", "-g", "@deepseek-ai/dsh@latest"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        pump_process(&app2, child, INSTALL_LOG_EVENT, INSTALL_EXIT_EVENT);
+    });
+    Ok(())
+}
+
+/// 启动 dsh web（流式输出；子进程存活期间持有 pid）
+#[tauri::command]
+pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.child_pid.lock().unwrap().is_some() {
+        return Ok(()); // 已在运行
+    }
+    // 新子进程 → 重置上一轮的探测结果，避免误用外部实例/旧 URL
+    *state.detected_url.lock().unwrap() = None;
+    state.pending_urls.lock().unwrap().clear();
+    let dsh = resolve_dsh().ok_or("未找到 dsh，请先执行全局安装 @deepseek-ai/dsh")?;
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    emit_log(
+        &app,
+        WEB_LOG_EVENT,
+        "system",
+        &format!("$ {} web", dsh.display),
+    );
+
+    let mut cmd = Command::new(&dsh.program);
+    cmd.args(&dsh.args)
+        .arg("web")
+        .current_dir(&home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let child = cmd.spawn().map_err(|e| format!("启动 dsh web 失败: {e}"))?;
+    let pid = child.id();
+    *state.child_pid.lock().unwrap() = Some(pid);
+
+    // 泵输出 + 退出后清理 pid
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        pump_process(&app2, child, WEB_LOG_EVENT, WEB_EXIT_EVENT);
+        if let Some(s) = app2.try_state::<AppState>() {
+            *s.child_pid.lock().unwrap() = None;
+        }
+    });
+
+    // 后台探测循环：服务就绪后发出 URL 事件（最长约 20 分钟，覆盖首次联网初始化）
+    let app3 = app.clone();
+    std::thread::spawn(move || {
+        for _ in 0..2400 {
+            let alive = app3
+                .try_state::<AppState>()
+                .map(|s| s.child_pid.lock().unwrap().is_some())
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            let already = app3
+                .try_state::<AppState>()
+                .map(|s| s.detected_url.lock().unwrap().is_some())
+                .unwrap_or(false);
+            if already {
+                return;
+            }
+            let pending: Vec<String> = app3
+                .try_state::<AppState>()
+                .map(|s| s.pending_urls.lock().unwrap().clone())
+                .unwrap_or_default();
+            let candidates = child_candidates(&pending);
+            if let Some(url) = probe_parallel(&candidates, 250) {
+                if let Some(s) = app3.try_state::<AppState>() {
+                    *s.detected_url.lock().unwrap() = Some(url.clone());
+                }
+                let _ = app3.emit(URL_EVENT, UrlPayload { url });
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    });
+    Ok(())
+}
+
+pub fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// 停止 dsh web（杀死整棵进程树，并按子进程输出过的端口兜底清理脱离进程）
+#[tauri::command]
+pub fn stop_dsh_web(state: State<'_, AppState>) {
+    let pid = state.child_pid.lock().unwrap().take();
+    if let Some(pid) = pid {
+        kill_tree(pid);
+    }
+    // 等待树清理，然后按端口兜底（dsh 会派生脱离父链的进程）
+    let urls: Vec<String> = state.pending_urls.lock().unwrap().clone();
+    std::thread::sleep(Duration::from_millis(600));
+    for url in &urls {
+        if let Some(port) = url_port(url) {
+            kill_listener(port);
+        }
+    }
+}
+
+fn url_port(url: &str) -> Option<u16> {
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host_port = stripped.split('/').next()?;
+    host_port.rsplit_once(':')?.1.parse().ok()
+}
+
+/// 杀掉监听指定端口的进程（仅用于我们自己子进程输出过的端口）
+fn kill_listener(port: u16) {
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .ok();
+    let Some(out) = output else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = format!(":{port}");
+    for line in text.lines() {
+        let l = line.trim();
+        if l.contains(&needle) && l.contains("LISTENING") {
+            if let Some(pid_str) = l.split_whitespace().last() {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
+}
+
+/// 在系统默认浏览器中打开 URL
+#[tauri::command]
+pub fn open_in_browser(url: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

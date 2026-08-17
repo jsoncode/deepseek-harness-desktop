@@ -1,0 +1,228 @@
+# Release: on every `v*` tag push (or manual workflow_dispatch), build the
+# Tauri app on Windows and macOS and publish the installers to a GitHub Release.
+#
+# 直接发布（非草稿）：
+#   1. create-release job 先用 gh CLI 创建「已发布」的正式 Release（空壳）；
+#   2. 各平台矩阵 job 构建安装包后，用 softprops/action-gh-release 把资产追加
+#      到同一个正式 Release —— 全程不产生草稿，也不需要末尾的转正 job。
+#   3. 不使用 tauri-action 的原因：它只认草稿，遇到已发布的 Release 会走错
+#      分支导致部分产物丢失（见 tauri-action 多 job 并发上传的已知问题）。
+#
+# Outputs:
+#   Windows: NSIS (.exe)
+#   macOS:   .dmg (tauri native, per arch) + .pkg (built from the .app
+#            with macOS' pkgbuild, since tauri does not support pkg natively)
+#
+# Usage:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.1.0). Leave empty to use tauri.conf.json.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # Quality gate: 前端类型检查 + 构建 + Rust 单元测试通过后，才开始打安装包。
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system deps (tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend build (tsc + vite)
+        run: pnpm build
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test
+
+  # 先创建已发布的正式 Release（空壳，等矩阵 job 追加资产）。
+  create-release:
+    needs: quality
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      # 重跑/重推同 tag（或手动 dispatch）时，先清掉该 tag 已存在的 Release。
+      # 只在这里做一次，避免多 job 并发删除的竞态。
+      - name: Remove stale release for this tag
+        shell: bash
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+            echo "Deleted stale release for $TAG"
+          else
+            echo "No stale release for $TAG"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # workflow_dispatch 路径下 tag 可能不存在，先补建（指向当前 checkout 的 commit）。
+      - name: Create published release
+        shell: bash
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          git tag "$TAG" 2>/dev/null || true
+          cat > /tmp/release-notes.md <<EOF
+          ## Harness Launcher ${TAG}
+
+          DeepSeek Harness 本地服务桌面启动器：一键安装/启动 dsh web，并在内嵌预览页中打开本地服务。
+
+          ### 下载
+          - **Windows**：\`.exe\`（NSIS 安装包）
+          - **macOS Apple Silicon**：\`aarch64\` \`.dmg\` + \`.pkg\`
+          - **macOS Intel**：\`x86_64\` \`.dmg\` + \`.pkg\`
+
+          > macOS 未签名时，首次打开需在「系统设置 → 隐私与安全性」中允许，或右键选择「打开」。
+          > Windows 若提示 SmartScreen，请选择「更多信息 → 仍要运行」。
+
+          ### 功能
+          - 启动页一键启动本地服务（按钮随服务状态切换为「启动应用 / 打开应用」）
+          - 首次使用自动全局安装 \`@deepseek-ai/dsh@latest\`
+          - 模拟终端实时展示安装与启动日志，服务就绪后自动进入预览页
+          - 预览页支持刷新 / 复制地址 / 浏览器打开
+
+          完整说明见 [README](../blob/master/README.md)。
+          EOF
+          gh release create "$TAG" \
+            --title "Harness Launcher ${TAG}" \
+            --notes-file /tmp/release-notes.md
+          echo "Published release $TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 构建并上传安装包到已发布的 Release（直接发布，无草稿）。
+  release:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: '--bundles nsis'
+          - platform: macos-latest
+            rust_target: aarch64-apple-darwin
+            arch: arm64
+            args: '--target aarch64-apple-darwin --bundles app,dmg'
+          - platform: macos-latest
+            rust_target: x86_64-apple-darwin
+            arch: x64
+            args: '--target x86_64-apple-darwin --bundles app,dmg'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Sync version files
+        shell: bash
+        run: node scripts/sync-version.mjs "${{ needs.create-release.outputs.tag }}"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bundles
+        run: pnpm tauri build ${{ matrix.args }}
+
+      - name: Upload NSIS installer (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Build .pkg installer (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          VERSION="${{ needs.create-release.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          APP="src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/Harness Launcher.app"
+          pkgbuild --component "$APP" --install-location /Applications \
+            "Harness Launcher_${VERSION}_${{ matrix.arch }}.pkg"
+          echo "PKG_FILE=Harness Launcher_${VERSION}_${{ matrix.arch }}.pkg" >> "$GITHUB_ENV"
+
+      - name: Upload DMG + PKG (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: |
+            src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+            ${{ env.PKG_FILE }}
