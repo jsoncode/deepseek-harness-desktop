@@ -729,19 +729,19 @@ export default function App() {
     >
       <AntApp>
         <div className="app-bg" />
-        <div className="app-shell">
-          <TitleBar />
-          <div className="app-content">
-            <HashRouter>
+        <HashRouter>
+          <div className="app-shell">
+            <TitleBar />
+            <div className="app-content">
               <Routes>
                 <Route path="/" element={<Launch />} />
                 <Route path="/terminal" element={<Terminal />} />
                 <Route path="/preview" element={<Preview />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
-            </HashRouter>
+            </div>
           </div>
-        </div>
+        </HashRouter>
       </AntApp>
     </ConfigProvider>
   );
