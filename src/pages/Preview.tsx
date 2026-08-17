@@ -90,7 +90,7 @@ export default function Preview() {
             background: "#fff",
           }}
           allow="clipboard-read; clipboard-write; fullscreen"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
         />
 
         {!alive ? (

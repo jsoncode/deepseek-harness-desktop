@@ -85,6 +85,10 @@ fn open_service_in_browser(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         let url = state.detected_url.lock().unwrap().clone();
         if let Some(url) = url {
+            // 打开前探活：服务崩溃/停止时不打开死链
+            if !dsh::probe_url(&url, 400) {
+                return;
+            }
             if let Err(e) = dsh::open_url(&url) {
                 eprintln!("[tray] 打开浏览器失败: {e}");
             }

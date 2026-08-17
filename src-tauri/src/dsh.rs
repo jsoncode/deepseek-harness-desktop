@@ -216,7 +216,7 @@ fn resolve_dsh() -> Option<DshExec> {
 // 服务探测（纯 std TCP 探活）
 // ---------------------------------------------------------------------------
 
-fn probe_url(url: &str, timeout_ms: u64) -> bool {
+pub fn probe_url(url: &str, timeout_ms: u64) -> bool {
     let stripped = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"));
