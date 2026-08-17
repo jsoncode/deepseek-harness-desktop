@@ -612,22 +612,27 @@ fn kill_listener(port: u16) {
     }
 }
 
-/// 在系统默认浏览器中打开 URL
-#[tauri::command]
-pub fn open_in_browser(url: String) -> Result<(), String> {
+/// 在系统默认浏览器中打开 URL（前端命令与托盘菜单共用）
+pub fn open_url(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
-        hide_window(Command::new("cmd").args(["/C", "start", "", &url]))
+        hide_window(Command::new("cmd").args(["/C", "start", "", url]))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// 在系统默认浏览器中打开 URL
+#[tauri::command]
+pub fn open_in_browser(url: String) -> Result<(), String> {
+    open_url(&url)
 }
