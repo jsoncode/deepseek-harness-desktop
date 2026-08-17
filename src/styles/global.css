@@ -947,7 +947,27 @@ html[data-theme="light"] .preview-overlay {
   background: rgba(246, 247, 251, 0.92);
 }
 
-/* 加载转圈：白色环在浅色遮罩上不可见 → 深色环 */
+/* 加载转圈：白色环在浅色遮罩上不可见 → 深色环；
+   border-color 简写会重置 border-top-color，需补回旋转高亮（与深色版同构） */
 html[data-theme="light"] .spinner-ring {
   border-color: rgba(15, 23, 42, 0.1);
+  border-top-color: var(--accent-2);
+}
+
+/* 预览容器：原为深色底，浅色下 iframe 未加载完成瞬间露出深色块 → 浅色底 */
+html[data-theme="light"] .preview-frame {
+  background: var(--bg-elev);
+}
+
+/* 终端窗保持深色：内部选中与滚动条不受浅色覆盖影响 */
+html[data-theme="light"] .term-window ::selection {
+  background: rgba(99, 102, 241, 0.45);
+}
+
+html[data-theme="light"] .term-window ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+html[data-theme="light"] .term-window ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
