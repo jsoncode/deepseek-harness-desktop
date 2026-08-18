@@ -264,21 +264,114 @@ fn probe_parallel(urls: &[String], timeout_ms: u64) -> Option<String> {
     None
 }
 
+/// 本应用管理的 dsh web 服务端口。
+///
+/// dev（tauri dev / debug 构建）与正式版（release 构建）使用不同端口，
+/// 避免调试时误连/误杀正式版在 3080 上运行的服务，实现完全隔离：
+/// - dev：6088（固定，不做进程身份探测）
+/// - release：3080（dsh web 默认端口）
+fn service_port() -> u16 {
+    if cfg!(debug_assertions) {
+        6088
+    } else {
+        3080
+    }
+}
+
 fn default_candidates() -> Vec<String> {
+    let port = service_port();
     vec![
-        "http://127.0.0.1:3080".into(),
-        "http://127.0.0.1:3088".into(),
-        "http://localhost:3080".into(),
-        "http://localhost:3088".into(),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
     ]
 }
 
-/// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与默认 3080，
-/// 绝不把外部已存在的实例（如 3088）当作我们的服务
+/// 通过进程身份探测正在运行的 dsh web 服务，返回其实际监听端口对应的候选 URL。
+///
+/// 使用者可能以任意端口启动服务（如 `dsh web --port 9000`，或 `--port 0`
+/// 由系统随机分配），固定端口探测会漏掉这些实例。这里枚举进程命令行
+/// （含 "dsh" 且含 " web" 的进程），解析其监听端口；`--port 0` 或无 `--port`
+/// 时用 netstat 反查该进程实际监听的端口。
+///
+/// 会排除本应用（harness-launcher）自身派生的服务进程（父链上存在
+/// harness-launcher.exe），避免重复计入自家子进程；并过滤掉 dev 调试端口
+/// 6088，防止正式版误连调试中的服务。仅 Windows 实现；其他平台返回空。
+/// 注意：仅 release 编译并调用（dev 固定 6088，不做动态识别）。
+#[cfg(not(debug_assertions))]
+fn detect_dsh_process_urls() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        const SCRIPT: &str = r#"
+$out = @()
+function Test-IsLauncherChild([int]$ProcId) {
+  $cur = $ProcId
+  for ($i = 0; $i -lt 8; $i++) {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+    if (-not $p) { return $false }
+    if ($p.Name -eq 'harness-launcher.exe') { return $true }
+    $cur = $p.ParentProcessId
+  }
+  return $false
+}
+$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+  $_.CommandLine -and $_.CommandLine -match 'dsh' -and $_.CommandLine -match ' web( |$)' -and
+  -not (Test-IsLauncherChild $_.ProcessId)
+}
+foreach ($p in $procs) {
+  $port = $null
+  if ($p.CommandLine -match '--port[ =](\d+)') { $port = [int]$Matches[1] }
+  if (-not $port -or $port -eq 0) {
+    $ls = Get-NetTCPConnection -State Listen -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty LocalPort
+    foreach ($lp in $ls) { $out += [string]$lp }
+  } else {
+    $out += [string]$port
+  }
+}
+$out | Sort-Object -Unique
+"#;
+        let output = hide_window(
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .output();
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut urls: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if let Ok(port) = line.trim().parse::<u16>() {
+                if port == 0 || port == 6088 {
+                    // 0 = 无监听；6088 = dev 调试端口，正式版一律跳过
+                    continue;
+                }
+                urls.push(format!("http://127.0.0.1:{port}"));
+                urls.push(format!("http://localhost:{port}"));
+            }
+        }
+        urls.sort();
+        urls.dedup();
+        urls
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与本应用的默认端口，
+/// 绝不把外部已存在的实例（如其他端口）当作我们的服务
 fn child_candidates(pending: &[String]) -> Vec<String> {
+    let port = service_port();
     let mut c = pending.to_vec();
-    c.push("http://127.0.0.1:3080".into());
-    c.push("http://localhost:3080".into());
+    c.push(format!("http://127.0.0.1:{port}"));
+    c.push(format!("http://localhost:{port}"));
     c.dedup();
     c
 }
@@ -412,7 +505,16 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     candidates.extend(default_candidates());
     candidates.dedup();
 
-    let url = probe_parallel(&candidates, 400);
+    let mut url = probe_parallel(&candidates, 400);
+    // 仅 release 在固定端口未命中时按进程身份探测（使用者以自定义端口启动的实例）；
+    // dev 固定 6088，不做动态识别，避免与用户自启的 dsh 进程/正式版实例冲突
+    #[cfg(not(debug_assertions))]
+    if url.is_none() {
+        let extra = detect_dsh_process_urls();
+        if !extra.is_empty() {
+            url = probe_parallel(&extra, 400);
+        }
+    }
     if let Some(ref u) = url {
         *state.detected_url.lock().unwrap() = Some(u.clone());
     }
@@ -482,6 +584,8 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     let mut cmd = Command::new(&dsh.program);
     cmd.args(&dsh.args)
         .arg("web")
+        .arg("--port")
+        .arg(service_port().to_string())
         .current_dir(&home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

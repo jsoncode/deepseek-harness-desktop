@@ -44,9 +44,13 @@ export default function Terminal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, phase]);
 
-  // 运行中 → 自动进入预览页
+  // 仅当本页参与的启动流程（starting → running）才自动进入预览页；
+  // 进入页面时服务已在运行（phase=running）则不跳转，避免打断查看日志
+  const prevPhase = useRef(phase);
   useEffect(() => {
-    if (phase === "running") {
+    const prev = prevPhase.current;
+    prevPhase.current = phase;
+    if (phase === "running" && prev === "starting") {
       const t = setTimeout(() => navigate("/preview"), 1200);
       return () => clearTimeout(t);
     }

@@ -784,6 +784,25 @@ body {
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border);
   user-select: none;
+  /* 原生窗口拖拽（WebView2/Chromium 在操作系统层处理，无 JS 模态循环，
+     避免 JS startDragging 吞掉鼠标事件导致点击失效甚至系统卡死） */
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* 标题栏内的交互元素必须标记为 no-drag，否则点击会被窗口拖拽吞掉
+   （.url-pill 仅作展示、无需输入，保持可拖拽以扩大拖动区域） */
+.titlebar button,
+.titlebar input,
+.titlebar a,
+.titlebar select,
+.titlebar textarea,
+.titlebar label,
+.titlebar .window-controls,
+.titlebar .theme-switch,
+.titlebar .ant-dropdown-trigger {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .titlebar-left {

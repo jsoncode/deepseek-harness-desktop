@@ -1,7 +1,5 @@
 import { App as AntApp } from "antd";
-import { type MouseEvent } from "react";
 import { useNavigate } from "react-router";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import logo from "../assets/logo.svg";
 import { ArrowLeftIcon, CopyIcon, ExternalIcon, RefreshIcon } from "./icons";
 import ThemeSwitch from "./ThemeSwitch";
@@ -9,10 +7,6 @@ import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
-
-/** 交互元素 —— 不得触发窗口拖拽 */
-const NO_DRAG_CLOSEST =
-  "button, input, a, select, textarea, label, .url-pill, .window-controls, .theme-switch, .ant-dropdown-trigger";
 
 export default function TitleBar() {
   const navigate = useNavigate();
@@ -30,19 +24,8 @@ export default function TitleBar() {
     }
   };
 
-  const onTitlebarMouseDown = (e: MouseEvent) => {
-    if (e.button !== 0) return;
-    const target = e.target as Element;
-    if (target.closest(NO_DRAG_CLOSEST)) return;
-    if (e.detail === 2) {
-      void getCurrentWindow().toggleMaximize().catch(() => undefined);
-      return;
-    }
-    void getCurrentWindow().startDragging().catch(() => undefined);
-  };
-
   return (
-    <header className="titlebar" onMouseDown={onTitlebarMouseDown}>
+    <header className="titlebar">
       <div className="titlebar-left">
         <img src={logo} alt="Harness" draggable={false} className="titlebar-logo" />
         <span className="titlebar-name">Harness Launcher</span>

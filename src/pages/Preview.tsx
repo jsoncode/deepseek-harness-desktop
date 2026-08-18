@@ -11,12 +11,19 @@ export default function Preview() {
   const { message } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
+  const initialized = useAppStore((s) => s.initialized);
+  const init = useAppStore((s) => s.init);
   const reloadKey = useUiStore((s) => s.reloadKey);
   const bumpReload = useUiStore((s) => s.bumpReload);
 
   const [loaded, setLoaded] = useState(false);
   const [alive, setAlive] = useState(true);
   const [rechecking, setRechecking] = useState(false);
+
+  // 刷新/直接进入本页时同步应用状态（否则 url 一直为空，误报"未检测到服务"）
+  useEffect(() => {
+    if (!initialized) void init();
+  }, [initialized, init]);
 
   // 服务健康轮询
   useEffect(() => {
@@ -58,13 +65,14 @@ export default function Preview() {
     }
   }, [url, message, bumpReload]);
 
-  // 无 URL → 空态
+  // 无 URL → 空态（状态同步中显示"正在检测"，避免刷新后误报未检测到服务）
   if (!url) {
+    const syncing = !initialized || phase === "checking";
     return (
       <div className="page preview">
         <div className="empty-box">
-          <div className="big">🛰</div>
-          <div>未检测到本地服务地址</div>
+          <div className="big">{syncing ? <span className="spinner-ring" /> : "🛰"}</div>
+          <div>{syncing ? "正在检测本地服务…" : "未检测到本地服务地址"}</div>
           <button className="btn-secondary" onClick={() => navigate("/")}>
             <ArrowLeftIcon size={14} /> 返回启动页
           </button>

@@ -1,12 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Tauri 期望固定的 dev server 端口，strictPort 保证 5173
+// Tauri 期望固定的 dev server 端口，strictPort 保证 6089（dev UI；服务端口为 6088）
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: {
-    port: 5173,
+    port: 6089,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],
