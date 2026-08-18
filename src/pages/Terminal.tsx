@@ -56,11 +56,11 @@ export default function Terminal() {
     }
   }, [phase, navigate]);
 
-  // 自动滚动到底部
+  // 自动滚动到底部（依赖最后一条日志 id：日志达到上限后 length 恒定，length 不再触发）
   useEffect(() => {
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [logs.length]);
+  }, [logs.at(-1)?.id]);
 
   const busy = phase === "installing" || phase === "starting";
   const statusClass =
