@@ -237,7 +237,6 @@ export const useAppStore = create<AppStore>((set, get) => {
     reset: () => {
       set({
         phase: "idle",
-        logs: [],
         url: null,
         error: null,
         serviceRunning: false,
