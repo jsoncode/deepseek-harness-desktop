@@ -45,6 +45,8 @@ let wired = false;
 const MAX_LOGS = 3000;
 /** 日志截断提示（截断期间顶部恒有一条：每次截断重建，旧提示随最旧日志一起被丢弃） */
 const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
+/** 重新启动服务时的日志分隔线 */
+const RESTART_SEPARATOR = "────── 重新启动服务 ──────";
 
 function now(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -194,7 +196,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     startFlow: async () => {
       const { phase, dshInstalled } = get();
       if (phase === "installing" || phase === "starting" || phase === "running") return;
-      set({ logs: [], error: null });
+      if (get().logs.length > 0) {
+        get().appendLog("system", RESTART_SEPARATOR);
+      }
+      set({ error: null });
 
       if (dshInstalled) {
         get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");
