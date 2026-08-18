@@ -4,7 +4,7 @@
 
 **目标：** 服务启动/重启/重试时不再清空终端日志，历史日志保留到应用窗口关闭（会话内保留），多次运行的日志用分隔线区分，并对日志总量做上限保护。
 
-**架构：** 全部改动集中在 `src/store/useAppStore.ts`（zustand store，日志存于内存）。`startFlow()` 与 `reset()` 移除对 `logs` 的清空；`startFlow()` 在已有日志时先追加一条分隔线；`appendLog()` 增加 3000 条上限，截断期间在保留日志顶部固定一条提示。无 Rust 改动、无 UI 改动。
+**架构：** 改动集中在 `src/store/useAppStore.ts`（zustand store，日志存于内存）与 `src/pages/Terminal.tsx`（自动滚动依赖修正）。`startFlow()` 与 `reset()` 移除对 `logs` 的清空；`startFlow()` 在已有日志时先追加一条分隔线；`appendLog()` 增加 3000 条上限（保留最新、顶部固定一条截断提示）；Terminal 自动滚动依赖改为最后一条日志 id（上限后 length 恒定不再触发）。无 Rust 改动。
 
 **技术栈：** React 19 + zustand 5 + TypeScript（strict）+ Vite 8（Tauri v2 桌面壳）。
 
@@ -45,25 +45,22 @@ const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
         text,
       };
       set((s) => {
-        let logs = [...s.logs, entry];
-        if (logs.length > MAX_LOGS) {
-          logs = logs.slice(logs.length - MAX_LOGS);
-          const head = logs[0];
-          const hasNote =
-            head.stream === "system" && head.text === TRUNCATED_NOTE;
-          if (!hasNote) {
-            logs = [
-              { id: ++logSeq, time: now(), stream: "system", text: TRUNCATED_NOTE },
-              ...logs.slice(0, MAX_LOGS - 1),
-            ];
-          }
-        }
-        return { logs };
+        const all = [...s.logs, entry];
+        if (all.length <= MAX_LOGS) return { logs: all };
+        // 超过上限：顶部放一条截断提示，保留最近 MAX_LOGS-1 条真实日志（丢弃最旧）
+        const note: LogEntry = {
+          id: ++logSeq,
+          time: now(),
+          stream: "system",
+          text: TRUNCATED_NOTE,
+        };
+        return { logs: [note, ...all.slice(all.length - (MAX_LOGS - 1))] };
       });
     },
 ```
 
-说明：追加后若超过 `MAX_LOGS`，先保留最近 `MAX_LOGS` 条；若头部已是指定提示则复用（提示固定在顶部、不随每次追加重复插入），否则在顶部插入提示并挤掉最旧一条，保证总量不超过 `MAX_LOGS`。
+说明：追加后若不超过 `MAX_LOGS` 直接返回；超过时，顶部放一条截断提示（截断期间始终恰好一条，重建式固定），并保留**最近** `MAX_LOGS - 1` 条真实日志（丢弃最旧），总量恒为 `MAX_LOGS`。
+**注意：** 取"最近 N-1 条"必须用尾部 slice `all.slice(all.length - (MAX_LOGS - 1))`，不能写成 `slice(0, MAX_LOGS - 1)`——那会保留窗口头部、丢掉刚追加的最新一条（初版计划曾犯此错，被代码审查发现）。
 
 - [ ] **步骤 3：类型检查**
 
@@ -169,7 +166,52 @@ git commit -m "feat: 重试/重启前 reset 不再清空日志"
 
 ---
 
-### 任务 4：完整构建与手动验证
+### 任务 4：Terminal 页自动滚动在日志达到上限后仍生效
+
+**文件：**
+- 修改：`src/pages/Terminal.tsx`（自动滚动 effect，第 59-63 行）
+
+背景：日志达到 `MAX_LOGS` 上限后 `logs.length` 恒定不变，原 effect 依赖 `[logs.length]` 不再触发，新日志在底部出现却看不到。改为依赖最后一条日志的 `id`，每次追加仍会滚动到底部。
+
+- [ ] **步骤 1：修改自动滚动依赖**
+
+将 `src/pages/Terminal.tsx` 的自动滚动 effect（当前第 59-63 行）：
+
+```ts
+  // 自动滚动到底部
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logs.length]);
+```
+
+替换为：
+
+```ts
+  // 自动滚动到底部（依赖最后一条日志 id：日志达到上限后 length 恒定，length 不再触发）
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logs.at(-1)?.id]);
+```
+
+（`Array.prototype.at` 属 ES2022，tsconfig `lib` 已含 `ES2022`。）
+
+- [ ] **步骤 2：类型检查**
+
+运行：`pnpm exec tsc --noEmit`
+预期：无错误输出，退出码 0
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add src/pages/Terminal.tsx
+git commit -m "fix: 日志达到上限后自动滚动仍生效"
+```
+
+---
+
+### 任务 5：完整构建与手动验证
 
 **文件：** 无改动（纯验证）
 
@@ -208,7 +250,8 @@ for (let i = 0; i < 3001; i++) window.__store.getState().appendLog("stdout", "li
 
 2. 执行 `window.__store.getState().logs.length`，预期：`3000`
 3. 执行 `window.__store.getState().logs[0].text`，预期：`（历史日志过长，已截断早期内容）`
-4. 再追加一条：`window.__store.getState().appendLog("stdout", "extra")`，预期：`logs.length` 仍为 `3000`，且日志中截断提示只有一条（提示固定在顶部，不重复插入）
+4. 执行 `window.__store.getState().logs[logs.length - 1].text`，预期：`line 3000`（**最新一条必须保留**——截断正确性的关键断言，防止"丢最新"回归）
+5. 再追加一条：`window.__store.getState().appendLog("stdout", "extra")`，预期：`logs.length` 仍为 `3000`，`logs[logs.length - 1].text` 为 `extra`，且截断提示始终只有一条（过滤统计 `logs.filter(l => l.text === "（历史日志过长，已截断早期内容）").length === 1`）
 
 - [ ] **步骤 6：收尾提交**
 
