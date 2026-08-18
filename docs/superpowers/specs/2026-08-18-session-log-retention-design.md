@@ -17,7 +17,7 @@
 
 ## 方案（用户批准的方案 A）
 
-改动集中在 `src/store/useAppStore.ts`（日志上限/截断/保留逻辑）与 `src/pages/Terminal.tsx`（自动滚动依赖修正，见 3.2），无 Rust 改动。
+改动集中在 `src/store/useAppStore.ts`（日志上限/截断/保留逻辑）与 `src/pages/Terminal.tsx`（自动滚动依赖修正，见 3.1），无 Rust 改动。
 
 ### 1. `startFlow()`：不再清空日志
 
