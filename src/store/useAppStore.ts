@@ -41,6 +41,11 @@ interface AppStore {
 let logSeq = 0;
 let wired = false;
 
+/** 会话内日志上限：超出后丢弃最旧日志 */
+const MAX_LOGS = 3000;
+/** 日志截断提示（截断期间顶部恒有一条：每次截断重建，旧提示随最旧日志一起被丢弃） */
+const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
+
 function now(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
@@ -118,7 +123,18 @@ export const useAppStore = create<AppStore>((set, get) => {
         stream,
         text,
       };
-      set((s) => ({ logs: [...s.logs, entry] }));
+      set((s) => {
+        const all = [...s.logs, entry];
+        if (all.length <= MAX_LOGS) return { logs: all };
+        // 超过上限：顶部放一条截断提示，保留最近 MAX_LOGS-1 条真实日志（丢弃最旧）
+        const note: LogEntry = {
+          id: ++logSeq,
+          time: now(),
+          stream: "system",
+          text: TRUNCATED_NOTE,
+        };
+        return { logs: [note, ...all.slice(all.length - (MAX_LOGS - 1))] };
+      });
     },
 
     setPhase: (phase) => set({ phase }),
