@@ -136,7 +136,7 @@ jobs:
           - 模拟终端实时展示安装与启动日志，服务就绪后自动进入预览页
           - 预览页支持刷新 / 复制地址 / 浏览器打开
 
-          完整说明见 [README](../blob/master/README.md)。
+          完整说明见 [README](../blob/main/README.md)。
           EOF
           gh release create "$TAG" \
             --title "DeepSeek Harness Desktop ${TAG}" \
