@@ -1,6 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
+import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 export default function Launch() {
@@ -71,6 +72,12 @@ export default function Launch() {
         <span className="dot" />
         <span>{statusText}</span>
       </div>
+
+      {!tauri ? (
+        <div className="launch-preview-note">
+          🖥 浏览器预览模式：仅界面预览，启动/停止等服务操作需在桌面应用内使用
+        </div>
+      ) : null}
 
       <div className="launch-actions">
         <button

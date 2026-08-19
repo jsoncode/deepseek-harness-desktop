@@ -1,9 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 // ---------------------------------------------------------------------------
 // 与 Rust 后端通信的桥接层
 // ---------------------------------------------------------------------------
+
+/** 是否运行在 Tauri 桌面运行时内（浏览器直接访问 vite dev server 预览时为 false） */
+export const tauri = isTauri();
 
 export interface LogLine {
   stream: string; // "system" | "stdout" | "stderr"
@@ -35,18 +38,28 @@ export const EVENTS = {
   url: "dsh://url",
 } as const;
 
+/** 浏览器预览模式下的统一提示 */
+const NOT_TAURI_MSG = "浏览器预览模式：该操作需在桌面应用内执行";
+
+/** 非 Tauri 环境（浏览器预览）时拒绝调用，避免 invoke 访问 undefined 抛原生 TypeError */
+function requireTauri<T>(fn: () => Promise<T>): Promise<T> {
+  if (!tauri) return Promise.reject(new Error(NOT_TAURI_MSG));
+  return fn();
+}
+
 export const api = {
-  appStatus: () => invoke<StatusPayload>("app_status"),
-  probeService: (url: string) => invoke<boolean>("probe_service", { url }),
-  installDsh: () => invoke<void>("install_dsh"),
-  startDshWeb: () => invoke<void>("start_dsh_web"),
-  stopDshWeb: () => invoke<void>("stop_dsh_web"),
-  openInBrowser: (url: string) => invoke<void>("open_in_browser", { url }),
+  appStatus: () => requireTauri(() => invoke<StatusPayload>("app_status")),
+  probeService: (url: string) => requireTauri(() => invoke<boolean>("probe_service", { url })),
+  installDsh: () => requireTauri(() => invoke<void>("install_dsh")),
+  startDshWeb: () => requireTauri(() => invoke<void>("start_dsh_web")),
+  stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
+  openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
 };
 
 export async function onEvent<T>(
   event: string,
   handler: (payload: T) => void,
 ): Promise<() => void> {
+  if (!tauri) return () => undefined; // 浏览器预览：无事件源，静默跳过
   return listen<T>(event, (e) => handler(e.payload));
 }

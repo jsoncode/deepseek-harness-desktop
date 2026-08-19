@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, EVENTS, onEvent, type ExitPayload, type LogLine, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, type ExitPayload, type LogLine, type StatusPayload, type UrlPayload } from "../lib/tauri";
 
 // ---------------------------------------------------------------------------
 // 应用状态机：checking → idle | installing → starting → running
@@ -145,6 +145,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       wireEvents();
       if (get().initialized) return;
       set({ phase: "checking" });
+      if (!tauri) {
+        // 浏览器预览模式：无 Rust 后端，保持空闲态，避免误报"启动失败"
+        set({ phase: "idle", initialized: true });
+        return;
+      }
       try {
         const s: StatusPayload = await api.appStatus();
         set({
@@ -200,6 +205,11 @@ export const useAppStore = create<AppStore>((set, get) => {
         get().appendLog("system", RESTART_SEPARATOR);
       }
       set({ error: null });
+
+      if (!tauri) {
+        get().appendLog("system", "浏览器预览模式：启动/停止服务需在桌面应用内操作");
+        return;
+      }
 
       if (dshInstalled) {
         get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");

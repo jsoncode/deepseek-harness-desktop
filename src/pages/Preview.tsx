@@ -16,7 +16,6 @@ export default function Preview() {
   const reloadKey = useUiStore((s) => s.reloadKey);
   const bumpReload = useUiStore((s) => s.bumpReload);
 
-  const [loaded, setLoaded] = useState(false);
   const [alive, setAlive] = useState(true);
   const [rechecking, setRechecking] = useState(false);
 
@@ -45,10 +44,8 @@ export default function Preview() {
     };
   }, [url]);
 
-  // 标题栏"刷新"→ reloadKey 变化 / url 变化 → 重置加载态并重挂 iframe
-  useEffect(() => {
-    setLoaded(false);
-  }, [reloadKey, url]);
+  // 标题栏"刷新"→ reloadKey / url 变化 → iframe 的 key 变化，自动重挂载
+  // （服务自身带有加载效果，不再叠加外层 loading 遮罩）
 
   const recheck = useCallback(async () => {
     if (!url) return;
@@ -88,7 +85,6 @@ export default function Preview() {
           key={`${url}|${reloadKey}`}
           src={url}
           title="Harness Preview"
-          onLoad={() => setLoaded(true)}
           style={{
             position: "absolute",
             inset: 0,
@@ -121,13 +117,6 @@ export default function Preview() {
                   返回启动页
                 </button>
               </div>
-            </div>
-          </div>
-        ) : !loaded ? (
-          <div className="preview-overlay">
-            <div className="preview-loading">
-              <div className="spinner-ring" />
-              <div>正在加载 {url} …</div>
             </div>
           </div>
         ) : null}

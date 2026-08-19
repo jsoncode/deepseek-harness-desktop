@@ -25,7 +25,7 @@ pub fn run() {
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
             let browser = MenuItem::with_id(app, "browser", "浏览器中打开", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", quit_label(), true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &browser, &quit])?;
 
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
@@ -69,6 +69,17 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// 托盘"退出"菜单文案：调试构建（tauri dev / debug）显示"退出调试"，
+/// 与正式版"退出"区分——两者通过 6088/3080 端口完全隔离（见 dsh::service_port），
+/// 避免调试时误以为退出的是正式版服务。
+fn quit_label() -> &'static str {
+    if cfg!(debug_assertions) {
+        "退出调试"
+    } else {
+        "退出"
+    }
 }
 
 /// 恢复主窗口到前台（托盘"打开"、左键单击、单实例回调共用）

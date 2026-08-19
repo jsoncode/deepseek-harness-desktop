@@ -505,6 +505,11 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     candidates.extend(default_candidates());
     candidates.dedup();
 
+    // dev 下不重赋值 → 不可变绑定，避免 unused_mut 警告；
+    // release 下可能按进程身份复探并重赋值 → 可变绑定
+    #[cfg(debug_assertions)]
+    let url = probe_parallel(&candidates, 400);
+    #[cfg(not(debug_assertions))]
     let mut url = probe_parallel(&candidates, 400);
     // 仅 release 在固定端口未命中时按进程身份探测（使用者以自定义端口启动的实例）；
     // dev 固定 6088，不做动态识别，避免与用户自启的 dsh 进程/正式版实例冲突
