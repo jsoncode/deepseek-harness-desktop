@@ -49,8 +49,11 @@ export default function WindowControls() {
       >
         <MinusIcon size={14} />
       </button>
+      {/* id="win-maximize"：Windows 11 上 snap-layout 插件在此处放置原生 HTMAXBUTTON 命中区，
+          悬停触发系统磁吸布局预览，点击走原生最大化/还原；onClick 仅作为非 Windows 兜底 */}
       <button
         type="button"
+        id="win-maximize"
         className="win-btn"
         title={maximized ? "还原" : "最大化"}
         aria-label={maximized ? "还原" : "最大化"}

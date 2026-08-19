@@ -13,6 +13,14 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+        // Windows 11 无边框窗口的 Snap Layouts：在自绘标题栏"最大化"按钮上放一个
+        // 原生 HTMAXBUTTON 命中区，悬停触发系统磁吸布局预览、点击走原生最大化/还原。
+        // 非 Windows / Win10 下为 no-op，其余平台不受影响。
+        .plugin(
+            tauri_plugin_snap_layout::init()
+                .button_id("win-maximize")
+                .build(),
+        )
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             dsh::app_status,

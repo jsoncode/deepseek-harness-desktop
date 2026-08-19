@@ -703,9 +703,14 @@ body {
   cursor: not-allowed;
 }
 
-/* 重启中：图标旋转提示 */
-.restart-btn.restarting svg {
-  animation: spinSlow 1s linear infinite;
+/* 重启中：小号加载环（替代旋转箭头图标——方向性图标旋转会产生怪异动效） */
+.btn-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--danger);
+  animation: spinSlow 0.9s linear infinite;
 }
 
 .url-pill {
@@ -909,6 +914,14 @@ body {
 }
 
 .win-btn:hover {
+  background: var(--panel-strong);
+  color: var(--text-1);
+}
+
+/* 最大化按钮：Windows 11 上 snap-layout 的原生命中区会拦截指针事件，DOM :hover 不触发，
+   由插件同步 .is-hovered 类；浏览器预览（非 Tauri）时 :hover 仍正常生效 */
+#win-maximize:hover,
+#win-maximize.is-hovered {
   background: var(--panel-strong);
   color: var(--text-1);
 }

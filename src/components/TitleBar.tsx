@@ -65,7 +65,8 @@ export default function TitleBar() {
           disabled={restarting || busy}
           onClick={() => void handleRestart()}
         >
-          <RestartIcon />
+          {/* 重启中：显示小号加载环，不旋转方向性箭头图标（避免怪异动效） */}
+          {restarting ? <span className="btn-spinner" aria-hidden="true" /> : <RestartIcon />}
         </button>
         <button className="icon-btn" type="button" title="返回启动页" aria-label="返回启动页" onClick={() => navigate("/")}>
           <ArrowLeftIcon />
