@@ -118,7 +118,7 @@ jobs:
           TAG="${{ steps.ver.outputs.tag }}"
           git tag "$TAG" 2>/dev/null || true
           cat > /tmp/release-notes.md <<EOF
-          ## Harness Launcher ${TAG}
+          ## DeepSeek Harness Desktop ${TAG}
 
           DeepSeek Harness 本地服务桌面启动器：一键安装/启动 dsh web，并在内嵌预览页中打开本地服务。
 
@@ -139,7 +139,7 @@ jobs:
           完整说明见 [README](../blob/master/README.md)。
           EOF
           gh release create "$TAG" \
-            --title "Harness Launcher ${TAG}" \
+            --title "DeepSeek Harness Desktop ${TAG}" \
             --notes-file /tmp/release-notes.md
           echo "Published release $TAG"
         env:
@@ -213,10 +213,10 @@ jobs:
         run: |
           VERSION="${{ needs.create-release.outputs.tag }}"
           VERSION="${VERSION#v}"
-          APP="src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/Harness Launcher.app"
+          APP="src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/DeepSeek Harness Desktop.app"
           pkgbuild --component "$APP" --install-location /Applications \
-            "Harness Launcher_${VERSION}_${{ matrix.arch }}.pkg"
-          echo "PKG_FILE=Harness Launcher_${VERSION}_${{ matrix.arch }}.pkg" >> "$GITHUB_ENV"
+            "DeepSeek Harness Desktop_${VERSION}_${{ matrix.arch }}.pkg"
+          echo "PKG_FILE=DeepSeek Harness Desktop_${VERSION}_${{ matrix.arch }}.pkg" >> "$GITHUB_ENV"
 
       - name: Upload DMG + PKG (macOS)
         if: matrix.platform == 'macos-latest'

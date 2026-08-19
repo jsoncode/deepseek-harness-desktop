@@ -24,7 +24,7 @@
 
 常驻组件，放在 `App.tsx` 的 `<HashRouter>` 外层，所有页面共用：
 
-- **左侧**：现有 logo（`src/assets/logo.svg`）+ "Harness Launcher" 文本
+- **左侧**：现有 logo（`src/assets/logo.svg`）+ "DeepSeek Harness Desktop" 文本
 - **中间导航条**（由 `Preview.tsx` 的 `.preview-toolbar` 上移而来）：
   - 返回：路由回启动页（`navigate("/")`）；已在启动页时点击无操作
   - 地址栏：当前服务 URL（`useAppStore.url`）；无 URL 时显示"未检测到服务"

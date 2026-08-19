@@ -1,7 +1,7 @@
 # Screenshots / 界面预览
 
-> Harness Launcher — screenshots of the desktop shell (1280 × 905).
-> Harness Launcher 桌面壳界面截图（1280 × 905）。
+> DeepSeek Harness Desktop — screenshots of the desktop shell (1280 × 905).
+> DeepSeek Harness Desktop 桌面壳界面截图（1280 × 905）。
 
 ---
 

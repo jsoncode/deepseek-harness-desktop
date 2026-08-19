@@ -236,7 +236,7 @@ pub fn probe_url(url: &str, timeout_ms: u64) -> bool {
     for addr in addrs {
         if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)) {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
-            let req = format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: harness-launcher\r\nConnection: close\r\n\r\n");
+            let req = format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: deepseek-harness-desktop\r\nConnection: close\r\n\r\n");
             let _ = stream.write_all(req.as_bytes());
             let mut buf = [0u8; 32];
             if let Ok(n) = stream.read(&mut buf) {
@@ -293,8 +293,8 @@ fn default_candidates() -> Vec<String> {
 /// （含 "dsh" 且含 " web" 的进程），解析其监听端口；`--port 0` 或无 `--port`
 /// 时用 netstat 反查该进程实际监听的端口。
 ///
-/// 会排除本应用（harness-launcher）自身派生的服务进程（父链上存在
-/// harness-launcher.exe），避免重复计入自家子进程；并过滤掉 dev 调试端口
+/// 会排除本应用（deepseek-harness-desktop）自身派生的服务进程（父链上存在
+/// deepseek-harness-desktop.exe），避免重复计入自家子进程；并过滤掉 dev 调试端口
 /// 6088，防止正式版误连调试中的服务。仅 Windows 实现；其他平台返回空。
 /// 注意：仅 release 编译并调用（dev 固定 6088，不做动态识别）。
 #[cfg(not(debug_assertions))]
@@ -308,7 +308,7 @@ function Test-IsLauncherChild([int]$ProcId) {
   for ($i = 0; $i -lt 8; $i++) {
     $p = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
     if (-not $p) { return $false }
-    if ($p.Name -eq 'harness-launcher.exe') { return $true }
+    if ($p.Name -eq 'deepseek-harness-desktop.exe') { return $true }
     $cur = $p.ParentProcessId
   }
   return $false

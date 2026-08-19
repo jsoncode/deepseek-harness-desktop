@@ -1,4 +1,4 @@
-/* 通过 WebView2 CDP 验证 Harness Launcher 页面状态（开发用临时脚本） */
+/* 通过 WebView2 CDP 验证 DeepSeek Harness Desktop 页面状态（开发用临时脚本） */
 const { chromium } = require("C:/Users/Chris/AppData/Local/pnpm/global/5/node_modules/playwright");
 
 (async () => {

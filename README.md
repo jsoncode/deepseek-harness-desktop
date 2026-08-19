@@ -1,4 +1,4 @@
-# Harness Launcher
+# DeepSeek Harness Desktop
 
 > A lightweight desktop shell for your local **DeepSeek Harness** web service — install, launch, monitor and preview it with one click, then keep it alive in the system tray.
 
@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-8892b0)]()
 [![Release](https://img.shields.io/github/v/release/jsoncode/deepseek-harness-desktop)](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest)
 
-![Harness Launcher — dark preview](docs/assets/dark.png)
+![DeepSeek Harness Desktop — dark preview](docs/assets/dark.png)
 
 📸 [See all screenshots →](docs/preview.md)
 
@@ -37,7 +37,7 @@
 
 ```bash
 pnpm install
-pnpm tauri:dev        # dev mode (Vite + Tauri), app id: com.harness.launcher.dev
+pnpm tauri:dev        # dev mode (Vite + Tauri), app id: com.deepseek.harness.desktop.dev
 pnpm tauri:debug      # dev mode with RUST_BACKTRACE + WebView2 logging
 ```
 
@@ -110,7 +110,7 @@ libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll
 
 - `dsh web` listens on `127.0.0.1:3080` by default (release); the launcher confirms readiness by parsing `http://...` lines from its stdout plus TCP probing.
 - The preview embeds the local service via iframe; the app CSP allows `frame-src http://127.0.0.1:* http://localhost:*`.
-- Debug builds are fully isolated: app id `com.harness.launcher.dev`, service port 6088, UI port 6089.
+- Debug builds are fully isolated: app id `com.deepseek.harness.desktop.dev`, service port 6088, UI port 6089.
 
 ## 📖 Readme in other languages
 

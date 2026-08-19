@@ -1,4 +1,4 @@
-# Harness Launcher
+# DeepSeek Harness Desktop
 
 > 本地 **DeepSeek Harness** 网页服务的轻量桌面壳——一键安装、启动、监控与内嵌预览本地服务，关闭后驻留系统托盘持续运行。
 
@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-8892b0)]()
 [![Release](https://img.shields.io/github/v/release/jsoncode/deepseek-harness-desktop)](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest)
 
-![Harness Launcher — 暗色预览](docs/assets/dark.png)
+![DeepSeek Harness Desktop — 暗色预览](docs/assets/dark.png)
 
 📸 [查看全部界面截图 →](docs/preview.md)
 
@@ -37,7 +37,7 @@
 
 ```bash
 pnpm install
-pnpm tauri:dev        # 开发模式（Vite + Tauri），app id: com.harness.launcher.dev
+pnpm tauri:dev        # 开发模式（Vite + Tauri），app id: com.deepseek.harness.desktop.dev
 pnpm tauri:debug      # 开发模式 + RUST_BACKTRACE / WebView2 日志
 ```
 
@@ -110,7 +110,7 @@ libs/               离线 NSIS 工具链（nsis-3.11.zip + nsis_tauri_utils.dll
 
 - `dsh web` 默认监听 `127.0.0.1:3080`（正式版）；应用通过解析其 stdout 的 `http://...` 行 + TCP 探活确认服务就绪。
 - 预览页使用 iframe 内嵌（本地服务无 `X-Frame-Options` 限制）；应用 CSP 已放行 `frame-src http://127.0.0.1:* http://localhost:*`。
-- 调试构建完全隔离：app id `com.harness.launcher.dev`、服务端口 6088、UI 端口 6089。
+- 调试构建完全隔离：app id `com.deepseek.harness.desktop.dev`、服务端口 6088、UI 端口 6089。
 
 ## 📖 其他语言
 

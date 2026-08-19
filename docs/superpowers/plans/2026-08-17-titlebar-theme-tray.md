@@ -613,7 +613,7 @@ export default function TitleBar() {
     <header className="titlebar" onMouseDown={onTitlebarMouseDown}>
       <div className="titlebar-left">
         <img src={logo} alt="Harness" draggable={false} className="titlebar-logo" />
-        <span className="titlebar-name">Harness Launcher</span>
+        <span className="titlebar-name">DeepSeek Harness Desktop</span>
       </div>
 
       <div className="titlebar-center">
@@ -1146,7 +1146,7 @@ git commit -m "feat: 标题栏/窗口控制样式 + 浅色主题变量与覆盖"
 - [ ] **步骤 3：完整打包**
 
 运行（仓库根目录）：`pnpm tauri:build:win`
-预期：`Finished 1 bundle at: ...\Harness Launcher_0.1.0_x64-setup.exe`
+预期：`Finished 1 bundle at: ...\DeepSeek Harness Desktop_0.1.0_x64-setup.exe`
 
 - [ ] **步骤 4：Commit（如构建过程有残留修改）**
 
@@ -1166,7 +1166,7 @@ git commit -m "chore: 全量构建验证"
 
 - [ ] **步骤 1：安装并启动**
 
-运行 `src-tauri\target\release\bundle\nsis\Harness Launcher_0.1.0_x64-setup.exe` 安装并启动（或直接运行 `src-tauri\target\release\harness-launcher.exe`）。
+运行 `src-tauri\target\release\bundle\nsis\DeepSeek Harness Desktop_0.1.0_x64-setup.exe` 安装并启动（或直接运行 `src-tauri\target\release\deepseek-harness-desktop.exe`）。
 
 - [ ] **步骤 2：标题栏验证**
 

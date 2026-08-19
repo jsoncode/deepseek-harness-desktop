@@ -1424,7 +1424,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "harness-launcher"
+name = "deepseek-harness-desktop"
 version = "0.1.3"
 dependencies = [
  "serde",

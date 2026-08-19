@@ -65,7 +65,7 @@ export default function Launch() {
         </div>
       </div>
 
-      <h1 className="launch-title">Harness Launcher</h1>
+      <h1 className="launch-title">DeepSeek Harness Desktop</h1>
       <p className="launch-subtitle">DeepSeek Harness · 本地服务启动器</p>
 
       <div className={statusClass}>

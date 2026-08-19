@@ -149,6 +149,6 @@ git(['push', 'origin', tag])
 
 console.log(`[release-tag] Done — ${tag} pushed. GitHub Release workflow is running.`)
 notify(
-  'Harness Launcher 发布成功',
+  'DeepSeek Harness Desktop 发布成功',
   `v${version} 已推送，GitHub Release 工作流正在构建…`,
 )

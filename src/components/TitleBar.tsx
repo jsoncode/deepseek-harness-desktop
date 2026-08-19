@@ -53,7 +53,7 @@ export default function TitleBar() {
     <header className="titlebar">
       <div className="titlebar-left">
         <img src={logo} alt="Harness" draggable={false} className="titlebar-logo" />
-        <span className="titlebar-name">Harness Launcher</span>
+        <span className="titlebar-name">DeepSeek Harness Desktop</span>
       </div>
 
       <div className="titlebar-center">

@@ -55,7 +55,7 @@ function replaceCargoPackageVersion(cargoText, version) {
 
 /** Update the root crate version in Cargo.lock (keeps `--locked` builds working). */
 function replaceCargoLockRootVersion(lockText, version) {
-  const nameLine = /^\s*name\s*=\s*"harness-launcher"\s*$/m
+  const nameLine = /^\s*name\s*=\s*"deepseek-harness-desktop"\s*$/m
   const nameIdx = lockText.search(nameLine)
   if (nameIdx === -1) {
     throw new Error('Failed to find root crate in Cargo.lock')
