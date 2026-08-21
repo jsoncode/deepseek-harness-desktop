@@ -583,12 +583,15 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         &app,
         WEB_LOG_EVENT,
         "system",
-        &format!("$ {} web", dsh.display),
+        // --no-open：dsh web 默认会在服务就绪后调用系统浏览器打开 UI（见
+        // @deepseek-ai/dsh-web-app 的 openBrowser 配置），桌面壳自身以 iframe 承载 UI，必须禁用
+        &format!("$ {} web --no-open", dsh.display),
     );
 
     let mut cmd = Command::new(&dsh.program);
     cmd.args(&dsh.args)
         .arg("web")
+        .arg("--no-open")
         .arg("--port")
         .arg(service_port().to_string())
         .current_dir(&home)

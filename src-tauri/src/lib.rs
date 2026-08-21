@@ -7,6 +7,51 @@ use tauri::{
     Manager, RunEvent, WindowEvent,
 };
 
+/// 注入到 webview 所有 frame（含预览 iframe）的桥接脚本：
+/// 拦截 iframe 内 target=_blank / 跨源外链的点击，preventDefault 后 postMessage
+/// 给主框架，由前端调用 open_in_browser 用系统默认浏览器打开。
+///
+/// 为什么需要它：Windows 上 wry 的 new-window 处理（NewWindowRequested）不会为
+/// iframe 内发起的 target=_blank 请求触发（tauri-apps/wry#1593），on_new_window
+/// 只能兜住主框架自身的外链；iframe 里的外链必须由注入脚本主动拦截。
+/// WebView2 的 AddScriptToExecuteOnDocumentCreated 对所有子 frame 生效，
+/// 且注入脚本早于页面脚本执行，用捕获阶段监听可先于应用自身的点击处理。
+const EXTERNAL_LINK_BRIDGE: &str = r##"
+(() => {
+  // 只处理子框架（主框架自身的外链由 on_new_window 兜底，跳过避免重复处理）
+  if (window.top === window) return;
+  if (window.__dshLinkBridgeInstalled) return;
+  try {
+    Object.defineProperty(window, "__dshLinkBridgeInstalled", { value: true });
+  } catch { /* 忽略 */ }
+  const post = (url) => {
+    try {
+      window.parent.postMessage({ "dsh-desktop:open-url": true, url }, "*");
+    } catch { /* 跨源 postMessage 失败的概率极低，忽略 */ }
+  };
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const el = e.target;
+    const a = el && el.closest ? el.closest("a[href]") : null;
+    if (!a) return;
+    if (a.hasAttribute("download")) return; // 下载链接放行
+    const href = a.getAttribute("href") || "";
+    if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
+    let url;
+    try { url = new URL(href, window.location.href); } catch { return; }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return;
+    const target = (a.target || "").toLowerCase();
+    const isBlank = target.includes("_blank");
+    const isCrossOrigin = url.origin !== window.location.origin;
+    if (!isBlank && !isCrossOrigin) return; // 站内普通链接：留在 iframe 内正常导航
+    e.preventDefault();
+    e.stopPropagation();
+    post(url.href);
+  }, true);
+})();
+"##;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -31,6 +76,29 @@ pub fn run() {
             dsh::open_in_browser,
         ])
         .setup(|app| {
+            // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
+            // 注册 on_new_window，把页面内 target=_blank / window.open 的外链请求
+            // 转交系统默认浏览器打开（wry 默认会静默吞掉新窗口请求，外链点击无反应）。
+            let window_cfg = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .expect("tauri.conf.json must declare the main window");
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)?
+                .on_new_window(|url, _features| {
+                    let _ = dsh::open_url(url.as_str());
+                    tauri::webview::NewWindowResponse::Deny
+                })
+                // 注入到 webview 的所有 frame（含预览 iframe）。Windows 上 wry 的
+                // on_new_window 不会为 iframe 内 target=_blank 的请求触发（见 tauri-apps/wry#1593），
+                // 因此必须由注入脚本在 iframe 内拦截外链点击，postMessage 交给主框架
+                // 走 open_in_browser 命令用系统浏览器打开。
+                .initialization_script_for_all_frames(EXTERNAL_LINK_BRIDGE)
+                .build()?;
+
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
             let browser = MenuItem::with_id(app, "browser", "浏览器中打开", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", quit_label(), true, None::<&str>)?;

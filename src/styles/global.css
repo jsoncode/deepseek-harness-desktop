@@ -703,16 +703,6 @@ body {
   cursor: not-allowed;
 }
 
-/* 重启中：小号加载环（替代旋转箭头图标——方向性图标旋转会产生怪异动效） */
-.btn-spinner {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  border: 2px solid var(--border-strong);
-  border-top-color: var(--danger);
-  animation: spinSlow 0.9s linear infinite;
-}
-
 .url-pill {
   flex: 1;
   min-width: 0;

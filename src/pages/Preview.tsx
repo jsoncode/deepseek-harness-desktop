@@ -1,10 +1,13 @@
 import { App as AntApp } from "antd";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { ArrowLeftIcon } from "../components/icons";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
+
+/** 桥接脚本发来的外链打开请求标记（与 src-tauri/src/lib.rs 的 EXTERNAL_LINK_BRIDGE 对应） */
+const OPEN_URL_MSG = "dsh-desktop:open-url";
 
 export default function Preview() {
   const navigate = useNavigate();
@@ -15,6 +18,7 @@ export default function Preview() {
   const init = useAppStore((s) => s.init);
   const reloadKey = useUiStore((s) => s.reloadKey);
   const bumpReload = useUiStore((s) => s.bumpReload);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const [alive, setAlive] = useState(true);
   const [rechecking, setRechecking] = useState(false);
@@ -46,6 +50,31 @@ export default function Preview() {
 
   // 标题栏"刷新"→ reloadKey / url 变化 → iframe 的 key 变化，自动重挂载
   // （服务自身带有加载效果，不再叠加外层 loading 遮罩）
+
+  // 接收桥接脚本（EXTERNAL_LINK_BRIDGE）从预览 iframe 内 postMessage 过来的外链，
+  // 转交系统默认浏览器打开。Windows 上 wry 的 on_new_window 不会为 iframe 内
+  // target=_blank 触发，所以外链必须由注入脚本拦截后经此通道转发。
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data;
+      if (!data || typeof data !== "object") return;
+      if (data[OPEN_URL_MSG] !== true || typeof data.url !== "string") return;
+      // 只信任预览 iframe 发来的消息，避免页面内其他来源伪造
+      if (e.source !== iframeRef.current?.contentWindow) return;
+      let parsed: URL;
+      try {
+        parsed = new URL(data.url);
+      } catch {
+        return;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+      void api.openInBrowser(parsed.href).catch(() => {
+        message.error("打开链接失败");
+      });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [message]);
 
   const recheck = useCallback(async () => {
     if (!url) return;
@@ -83,6 +112,7 @@ export default function Preview() {
       <div className="preview-frame">
         <iframe
           key={`${url}|${reloadKey}`}
+          ref={iframeRef}
           src={url}
           title="Harness Preview"
           style={{
@@ -94,7 +124,7 @@ export default function Preview() {
             background: "#fff",
           }}
           allow="clipboard-read; clipboard-write; fullscreen"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"
         />
 
         {!alive ? (

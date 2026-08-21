@@ -58,15 +58,15 @@ export default function TitleBar() {
 
       <div className="titlebar-center">
         <button
-          className={`icon-btn restart-btn${restarting ? " restarting" : ""}`}
+          className="icon-btn restart-btn"
           type="button"
           title="重启服务"
           aria-label="重启服务"
           disabled={restarting || busy}
           onClick={() => void handleRestart()}
         >
-          {/* 重启中：显示小号加载环，不旋转方向性箭头图标（避免怪异动效） */}
-          {restarting ? <span className="btn-spinner" aria-hidden="true" /> : <RestartIcon />}
+          {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由 handleRestart 的消息气泡提示 */}
+          <RestartIcon />
         </button>
         <button className="icon-btn" type="button" title="返回启动页" aria-label="返回启动页" onClick={() => navigate("/")}>
           <ArrowLeftIcon />
