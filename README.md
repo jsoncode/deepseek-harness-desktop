@@ -67,6 +67,10 @@
 - [Rust](https://www.rust-lang.org/) 工具链（stable），Tauri 需要
 - Windows 10/11 或 macOS（未预配置 Linux 构建）
 
+> 💡 换新设备/新环境后若报 `cargo metadata ... program not found`，说明 Rust 工具链未安装。
+> 构建前会先执行 `scripts/check-rust.mjs` 自检并给出安装指引（Windows 可运行
+> `winget install Rustlang.Rustup` 后重开终端）。
+
 ### 开发运行
 
 ```bash
