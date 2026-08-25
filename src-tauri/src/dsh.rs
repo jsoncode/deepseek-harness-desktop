@@ -107,20 +107,49 @@ fn hide_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// 带超时执行命令并收集输出；超时后杀死进程树并返回 None。
+///
+/// 环境检测（app_status）会在前台串行探测 node / pnpm / dsh，任何一次子进程
+/// 挂起（where.exe 卡壳、PowerShell 的 Get-CimInstance 全量进程枚举变慢、npm
+/// shim 等待等）都会让同步命令永久阻塞、前端永远等不到结果而"卡死"。
+/// 统一在此兜底：超时即 taskkill 整棵进程树，保证命令最迟在超时时刻返回。
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    let child = hide_window(&mut cmd).spawn().ok()?;
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = child.wait_with_output();
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) => Some(out),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            // 超时：杀掉整棵进程树（taskkill /T /F），避免残留子进程继续占用
+            kill_tree(pid);
+            None
+        }
+    }
+}
+
 /// 通过 PATH 查找可执行文件（Windows: where.exe；类 Unix: which）
 fn run_where(name: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let result = {
         #[cfg(windows)]
         {
-            hide_window(Command::new("where.exe").arg(name)).output()
+            let mut cmd = Command::new("where.exe");
+            cmd.arg(name);
+            run_with_timeout(cmd, Duration::from_secs(3))
         }
         #[cfg(not(windows))]
         {
-            Command::new("which").arg(name).output()
+            let mut cmd = Command::new("which");
+            cmd.arg(name);
+            run_with_timeout(cmd, Duration::from_secs(3))
         }
     };
-    if let Ok(output) = result {
+    if let Some(output) = result {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
@@ -170,18 +199,9 @@ fn resolve_node() -> Option<PathBuf> {
 /// 带 2 秒超时：子进程挂起时不阻塞 app_status；失败/超时/输出不合预期一律 None。
 /// 输出首行必须形如 `major.minor[.patch]` 才视为有效版本。
 fn read_exec_version(program: &str, args: &[String]) -> Option<String> {
-    let program = program.to_string();
-    let args = args.to_vec();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = hide_window(Command::new(&program).args(&args).arg("--version")).output();
-        let _ = tx.send(out);
-    });
-    // recv_timeout 与子进程 output 是两层 Result，任一失败（超时/进程出错）都按 None 处理
-    let output = match rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(Ok(out)) => out,
-        _ => return None,
-    };
+    let mut cmd = Command::new(program);
+    cmd.args(args).arg("--version");
+    let output = run_with_timeout(cmd, Duration::from_secs(2))?;
     if !output.status.success() {
         return None;
     }
@@ -206,9 +226,9 @@ fn read_dsh_version(dsh: &DshExec) -> Option<String> {
 /// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
 fn pnpm_global_bin() -> Option<PathBuf> {
     let pnpm = resolve_pnpm()?;
-    let output = hide_window(Command::new(&pnpm).args(["global", "bin"]))
-        .output()
-        .ok()?;
+    let mut cmd = Command::new(&pnpm);
+    cmd.args(["global", "bin"]);
+    let output = run_with_timeout(cmd, Duration::from_secs(3))?;
     if !output.status.success() {
         return None;
     }
@@ -395,14 +415,19 @@ foreach ($p in $procs) {
 }
 $out | Sort-Object -Unique
 "#;
-        let output = hide_window(
-            Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .output();
-        let Ok(output) = output else {
+        let output = run_with_timeout(
+            {
+                let mut cmd = Command::new("powershell");
+                cmd.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                cmd
+            },
+            // PowerShell 冷启动 + Get-CimInstance 全量进程枚举可能很慢，
+            // 放宽到 5 秒但绝不无限等待（否则打包版 app_status 卡死）
+            Duration::from_secs(5),
+        );
+        let Some(output) = output else {
             return Vec::new();
         };
         if !output.status.success() {
@@ -551,17 +576,27 @@ fn try_detect_url(app: &AppHandle, line: &str) {
 
 #[tauri::command]
 pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
-    let dsh = resolve_dsh();
-    let dsh_version = dsh.as_ref().and_then(read_dsh_version);
+    // 工具解析与版本读取并行执行：每个子进程调用都带超时（见 run_with_timeout），
+    // 并行后 app_status 最坏耗时约等于最慢单次调用，而不是三者之和。
+    let (dsh, pnpm, node) = std::thread::scope(|s| {
+        let hd = s.spawn(resolve_dsh);
+        let hp = s.spawn(resolve_pnpm);
+        let hn = s.spawn(resolve_node);
+        (hd.join().ok().flatten(), hp.join().ok().flatten(), hn.join().ok().flatten())
+    });
+    let (dsh_version, pnpm_version, node_version) = std::thread::scope(|s| {
+        let hv = s.spawn(|| dsh.as_ref().and_then(read_dsh_version));
+        let hp = s.spawn(|| pnpm.as_ref().and_then(|p| read_tool_version(p)));
+        let hn = s.spawn(|| node.as_ref().and_then(|p| read_tool_version(p)));
+        (
+            hv.join().ok().flatten(),
+            hp.join().ok().flatten(),
+            hn.join().ok().flatten(),
+        )
+    });
     let dsh_installed = dsh.is_some();
     let dsh_path = dsh.map(|d| d.display);
-
-    let pnpm = resolve_pnpm();
-    let pnpm_version = pnpm.as_ref().and_then(|p| read_tool_version(p));
     let pnpm_path = pnpm.map(|p| p.to_string_lossy().into_owned());
-
-    let node = resolve_node();
-    let node_version = node.as_ref().and_then(|p| read_tool_version(p));
     let node_path = node.map(|p| p.to_string_lossy().into_owned());
 
     let (profile_ready, plugins) = read_profile_plugins();

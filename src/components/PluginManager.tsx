@@ -1,7 +1,8 @@
 import { ClusterOutlined } from "@ant-design/icons";
-import { App as AntApp, Badge, Input, Modal, Table, Tooltip } from "antd";
+import { App as AntApp, Badge, Input, Table, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Key } from "react";
+import AppModal from "./AppModal";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
 import {
@@ -47,6 +48,7 @@ interface MkRow {
   spec: string;
   author: string;
   avatarUrl: string | null;
+  description: string | null;
   weekly: number | null;
   monthly: number | null;
   stars: number | null;
@@ -96,6 +98,8 @@ export default function PluginManager() {
   /** 内容区穿梭动画：n 变化触发重挂载，cls 决定入场方向 */
   const [paneAnim, setPaneAnim] = useState<{ n: number; cls: string }>({ n: 0, cls: "" });
   const bumpPane = (cls: string) => setPaneAnim((p) => ({ n: p.n + 1, cls }));
+  /** 展开行 keys：市场行默认全展开显示描述，已安装行（无描述）全折叠 */
+  const [expandedKeys, setExpandedKeys] = useState<readonly Key[]>([]);
 
   useEffect(() => {
     if (!initialized) void init();
@@ -196,7 +200,8 @@ export default function PluginManager() {
       okButtonProps: kind === "update" ? undefined : { danger: true },
       cancelText: "取消",
       onOk: () => {
-        setView("terminal");
+        // 不切到终端视图：保持插件管理弹框打开在插件列表，操作后台执行，
+        // 弹框顶部显示进行中横幅，可点"查看日志"进入终端视图
         return startPluginOp(kind, target);
       },
     });
@@ -208,9 +213,9 @@ export default function PluginManager() {
       message.warning("请输入插件名称");
       return;
     }
+    // 仅关闭手动安装输入弹框；插件管理主弹框保持打开，操作在后台执行
     setAddOpen(false);
     setName("");
-    setView("terminal");
     void startPluginOp("add", trimmed);
   };
 
@@ -277,7 +282,7 @@ export default function PluginManager() {
     {
       title: "",
       key: "avatar",
-      width: 52,
+      width: 64,
       render: (_, r) => <Avatar url={r.avatarUrl} name={r.author} />,
     },
     {
@@ -356,6 +361,7 @@ export default function PluginManager() {
     spec: it.spec,
     author: it.author,
     avatarUrl: it.avatarUrl,
+    description: it.description,
     weekly: it.weekly,
     monthly: it.monthly,
     stars: it.stars,
@@ -372,6 +378,7 @@ export default function PluginManager() {
     spec: p,
     author: "本机",
     avatarUrl: null,
+    description: null,
     weekly: null,
     monthly: null,
     stars: null,
@@ -383,8 +390,28 @@ export default function PluginManager() {
 
   const rows = tabMode === "all" ? allRows : installedRows;
 
+  // 展开 keys 跟随当前行数据：市场行全部展开显示描述，已安装行全部折叠
+  useEffect(() => {
+    setExpandedKeys(
+      tabMode === "all" ? allRows.map((r) => r.key) : [],
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabMode, market, page, source, query, sort]);
+
   const marketBody = (
     <div className="mk-wrap">
+      {/* 进行中横幅：插件操作在后台执行，弹框保持打开；可切到终端视图看日志 */}
+      {running && pluginOp ? (
+        <div className="mk-op-banner">
+          <span className="mk-op-spinner" />
+          <span>
+            正在{OP_VERB[pluginOp.kind]} <b>{pluginOp.name}</b>…
+          </span>
+          <button className="pm-btn pm-btn-sm" type="button" onClick={() => setView("terminal")}>
+            查看日志
+          </button>
+        </div>
+      ) : null}
       <div className="mk-toolbar">
         <Input
           className="mk-search"
@@ -457,6 +484,21 @@ export default function PluginManager() {
           scroll={{ x: 1010 }}
           locale={{
             emptyText: tabMode === "installed" ? "本机尚未安装任何插件" : "无匹配插件",
+          }}
+          expandable={{
+            // 市场行默认展开显示插件描述；已安装行无描述 → 全部折叠
+            expandedRowKeys: expandedKeys,
+            expandedRowRender: (r: MkRow) => (
+              <div className="mk-desc">
+                {r.description ? (
+                  r.description
+                ) : (
+                  <span className="mk-desc-empty">暂无描述</span>
+                )}
+              </div>
+            ),
+            // 隐藏展开箭头：描述随行常驻，避免行内箭头误导可点击性
+            expandIcon: () => null,
           }}
         />
 
@@ -542,7 +584,7 @@ export default function PluginManager() {
         </button>
       </Tooltip>
 
-      <Modal
+      <AppModal
         open={open}
         className={`plugin-manager-modal${view === "market" ? " mk-market" : ""}`}
         onCancel={() => setOpen(false)}
@@ -601,10 +643,10 @@ export default function PluginManager() {
       >
         {/* 视图切换上浮缩放过渡 */}
         <div key={view} className="mk-view-enter">{view === "market" ? marketBody : terminalBody}</div>
-      </Modal>
+      </AppModal>
 
       {/* 手动安装输入弹框 */}
-      <Modal
+      <AppModal
         open={addOpen}
         className="plugin-manager-modal"
         title="手动安装插件"
@@ -624,7 +666,7 @@ export default function PluginManager() {
         <div className="plugin-add-hint">
           将执行 dsh plugin --profile web add {'{'}规格{'}'}；支持包名、name@version 或 github:user/repo
         </div>
-      </Modal>
+      </AppModal>
     </>
   );
 }

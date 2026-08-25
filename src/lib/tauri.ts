@@ -59,6 +59,23 @@ export const EVENTS = {
 /** 浏览器预览模式下的统一提示 */
 const NOT_TAURI_MSG = "浏览器预览模式：该操作需在桌面应用内执行";
 
+/** 给 Promise 加超时：超时后按失败处理（避免后端命令异常挂起时前端永远等待） */
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} 超时（${ms}ms）`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /** 非 Tauri 环境（浏览器预览）时拒绝调用，避免 invoke 访问 undefined 抛原生 TypeError */
 function requireTauri<T>(fn: () => Promise<T>): Promise<T> {
   if (!tauri) return Promise.reject(new Error(NOT_TAURI_MSG));

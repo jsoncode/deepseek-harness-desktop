@@ -657,6 +657,43 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   flex-direction: column;
 }
 
+/* 进行中横幅：插件操作后台执行，弹框保持打开在插件列表 */
+.mk-op-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  font-size: 12.5px;
+  color: var(--text-1);
+}
+
+.mk-op-banner b {
+  font-weight: 600;
+  font-family: var(--mono);
+}
+
+.mk-op-banner .pm-btn {
+  margin-left: auto;
+}
+
+.mk-op-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(99, 102, 241, 0.25);
+  border-top-color: var(--accent-2);
+  animation: spinSlow 0.8s linear infinite;
+}
+
+html[data-theme="light"] .mk-op-banner {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
 /* 穿梭动画：内容区按方向滑入淡显 */
 @keyframes mkFromRight {
   from { opacity: 0; transform: translateX(28px); }
@@ -765,20 +802,44 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
 }
 
 .mk-avatar {
-  width: 28px;
-  height: 28px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   object-fit: cover;
   display: block;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .mk-avatar-fallback {
   display: grid;
   place-items: center;
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 700;
   color: #fff;
   background: linear-gradient(135deg, #6366f1, #22d3ee);
+}
+
+/* 插件描述展开行 */
+.mk-desc {
+  padding: 6px 8px 6px 72px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.mk-desc-empty {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.plugin-manager-modal .mk-ant-table .ant-table-expanded-row > td {
+  background: transparent;
+}
+
+.plugin-manager-modal .mk-ant-table .ant-table-row-expand-icon-cell {
+  width: 0;
+  padding: 0 !important;
 }
 
 .mk-empty {

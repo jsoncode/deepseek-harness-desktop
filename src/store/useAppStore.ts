@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, EVENTS, onEvent, tauri, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, withTimeout, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
 
 // ---------------------------------------------------------------------------
 // 应用状态机：checking → idle | installing → starting → running
@@ -350,7 +350,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         return;
       }
       try {
-        const s: StatusPayload = await api.appStatus();
+        // 环境检测有超时兜底：后端探测（where/--version/PowerShell）均已限时，
+        // 前端再加一层保护，避免任何意外挂起让启动页永远卡在"检测中"
+        const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
         set({
           dshInstalled: s.dsh_installed,
           dshVersion: s.dsh_version,
@@ -373,7 +375,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           initialized: true,
         });
       } catch (e) {
-        set({ phase: "error", error: String(e), initialized: true });
+        // 超时/失败：不误报"启动失败"，回到就绪态让用户可手动重试
+        set({ phase: "idle", error: null, initialized: true });
       }
     },
 
@@ -382,7 +385,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       const cur = get().phase;
       if (cur === "installing" || cur === "starting") return;
       try {
-        const s: StatusPayload = await api.appStatus();
+        const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
         set({
           dshInstalled: s.dsh_installed,
           dshVersion: s.dsh_version,

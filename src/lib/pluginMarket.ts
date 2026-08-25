@@ -15,6 +15,7 @@ export interface MarketPlugin {
   spec: string;
   author: string;
   avatarUrl: string | null;
+  description: string | null;
   weekly: number | null;
   monthly: number | null;
   stars: number | null;
@@ -58,6 +59,7 @@ async function fetchJson<T>(url: string, timeoutMs = 10000): Promise<T> {
 interface GhItem {
   name?: string;
   full_name?: string;
+  description?: string | null;
   stargazers_count?: number;
   pushed_at?: string;
   created_at?: string;
@@ -97,6 +99,7 @@ export async function fetchMarketPage(
         spec: `github:${it.full_name ?? it.name ?? ""}`,
         author: it.owner?.login ?? "—",
         avatarUrl: it.owner?.avatar_url ?? null,
+        description: it.description?.trim() ? it.description : null,
         // GitHub 不提供仓库级下载数
         weekly: null,
         monthly: null,
@@ -120,6 +123,7 @@ export async function fetchMarketPage(
         name?: string;
         version?: string;
         date?: string;
+        description?: string | null;
         publisher?: { username?: string };
       };
     }>;
@@ -133,6 +137,7 @@ export async function fetchMarketPage(
     avatarUrl: o.package?.publisher?.username
       ? `https://github.com/${o.package.publisher.username}.png?size=64`
       : null,
+    description: o.package?.description?.trim() ? o.package.description : null,
     weekly: o.downloads?.weekly ?? null,
     monthly: o.downloads?.monthly ?? null,
     stars: null,
