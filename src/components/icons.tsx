@@ -27,15 +27,6 @@ export function ArrowLeftIcon({ size = 16 }: IconProps) {
   );
 }
 
-export function RestartIcon({ size = 16 }: IconProps) {
-  return (
-    <svg {...base(size)}>
-      <path d="M12 2v10" />
-      <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-    </svg>
-  );
-}
-
 export function RefreshIcon({ size = 16 }: IconProps) {
   return (
     <svg {...base(size)}>

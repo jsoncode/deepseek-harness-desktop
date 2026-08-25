@@ -687,19 +687,19 @@ body {
   border-color: var(--border);
 }
 
-/* 标题栏红色"重启服务"按钮（位于返回键左侧） */
-.restart-btn {
+/* 标题栏红色"停止服务"按钮（位于重启键左侧）；重启改用中性色，红色语义只留给停止 */
+.stop-btn {
   color: var(--danger);
 }
 
-.restart-btn:hover {
+.stop-btn:hover:not(:disabled) {
   color: #fff;
   background: rgba(248, 113, 113, 0.16);
   border-color: rgba(248, 113, 113, 0.45);
 }
 
-.restart-btn:disabled {
-  opacity: 0.5;
+.stop-btn:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
 }
 

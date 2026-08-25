@@ -2,7 +2,15 @@ import { App as AntApp } from "antd";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import { ArrowLeftIcon, CopyIcon, ExternalIcon, RefreshIcon, RestartIcon } from "./icons";
+import {
+  ArrowLeftIcon,
+  CopyIcon,
+  ExternalIcon,
+  RefreshIcon,
+  RotateCwIcon,
+  StopIcon,
+  TerminalSquareIcon,
+} from "./icons";
 import ThemeSwitch from "./ThemeSwitch";
 import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
@@ -11,9 +19,10 @@ import { useUiStore } from "../store/useUiStore";
 
 export default function TitleBar() {
   const navigate = useNavigate();
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
+  const serviceRunning = useAppStore((s) => s.serviceRunning);
   const stop = useAppStore((s) => s.stop);
   const startFlow = useAppStore((s) => s.startFlow);
   const bumpReload = useUiStore((s) => s.bumpReload);
@@ -46,6 +55,32 @@ export default function TitleBar() {
     }
   };
 
+  // 危险操作统一弹框确认后再执行
+  const confirmRestart = () => {
+    modal.confirm({
+      title: "重启服务",
+      content: "确定要重启服务吗？正在浏览的页面会短暂中断。",
+      okText: "重启",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => void handleRestart(),
+    });
+  };
+
+  const confirmStop = () => {
+    modal.confirm({
+      title: "停止服务",
+      content: "确定要停止当前服务吗？停止后需重新启动才能继续访问。",
+      okText: "停止",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => {
+        void stop();
+        navigate("/");
+      },
+    });
+  };
+
   // 安装/启动过程中禁用重启按钮，避免重复触发
   const busy = phase === "installing" || phase === "starting";
 
@@ -58,15 +93,34 @@ export default function TitleBar() {
 
       <div className="titlebar-center">
         <button
-          className="icon-btn restart-btn"
+          className="icon-btn stop-btn"
+          type="button"
+          title="停止服务"
+          aria-label="停止服务"
+          disabled={!serviceRunning || restarting}
+          onClick={confirmStop}
+        >
+          <StopIcon />
+        </button>
+        <button
+          className="icon-btn"
           type="button"
           title="重启服务"
           aria-label="重启服务"
           disabled={restarting || busy}
-          onClick={() => void handleRestart()}
+          onClick={confirmRestart}
         >
-          {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由 handleRestart 的消息气泡提示 */}
-          <RestartIcon />
+          {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由消息气泡提示 */}
+          <RotateCwIcon />
+        </button>
+        <button
+          className="icon-btn"
+          type="button"
+          title="查看日志"
+          aria-label="查看日志"
+          onClick={() => navigate("/terminal")}
+        >
+          <TerminalSquareIcon />
         </button>
         <button className="icon-btn" type="button" title="返回启动页" aria-label="返回启动页" onClick={() => navigate("/")}>
           <ArrowLeftIcon />
