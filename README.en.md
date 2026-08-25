@@ -30,7 +30,7 @@ For new users: grab the installer for your platform and double-click to install 
 **First run (two steps)**:
 
 1. Install [Node.js](https://nodejs.org/) ≥ 22.19 and [pnpm](https://pnpm.io/installation) — the app automatically runs `pnpm add -g @deepseek-ai/dsh@latest` to install DSH and start the local service;
-2. Open the app and click **Launch App** to start the service manually (the launch page shows the dsh CLI version and install/start progress); once ready, click **Open App** to enter the preview.
+2. Open the app and click **Launch App** to start the service manually (the launch page shows the dsh CLI version and install/start progress); the service page opens automatically once it is ready.
 
 > - On Windows, if SmartScreen warns you, choose **More info → Run anyway**.
 > - On macOS, the app is not notarized: on first open go to **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**.

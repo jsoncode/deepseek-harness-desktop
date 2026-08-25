@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import { tauri } from "../lib/tauri";
@@ -47,6 +47,19 @@ export default function Launch() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 用户点击启动后（starting → running）自动进入预览页；
+  // 进入页面时服务已在运行/已在启动（非本次点击触发）则不跳转，避免打断查看启动页信息
+  const prevPhase = useRef(phase);
+  const startedHere = useRef(false);
+  useEffect(() => {
+    const prev = prevPhase.current;
+    prevPhase.current = phase;
+    if (startedHere.current && phase === "running" && prev === "starting") {
+      const t = setTimeout(() => navigate("/preview"), 1200);
+      return () => clearTimeout(t);
+    }
+  }, [phase, navigate]);
 
   const busy = phase === "checking" || phase === "installing" || phase === "starting";
 
@@ -161,6 +174,7 @@ export default function Launch() {
       navigate("/terminal");
       return;
     }
+    startedHere.current = true;
     void startFlow();
   };
 

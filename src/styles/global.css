@@ -1496,3 +1496,41 @@ html[data-theme="light"] .term-window ::-webkit-scrollbar-thumb {
 html[data-theme="light"] .term-window ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
 }
+
+/* ==========================================================================
+   插件加载失败弹框（PluginFailureModal）
+   ========================================================================== */
+
+.plugin-fail-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plugin-fail-ask {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-1);
+}
+
+.plugin-fail-msg {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+html[data-theme="light"] .plugin-fail-msg {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+

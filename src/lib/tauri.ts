@@ -79,6 +79,8 @@ export const api = {
   cancelPluginOp: () => requireTauri(() => invoke<boolean>("cancel_plugin_op")),
   checkPluginUpdates: () =>
     requireTauri(() => invoke<PluginVersionInfo[]>("check_plugin_updates")),
+  /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
+  httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
 };
 
 export async function onEvent<T>(

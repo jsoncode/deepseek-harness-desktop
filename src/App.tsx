@@ -1,6 +1,7 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from "antd";
 import { useEffect, useLayoutEffect } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router";
+import PluginFailureModal from "./components/PluginFailureModal";
 import TitleBar from "./components/TitleBar";
 import Launch from "./pages/Launch";
 import Preview from "./pages/Preview";
@@ -56,6 +57,7 @@ export default function App() {
     >
       <AntApp>
         <div className="app-bg" />
+        <PluginFailureModal />
         <HashRouter>
           <div className="app-shell">
             <TitleBar />

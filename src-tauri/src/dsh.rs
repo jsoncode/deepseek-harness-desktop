@@ -1130,3 +1130,33 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
     });
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// 前端 HTTP 代理（GitHub / npm 市场请求）
+// ---------------------------------------------------------------------------
+// 打包版 WebView 的 CSP `connect-src` 不含外网域名，前端直连
+// api.github.com / registry.npmjs.org 会被拦截（调试模式 Vite dev server
+// 不强制 CSP 所以正常）；统一经此命令由 Rust 侧发出请求，绕开 CSP。
+// 仅放行 https 请求，避免被当作任意 URL 代理滥用。
+
+/// 以 GET 请求一个 https URL，返回响应体文本（JSON 字符串由前端解析）。
+#[tauri::command]
+pub async fn http_get_json(url: String) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("仅支持 https 请求".into());
+    }
+    let resp = tauri::async_runtime::spawn_blocking(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(12))
+            .user_agent("deepseek-harness-desktop")
+            .build();
+        agent.get(&url).call()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let resp = resp.map_err(|e| match e {
+        ureq::Error::Status(code, _) => format!("HTTP {code}"),
+        other => other.to_string(),
+    })?;
+    resp.into_string().map_err(|e| e.to_string())
+}

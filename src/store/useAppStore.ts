@@ -19,6 +19,12 @@ export interface LogEntry {
 
 export type PluginOpKind = "add" | "update" | "remove";
 
+/** 插件加载失败信息（从 dsh web 启动日志中识别）：name=插件名, message=原始错误行 */
+export interface PluginLoadError {
+  name: string;
+  message: string;
+}
+
 export interface PluginOpState {
   kind: PluginOpKind;
   name: string;
@@ -46,6 +52,8 @@ interface AppStore {
   pluginOpLogs: LogEntry[];
   /** 插件版本信息：current 来自后端本地读取，latest 来自前端并行直查 registry */
   pluginVers: Record<string, { current?: string | null; latest?: string | null }>;
+  /** 从启动日志中识别到的插件加载失败（非空时前端弹框提示移除并重启） */
+  pluginLoadError: PluginLoadError | null;
   error: string | null;
   initialized: boolean;
 
@@ -60,6 +68,9 @@ interface AppStore {
   startPluginOp: (kind: PluginOpKind, name: string) => Promise<void>;
   refreshPluginVersions: () => Promise<void>;
   setPhase: (phase: Phase) => void;
+  /** 上报插件加载失败（由 Preview 页收到的 iframe postMessage 调用） */
+  reportPluginLoadError: (name: string, message: string) => void;
+  clearPluginLoadError: () => void;
 }
 
 let logSeq = 0;
@@ -118,6 +129,29 @@ function syncHealthPolling() {
 
 function now(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+/**
+ * 直查 npm registry 某包的 latest 版本号。
+ * 桌面端经 Rust 代理（打包版 CSP 拦截前端直连外网）；浏览器预览模式用原生 fetch。
+ */
+async function fetchNpmLatest(name: string): Promise<string | null> {
+  const url = `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`;
+  let j: { version?: unknown };
+  if (tauri) {
+    const text = await api.httpGetJson(url);
+    j = JSON.parse(text) as { version?: unknown };
+  } else {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      j = (await res.json()) as { version?: unknown };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return typeof j.version === "string" ? j.version : null;
 }
 
 export const useAppStore = create<AppStore>((set, get) => {
@@ -221,6 +255,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pluginOp: null,
     pluginOpLogs: [],
     pluginVers: {},
+    pluginLoadError: null,
     error: null,
     initialized: false,
 
@@ -282,15 +317,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           .filter((i) => i.updatable)
           .map(async (i) => {
             try {
-              const ctrl = new AbortController();
-              const timer = setTimeout(() => ctrl.abort(), 6000);
-              const res = await fetch(
-                `https://registry.npmjs.org/${encodeURIComponent(i.name)}/latest`,
-                { signal: ctrl.signal },
-              );
-              clearTimeout(timer);
-              const j = (await res.json()) as { version?: unknown };
-              const latest = typeof j.version === "string" ? j.version : null;
+              const latest = await fetchNpmLatest(i.name);
               set((s) => ({
                 pluginVers: { ...s.pluginVers, [i.name]: { ...s.pluginVers[i.name], latest } },
               }));
@@ -304,6 +331,14 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     setPhase: (phase) => set({ phase }),
+
+    clearPluginLoadError: () => set({ pluginLoadError: null }),
+
+    reportPluginLoadError: (name, message) =>
+      set((s) =>
+        // 已有未处理的弹框时不覆盖（避免连续多个插件失败时弹框打架）
+        s.pluginLoadError ? s : { pluginLoadError: { name, message } },
+      ),
 
     init: async () => {
       wireEvents();

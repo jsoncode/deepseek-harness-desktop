@@ -1,7 +1,9 @@
 /**
  * 插件市场数据源：GitHub 主题仓库搜索 + npm 关键字搜索。
- * 两个接口均为公开 CORS 端点，前端直连无需后端转发。
+ * 打包版 WebView 的 CSP connect-src 不含外网域名，前端直连会被拦截，
+ * 因此桌面端经 Rust 命令 http_get_json 代理请求；浏览器预览模式保留原生 fetch。
  */
+import { api, tauri } from "./tauri";
 
 export type MarketSource = "github" | "npm";
 export type MarketSort = "weekly" | "stars" | "date";
@@ -36,6 +38,12 @@ export function pageSizeOf(source: MarketSource): number {
 export class RateLimitedError extends Error {}
 
 async function fetchJson<T>(url: string, timeoutMs = 10000): Promise<T> {
+  // 桌面端：经 Rust 代理请求（绕开打包版 CSP），响应文本由后端原样返回
+  if (tauri) {
+    const text = await api.httpGetJson(url);
+    return JSON.parse(text) as T;
+  }
+  // 浏览器预览模式：无 Rust 后端，原生 fetch
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {

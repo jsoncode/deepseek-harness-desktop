@@ -52,6 +52,57 @@ const EXTERNAL_LINK_BRIDGE: &str = r##"
 })();
 "##;
 
+/// 注入到 webview 所有 frame 的插件加载失败监听脚本：
+/// dsh web 前端在插件 bundle 加载/注册失败时会在页面渲染
+/// `Failed to load plugins` 失败界面（failedTitle 标题 + failedItem 错误项），
+/// 且不会向宿主推送任何事件（调研结论：boot 失败仅 console.error + 渲染 DOM）。
+/// 本脚本在 iframe 内用 MutationObserver 监听该界面，检测到后把错误项
+/// postMessage 给主框架，由前端弹框提示"移除插件并重启"。
+///
+/// 为什么用注入脚本而非前端直读 iframe DOM：预览 iframe 是跨源页面
+/// （http://127.0.0.1:3080 vs 桌面壳 tauri://localhost），前端受同源策略
+/// 限制无法访问 iframe 内部 DOM；WebView2 的
+/// AddScriptToExecuteOnDocumentCreated 对所有子 frame 生效，注入脚本在
+/// iframe 内部执行，不受跨源限制。
+const PLUGIN_FAILURE_BRIDGE: &str = r##"
+(() => {
+  if (window.top === window) return; // 只处理预览 iframe（子框架）
+  if (window.__dshPluginFailureBridgeInstalled) return;
+  try {
+    Object.defineProperty(window, "__dshPluginFailureBridgeInstalled", { value: true });
+  } catch { /* 忽略 */ }
+  let reported = false; // 同一次页面生命周期内只上报一次，避免反复弹框
+  const post = (items) => {
+    try {
+      window.parent.postMessage({ "dsh-desktop:plugin-failed": true, items }, "*");
+    } catch { /* 跨源 postMessage 失败的概率极低，忽略 */ }
+  };
+  const check = () => {
+    if (reported) return;
+    const title = document.querySelector('[class*="failedTitle"]');
+    if (!title) return;
+    const text = (title.textContent || "").trim();
+    if (!text.includes("Failed to load plugins")) return;
+    const items = Array.from(document.querySelectorAll('[class*="failedItem"]'))
+      .map((el) => (el.textContent || "").trim())
+      .filter(Boolean);
+    if (items.length === 0) return;
+    reported = true;
+    post(items);
+  };
+  const watch = () => {
+    check();
+    const mo = new MutationObserver(check);
+    mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", watch, { once: true });
+  } else {
+    watch();
+  }
+})();
+"##;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -79,6 +130,7 @@ pub fn run() {
             dsh::run_plugin_op,
             dsh::cancel_plugin_op,
             dsh::check_plugin_updates,
+            dsh::http_get_json,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
@@ -102,6 +154,7 @@ pub fn run() {
                 // 因此必须由注入脚本在 iframe 内拦截外链点击，postMessage 交给主框架
                 // 走 open_in_browser 命令用系统浏览器打开。
                 .initialization_script_for_all_frames(EXTERNAL_LINK_BRIDGE)
+                .initialization_script_for_all_frames(PLUGIN_FAILURE_BRIDGE)
                 .build()?;
 
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
