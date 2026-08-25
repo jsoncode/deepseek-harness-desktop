@@ -43,7 +43,6 @@ function Avatar({ url, name }: { url: string | null; name: string }) {
 /** 表格行数据（市场行与已安装行统一） */
 interface MkRow {
   key: string;
-  seq: number;
   name: string;
   spec: string;
   author: string;
@@ -274,12 +273,6 @@ export default function PluginManager() {
 
   const columns: ColumnsType<MkRow> = [
     {
-      title: "#",
-      key: "seq",
-      width: 48,
-      render: (_, r) => <span className="mk-num">{r.seq}</span>,
-    },
-    {
       title: "",
       key: "avatar",
       width: 64,
@@ -354,9 +347,8 @@ export default function PluginManager() {
   ];
 
   // ---- 数据源组装 ----
-  const allRows: MkRow[] = (market?.items ?? []).map((it, idx) => ({
+  const allRows: MkRow[] = (market?.items ?? []).map((it) => ({
     key: it.key,
-    seq: (page - 1) * pageSizeOf(source) + idx + 1,
     name: it.name,
     spec: it.spec,
     author: it.author,
@@ -371,9 +363,8 @@ export default function PluginManager() {
     current: pluginVers[it.name]?.current ?? null,
   }));
 
-  const installedRows: MkRow[] = plugins.map((p, idx) => ({
+  const installedRows: MkRow[] = plugins.map((p) => ({
     key: p,
-    seq: idx + 1,
     name: p,
     spec: p,
     author: "本机",
@@ -400,75 +391,81 @@ export default function PluginManager() {
 
   const marketBody = (
     <div className="mk-wrap">
-      {/* 进行中横幅：插件操作在后台执行，弹框保持打开；可切到终端视图看日志 */}
-      {running && pluginOp ? (
-        <div className="mk-op-banner">
-          <span className="mk-op-spinner" />
-          <span>
-            正在{OP_VERB[pluginOp.kind]} <b>{pluginOp.name}</b>…
-          </span>
-          <button className="pm-btn pm-btn-sm" type="button" onClick={() => setView("terminal")}>
-            查看日志
-          </button>
-        </div>
-      ) : null}
-      <div className="mk-toolbar">
-        <Input
-          className="mk-search"
-          placeholder="搜索插件…"
-          allowClear
-          value={queryInput}
-          onChange={(e) => setQueryInput(e.target.value)}
-        />
-        <div className="pm-seg">
-          <button
-            type="button"
-            className={tabMode === "all" ? "active" : ""}
-            onClick={() => switchTab("all")}
-          >
-            所有插件({formatCount(tabMode === "all" ? market?.total : market?.total)})
-          </button>
-          <button
-            type="button"
-            className={tabMode === "installed" ? "active" : ""}
-            onClick={() => switchTab("installed")}
-          >
-            已安装({plugins.length})
-          </button>
-        </div>
-        <div className="pm-seg mk-sort">
-          {(
-            [
-              { key: "weekly", label: "周下载", disabledIn: ["github"] },
-              { key: "stars", label: "Stars", disabledIn: ["npm"] },
-              { key: "date", label: "发布日期", disabledIn: [] },
-            ] as Array<{ key: MarketSort; label: string; disabledIn: MarketSource[] }>
-          ).map((c) => (
-            <button
-              key={c.key}
-              type="button"
-              title={c.disabledIn.includes(source) ? "当前插件源不支持该排序" : undefined}
-              className={
-                (sort === c.key && tabMode === "all" ? "active" : "") +
-                (c.disabledIn.includes(source) ? " disabled" : "")
-              }
-              disabled={c.disabledIn.includes(source)}
-              onClick={() => {
-                setSort(c.key);
-                setPage(1);
-                bumpPane("mk-fade");
-              }}
-            >
-              {c.label}
+      {/* 顶部固定区：进行中横幅 + 搜索工具栏 + 加载/错误提示，不随表格滚动 */}
+      <div className="mk-sticky">
+        {running && pluginOp ? (
+          <div className="mk-op-banner">
+            <span className="mk-op-spinner" />
+            <span>
+              正在{OP_VERB[pluginOp.kind]} <b>{pluginOp.name}</b>…
+            </span>
+            <button className="pm-btn pm-btn-sm" type="button" onClick={() => setView("terminal")}>
+              查看日志
             </button>
-          ))}
+          </div>
+        ) : null}
+        <div className="mk-toolbar">
+          <Input
+            className="mk-search"
+            placeholder="搜索插件…"
+            allowClear
+            value={queryInput}
+            onChange={(e) => setQueryInput(e.target.value)}
+          />
+          <div className="pm-seg">
+            <button
+              type="button"
+              className={tabMode === "all" ? "active" : ""}
+              onClick={() => switchTab("all")}
+            >
+              所有插件({formatCount(tabMode === "all" ? market?.total : market?.total)})
+            </button>
+            <button
+              type="button"
+              className={tabMode === "installed" ? "active" : ""}
+              onClick={() => switchTab("installed")}
+            >
+              已安装({plugins.length})
+            </button>
+          </div>
+          <div className="pm-seg mk-sort">
+            {(
+              [
+                { key: "weekly", label: "周下载", disabledIn: ["github"] },
+                { key: "stars", label: "Stars", disabledIn: ["npm"] },
+                { key: "date", label: "发布日期", disabledIn: [] },
+              ] as Array<{ key: MarketSort; label: string; disabledIn: MarketSource[] }>
+            ).map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                title={c.disabledIn.includes(source) ? "当前插件源不支持该排序" : undefined}
+                className={
+                  (sort === c.key && tabMode === "all" ? "active" : "") +
+                  (c.disabledIn.includes(source) ? " disabled" : "")
+                }
+                disabled={c.disabledIn.includes(source)}
+                onClick={() => {
+                  setSort(c.key);
+                  setPage(1);
+                  bumpPane("mk-fade");
+                }}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+          <button className="pm-btn pm-btn-sm" type="button" onClick={() => setAddOpen(true)}>
+            手动安装
+          </button>
         </div>
-        <button className="pm-btn pm-btn-sm" type="button" onClick={() => setAddOpen(true)}>
-          手动安装
-        </button>
+        {marketLoading && tabMode === "all" ? (
+          <div className="mk-loading">
+            <span className="spinner-ring" /> 正在加载插件…
+          </div>
+        ) : null}
+        {marketError ? <div className="mk-error">{marketError}</div> : null}
       </div>
-
-      {marketError ? <div className="mk-error">{marketError}</div> : null}
 
       {/* 穿梭动画面板：tab/源/翻页/搜索变化时按方向滑入 */}
       <div key={paneAnim.n} className={`mk-pane ${paneAnim.cls}`}>
@@ -478,9 +475,7 @@ export default function PluginManager() {
           rowKey="key"
           columns={columns}
           dataSource={rows}
-          loading={marketLoading && tabMode === "all"}
           pagination={false}
-          sticky
           scroll={{ x: 1010 }}
           locale={{
             emptyText: tabMode === "installed" ? "本机尚未安装任何插件" : "无匹配插件",
@@ -501,36 +496,6 @@ export default function PluginManager() {
             expandIcon: () => null,
           }}
         />
-
-        {tabMode === "all" ? (
-          <div className="mk-pager">
-            <button
-              className="pm-btn pm-btn-sm"
-              type="button"
-              disabled={page <= 1 || marketLoading}
-              onClick={() => {
-                setPage((p) => p - 1);
-                bumpPane("mk-from-left");
-              }}
-            >
-              ◀ 上一页
-            </button>
-            <span className="mk-pager-info">
-              第 {page} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
-            </span>
-            <button
-              className="pm-btn pm-btn-sm"
-              type="button"
-              disabled={page >= totalPages || marketLoading}
-              onClick={() => {
-                setPage((p) => p + 1);
-                bumpPane("mk-from-right");
-              }}
-            >
-              下一页 ▶
-            </button>
-          </div>
-        ) : null}
       </div>
     </div>
   );
@@ -633,7 +598,39 @@ export default function PluginManager() {
               )}
             </div>
           ) : (
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <div className="mk-footer">
+              {/* 分页固定在 footer 左侧；已安装 tab 无分页 */}
+              {tabMode === "all" ? (
+                <div className="mk-pager">
+                  <button
+                    className="pm-btn pm-btn-sm"
+                    type="button"
+                    disabled={page <= 1 || marketLoading}
+                    onClick={() => {
+                      setPage((p) => p - 1);
+                      bumpPane("mk-from-left");
+                    }}
+                  >
+                    ◀ 上一页
+                  </button>
+                  <span className="mk-pager-info">
+                    第 {page} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
+                  </span>
+                  <button
+                    className="pm-btn pm-btn-sm"
+                    type="button"
+                    disabled={page >= totalPages || marketLoading}
+                    onClick={() => {
+                      setPage((p) => p + 1);
+                      bumpPane("mk-from-right");
+                    }}
+                  >
+                    下一页 ▶
+                  </button>
+                </div>
+              ) : (
+                <span />
+              )}
               <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
                 关闭
               </button>

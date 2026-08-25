@@ -113,7 +113,14 @@ fn hide_window(cmd: &mut Command) -> &mut Command {
 /// 挂起（where.exe 卡壳、PowerShell 的 Get-CimInstance 全量进程枚举变慢、npm
 /// shim 等待等）都会让同步命令永久阻塞、前端永远等不到结果而"卡死"。
 /// 统一在此兜底：超时即 taskkill 整棵进程树，保证命令最迟在超时时刻返回。
+///
+/// 注意：必须显式把 stdin/stdout/stderr 设为管道/丢弃，等价于 Command::output()
+/// 的语义——否则子进程输出会继承 GUI 父进程的句柄（无效或直接打到终端），
+/// wait_with_output 捕获不到内容，导致版本/路径解析全部为空。
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let child = hide_window(&mut cmd).spawn().ok()?;
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1194,4 +1201,54 @@ pub async fn http_get_json(url: String) -> Result<String, String> {
         other => other.to_string(),
     })?;
     resp.into_string().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 环境检测回归测试：确认 run_with_timeout 能正确捕获子进程输出
+    /// （曾因未设置 stdio 管道导致 where/--version 输出全为空、检测不到工具）
+    #[test]
+    fn run_with_timeout_captures_output() {
+        let mut cmd = Command::new("node");
+        cmd.arg("--version");
+        let out = run_with_timeout(cmd, Duration::from_secs(5)).expect("node --version 应正常返回");
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.trim_start_matches('v').trim_start().starts_with("2"),
+            "node --version 输出应含主版本号，实际: {text:?}"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_kills_hung_process() {
+        // powershell 挂起 30 秒 → 1 秒超时应被杀掉并返回 None
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        let started = std::time::Instant::now();
+        let out = run_with_timeout(cmd, Duration::from_secs(1));
+        assert!(out.is_none(), "挂起进程超时应返回 None");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "超时应及时返回，实际耗时 {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn resolves_tools_and_versions() {
+        // 本机应有 node / pnpm / dsh；任一缺失只打印不失败（环境相关）
+        let dsh = resolve_dsh();
+        let pnpm = resolve_pnpm();
+        let node = resolve_node();
+        eprintln!("dsh={:?} pnpm={pnpm:?} node={node:?}", dsh.as_ref().map(|d| &d.display));
+        let node_version = node.as_ref().and_then(|p| read_tool_version(p));
+        let pnpm_version = pnpm.as_ref().and_then(|p| read_tool_version(p));
+        let dsh_version = dsh.as_ref().and_then(read_dsh_version);
+        eprintln!("node={node_version:?} pnpm={pnpm_version:?} dsh={dsh_version:?}");
+        assert!(node.is_some(), "本机应能检测到 node");
+        assert!(node_version.is_some(), "node 版本应可读取");
+    }
 }

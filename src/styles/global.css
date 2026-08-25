@@ -657,6 +657,55 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   flex-direction: column;
 }
 
+/* 顶部固定区：进行中横幅 + 搜索工具栏 + 加载/错误提示，表格滚动时保持可见 */
+.mk-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding-bottom: 2px;
+  background: rgba(15, 19, 28, 0.9);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+html[data-theme="light"] .mk-sticky {
+  background: rgba(248, 249, 252, 0.92);
+}
+
+/* 表格顶部加载条：固定在 sticky 区下方，不随表格高度下移 */
+.mk-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--panel-strong);
+  border: 1px dashed var(--border-strong);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.mk-loading .spinner-ring {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+/* 弹框 footer：分页在左，关闭在右 */
+.mk-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mk-footer .mk-pager {
+  padding-top: 0;
+}
+
 /* 进行中横幅：插件操作后台执行，弹框保持打开在插件列表 */
 .mk-op-banner {
   display: flex;
