@@ -47,6 +47,27 @@ export function RefreshIcon({ size = 16 }: IconProps) {
   );
 }
 
+/** 单箭头顺时针循环：用于"重启服务"（区别于双箭头的 RefreshIcon 刷新） */
+export function RotateCwIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.85.99 6.36 2.64L21 8" />
+      <path d="M21 3v5h-5" />
+    </svg>
+  );
+}
+
+/** 方框终端造型：用于标题栏"查看日志"入口 */
+export function TerminalSquareIcon({ size = 16 }: IconProps) {
+  return (
+    <svg {...base(size)}>
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+      <path d="m7 11 2-2-2-2" />
+      <path d="M11 13h4" />
+    </svg>
+  );
+}
+
 export function ExternalIcon({ size = 16 }: IconProps) {
   return (
     <svg {...base(size)}>
