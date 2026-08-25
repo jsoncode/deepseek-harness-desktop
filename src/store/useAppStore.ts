@@ -29,11 +29,14 @@ interface AppStore {
   nodePath: string | null;
   nodeVersion: string | null;
   pnpmVersion: string | null;
+  plugins: string[];
+  profileReady: boolean;
   error: string | null;
   initialized: boolean;
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  ensurePluginsThenStart: () => Promise<void>;
   startFlow: () => Promise<void>;
   stop: () => Promise<void>;
   reset: () => void;
@@ -72,15 +75,31 @@ export const useAppStore = create<AppStore>((set, get) => {
     onEvent<ExitPayload>(EVENTS.installExit, (p) => {
       if (p.code === 0) {
         get().appendLog("success", "✅ @deepseek-ai/dsh 全局安装完成");
-        set({ dshInstalled: true, phase: "starting" });
+        set({ dshInstalled: true });
+        void get().ensurePluginsThenStart();
+      } else {
+        get().appendLog("error", `❌ 安装失败（退出码 ${p.code}），请检查网络或 pnpm 配置`);
+        set({ phase: "error", error: `安装失败，退出码 ${p.code}` });
+      }
+    });
+
+    onEvent<LogLine>(EVENTS.pluginInstallLog, (p) => {
+      get().appendLog("system", p.line);
+    });
+
+    onEvent<ExitPayload>(EVENTS.pluginInstallExit, (p) => {
+      if (get().phase !== "installing") return; // 仅插件安装阶段生效
+      if (p.code === 0) {
+        get().appendLog("success", "✅ 插件依赖安装完成");
+        set({ phase: "starting" });
         get().appendLog("system", "开始启动本地服务：dsh web …");
         void api.startDshWeb().catch((e) => {
           get().appendLog("error", `启动失败：${String(e)}`);
           set({ phase: "error", error: String(e) });
         });
       } else {
-        get().appendLog("error", `❌ 安装失败（退出码 ${p.code}），请检查网络或 pnpm 配置`);
-        set({ phase: "error", error: `安装失败，退出码 ${p.code}` });
+        get().appendLog("error", `❌ 插件依赖安装失败（退出码 ${p.code}）`);
+        set({ phase: "error", error: `插件依赖安装失败，退出码 ${p.code}` });
       }
     });
 
@@ -121,6 +140,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     nodePath: null,
     nodeVersion: null,
     pnpmVersion: null,
+    plugins: [],
+    profileReady: false,
     error: null,
     initialized: false,
 
@@ -168,6 +189,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           nodePath: s.node_path,
           nodeVersion: s.node_version,
           pnpmVersion: s.pnpm_version,
+          plugins: s.plugins ?? [],
+          profileReady: s.profile_ready,
           phase: s.service_running
             ? "running"
             : s.child_running
@@ -196,6 +219,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           nodePath: s.node_path,
           nodeVersion: s.node_version,
           pnpmVersion: s.pnpm_version,
+          plugins: s.plugins ?? [],
+          profileReady: s.profile_ready,
           phase: s.service_running
             ? "running"
             : s.child_running
@@ -207,6 +232,30 @@ export const useAppStore = create<AppStore>((set, get) => {
         });
       } catch {
         /* 忽略刷新失败 */
+      }
+    },
+
+    ensurePluginsThenStart: async () => {
+      const s = get();
+      // 浏览器预览或 profile 未生成（首次运行）：跳过插件安装直接启动
+      if (!tauri || !s.profileReady) {
+        set({ phase: "starting", error: null });
+        get().appendLog("system", "开始启动本地服务：dsh web …");
+        try {
+          await api.startDshWeb();
+        } catch (e) {
+          get().appendLog("error", `启动失败：${String(e)}`);
+          set({ phase: "error", error: String(e) });
+        }
+        return;
+      }
+      get().appendLog("system", "安装插件依赖：pnpm install …");
+      set({ phase: "installing", error: null });
+      try {
+        await api.installPlugins(); // 结果由 plugin-install-exit 事件驱动续接
+      } catch (e) {
+        get().appendLog("error", `插件依赖安装失败：${String(e)}`);
+        set({ phase: "error", error: String(e) });
       }
     },
 
@@ -225,14 +274,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
       if (dshInstalled) {
         get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");
-        set({ phase: "starting" });
-        get().appendLog("system", "开始启动本地服务：dsh web …");
-        try {
-          await api.startDshWeb();
-        } catch (e) {
-          get().appendLog("error", `启动失败：${String(e)}`);
-          set({ phase: "error", error: String(e) });
-        }
+        void get().ensurePluginsThenStart();
       } else {
         get().appendLog("system", "开始全局安装 @deepseek-ai/dsh@latest …");
         set({ phase: "installing" });

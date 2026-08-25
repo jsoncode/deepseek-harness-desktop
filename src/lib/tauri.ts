@@ -31,11 +31,15 @@ export interface StatusPayload {
   node_path: string | null;
   node_version: string | null;
   pnpm_version: string | null;
+  plugins: string[];
+  profile_ready: boolean;
 }
 
 export const EVENTS = {
   installLog: "dsh://install-log",
   installExit: "dsh://install-exit",
+  pluginInstallLog: "dsh://plugin-install-log",
+  pluginInstallExit: "dsh://plugin-install-exit",
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
@@ -57,6 +61,8 @@ export const api = {
   startDshWeb: () => requireTauri(() => invoke<void>("start_dsh_web")),
   stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
+  removePlugin: (name: string) => requireTauri(() => invoke<void>("remove_plugin", { name })),
+  installPlugins: () => requireTauri(() => invoke<void>("install_plugins")),
 };
 
 export async function onEvent<T>(
