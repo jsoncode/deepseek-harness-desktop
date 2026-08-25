@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, EVENTS, onEvent, tauri, type ExitPayload, type LogLine, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
 
 // ---------------------------------------------------------------------------
 // 应用状态机：checking → idle | installing → starting → running
@@ -43,6 +43,8 @@ interface AppStore {
   serviceAlive: boolean;
   pluginOp: PluginOpState | null;
   pluginOpLogs: LogEntry[];
+  /** 插件版本信息：current 来自后端本地读取，latest 来自前端并行直查 registry */
+  pluginVers: Record<string, { current?: string | null; latest?: string | null }>;
   error: string | null;
   initialized: boolean;
 
@@ -55,6 +57,7 @@ interface AppStore {
   appendLog: (stream: StreamKind, text: string) => void;
   appendPluginOpLog: (stream: StreamKind, text: string) => void;
   startPluginOp: (kind: PluginOpKind, name: string) => Promise<void>;
+  refreshPluginVersions: () => Promise<void>;
   setPhase: (phase: Phase) => void;
 }
 
@@ -215,6 +218,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     serviceAlive: true,
     pluginOp: null,
     pluginOpLogs: [],
+    pluginVers: {},
     error: null,
     initialized: false,
 
@@ -256,6 +260,45 @@ export const useAppStore = create<AppStore>((set, get) => {
         get().appendPluginOpLog("error", String(e instanceof Error ? e.message : e));
         set((s) => ({ pluginOp: s.pluginOp ? { ...s.pluginOp, running: false, exitCode: -1 } : null }));
       }
+    },
+
+    refreshPluginVersions: async () => {
+      let base: PluginVersionInfo[];
+      try {
+        base = await api.checkPluginUpdates();
+      } catch {
+        return; // 浏览器预览或后端异常：保持现状
+      }
+      const vers: AppStore["pluginVers"] = {};
+      for (const i of base) {
+        vers[i.name] = { current: i.current, latest: null };
+      }
+      set({ pluginVers: vers });
+      // 并行直查 registry latest（每个仅几 KB）；失败置 null 静默隐藏更新按钮
+      await Promise.allSettled(
+        base
+          .filter((i) => i.updatable)
+          .map(async (i) => {
+            try {
+              const ctrl = new AbortController();
+              const timer = setTimeout(() => ctrl.abort(), 6000);
+              const res = await fetch(
+                `https://registry.npmjs.org/${encodeURIComponent(i.name)}/latest`,
+                { signal: ctrl.signal },
+              );
+              clearTimeout(timer);
+              const j = (await res.json()) as { version?: unknown };
+              const latest = typeof j.version === "string" ? j.version : null;
+              set((s) => ({
+                pluginVers: { ...s.pluginVers, [i.name]: { ...s.pluginVers[i.name], latest } },
+              }));
+            } catch {
+              set((s) => ({
+                pluginVers: { ...s.pluginVers, [i.name]: { ...s.pluginVers[i.name], latest: null } },
+              }));
+            }
+          }),
+      );
     },
 
     setPhase: (phase) => set({ phase }),

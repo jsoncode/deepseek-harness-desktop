@@ -17,6 +17,14 @@ export interface ExitPayload {
   code: number;
 }
 
+/** 插件版本基础信息（latest 由前端直查 npm registry） */
+export interface PluginVersionInfo {
+  name: string;
+  spec: string | null;
+  current: string | null;
+  updatable: boolean;
+}
+
 export interface UrlPayload {
   url: string;
 }
@@ -68,6 +76,8 @@ export const api = {
   runPluginOp: (op: string, name: string) =>
     requireTauri(() => invoke<void>("run_plugin_op", { op, name })),
   cancelPluginOp: () => requireTauri(() => invoke<boolean>("cancel_plugin_op")),
+  checkPluginUpdates: () =>
+    requireTauri(() => invoke<PluginVersionInfo[]>("check_plugin_updates")),
 };
 
 export async function onEvent<T>(
