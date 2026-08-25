@@ -12,6 +12,7 @@ import {
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
+import PluginManager from "./PluginManager";
 import ThemeSwitch from "./ThemeSwitch";
 import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
@@ -167,6 +168,7 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-right">
+        <PluginManager />
         <ThemeSwitch />
         <WindowControls />
       </div>

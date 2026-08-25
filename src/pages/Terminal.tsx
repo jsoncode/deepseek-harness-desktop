@@ -3,7 +3,8 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
 import { useAppStore } from "../store/useAppStore";
 
-const MARK: Record<string, string> = {
+/** 日志行前缀符号（终端页与插件操作终端共用） */
+export const MARK: Record<string, string> = {
   system: "◆",
   stdout: "│",
   stderr: "⚠",

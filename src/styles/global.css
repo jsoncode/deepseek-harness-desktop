@@ -413,6 +413,62 @@ body {
   background: rgba(248, 113, 113, 0.12);
 }
 
+/* 插件管理弹框（列表视图 + 操作终端视图） */
+.plugin-op-banner {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel-strong);
+  border: 1px dashed var(--border-strong);
+  color: #22d3ee;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.plugin-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.plugin-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-1);
+}
+
+.plugin-empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.plugin-add-hint {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* 弹框内操作终端：固定高度滚动 */
+.plugin-term .term-body {
+  height: 420px;
+}
+
 /* 主按钮 */
 .launch-actions {
   display: flex;
