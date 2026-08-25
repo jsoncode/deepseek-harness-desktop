@@ -17,6 +17,15 @@ export interface LogEntry {
   text: string;
 }
 
+export type PluginOpKind = "add" | "update" | "remove";
+
+export interface PluginOpState {
+  kind: PluginOpKind;
+  name: string;
+  running: boolean;
+  exitCode?: number;
+}
+
 interface AppStore {
   phase: Phase;
   logs: LogEntry[];
@@ -32,6 +41,8 @@ interface AppStore {
   plugins: string[];
   profileReady: boolean;
   serviceAlive: boolean;
+  pluginOp: PluginOpState | null;
+  pluginOpLogs: LogEntry[];
   error: string | null;
   initialized: boolean;
 
@@ -42,6 +53,8 @@ interface AppStore {
   stop: () => Promise<void>;
   reset: () => void;
   appendLog: (stream: StreamKind, text: string) => void;
+  appendPluginOpLog: (stream: StreamKind, text: string) => void;
+  startPluginOp: (kind: PluginOpKind, name: string) => Promise<void>;
   setPhase: (phase: Phase) => void;
 }
 
@@ -54,6 +67,8 @@ const MAX_LOGS = 3000;
 const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
 /** 重新启动服务时的日志分隔线 */
 const RESTART_SEPARATOR = "────── 重新启动服务 ──────";
+/** 插件操作日志上限 */
+const MAX_PLUGIN_OP_LOGS = 1000;
 
 /** 服务健康轮询：仅运行中探测；连续 2 次失败才判定断连，任一次成功即恢复 */
 let healthTimer: ReturnType<typeof setInterval> | null = null;
@@ -146,6 +161,18 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     });
 
+    onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
+      const stream: StreamKind =
+        p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
+      get().appendPluginOpLog(stream, p.line);
+    });
+
+    onEvent<ExitPayload>(EVENTS.pluginOpExit, (p) => {
+      const op = get().pluginOp;
+      if (!op || !op.running) return;
+      set({ pluginOp: { ...op, running: false, exitCode: p.code } });
+    });
+
     onEvent<LogLine>(EVENTS.webLog, (p) => {
       const stream: StreamKind =
         p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
@@ -186,6 +213,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     plugins: [],
     profileReady: false,
     serviceAlive: true,
+    pluginOp: null,
+    pluginOpLogs: [],
     error: null,
     initialized: false,
 
@@ -208,6 +237,25 @@ export const useAppStore = create<AppStore>((set, get) => {
         };
         return { logs: [note, ...all.slice(all.length - (MAX_LOGS - 1))] };
       });
+    },
+
+    appendPluginOpLog: (stream, text) => {
+      set((s) => {
+        const entry: LogEntry = { id: ++logSeq, time: now(), stream, text };
+        const all = [...s.pluginOpLogs, entry];
+        // 超限直接丢弃最旧（操作日志无需截断提示）
+        return { pluginOpLogs: all.length <= MAX_PLUGIN_OP_LOGS ? all : all.slice(all.length - MAX_PLUGIN_OP_LOGS) };
+      });
+    },
+
+    startPluginOp: async (kind, name) => {
+      set({ pluginOp: { kind, name, running: true }, pluginOpLogs: [] });
+      try {
+        await api.runPluginOp(kind, name);
+      } catch (e) {
+        get().appendPluginOpLog("error", String(e instanceof Error ? e.message : e));
+        set((s) => ({ pluginOp: s.pluginOp ? { ...s.pluginOp, running: false, exitCode: -1 } : null }));
+      }
     },
 
     setPhase: (phase) => set({ phase }),

@@ -40,6 +40,8 @@ export const EVENTS = {
   installExit: "dsh://install-exit",
   pluginInstallLog: "dsh://plugin-install-log",
   pluginInstallExit: "dsh://plugin-install-exit",
+  pluginOpLog: "dsh://plugin-op-log",
+  pluginOpExit: "dsh://plugin-op-exit",
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
@@ -63,6 +65,9 @@ export const api = {
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
   removePlugin: (name: string) => requireTauri(() => invoke<void>("remove_plugin", { name })),
   installPlugins: () => requireTauri(() => invoke<void>("install_plugins")),
+  runPluginOp: (op: string, name: string) =>
+    requireTauri(() => invoke<void>("run_plugin_op", { op, name })),
+  cancelPluginOp: () => requireTauri(() => invoke<boolean>("cancel_plugin_op")),
 };
 
 export async function onEvent<T>(
