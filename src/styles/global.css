@@ -454,6 +454,17 @@ body {
   color: var(--text-1);
 }
 
+/* 插件版本号：灰色小字；有新版时青色高亮 */
+.plugin-ver {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.plugin-ver.new {
+  color: #22d3ee;
+}
+
 .plugin-empty {
   padding: 24px 0;
   text-align: center;
@@ -497,22 +508,21 @@ body {
   color: var(--text-1);
 }
 
-/* 胶囊按钮族：基类对齐启动页 btn-secondary，danger 红描边，primary 渐变实底 */
+/* 胶囊按钮族：小尺寸紧凑款；基类对齐启动页 btn-secondary，danger 红描边，primary 渐变实底 */
 .pm-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 8px 22px;
+  padding: 5px 16px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--panel);
   color: var(--text-1);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   transition:
-    transform 0.15s cubic-bezier(0.22, 1, 0.36, 1),
     background 0.15s ease,
     border-color 0.15s ease,
     color 0.15s ease,
@@ -520,7 +530,6 @@ body {
 }
 
 .pm-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
   background: var(--panel-strong);
 }
 
@@ -531,13 +540,17 @@ body {
 
 .pm-btn.danger {
   color: var(--danger);
-  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.08);
+  border-color: rgba(248, 113, 113, 0.4);
 }
 
 .pm-btn.danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.14);
-  color: #fff;
-  border-color: rgba(248, 113, 113, 0.6);
+  background: rgba(248, 113, 113, 0.18);
+  border-color: rgba(248, 113, 113, 0.75);
+}
+
+.pm-btn.danger:active:not(:disabled) {
+  background: rgba(248, 113, 113, 0.26);
 }
 
 .pm-btn.primary {
@@ -555,11 +568,11 @@ body {
 }
 
 .pm-btn-sm {
-  padding: 4px 14px;
+  padding: 3px 12px;
   font-size: 12px;
 }
 
-html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled) {
+html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled):not(.danger) {
   border-color: rgba(15, 23, 42, 0.28);
 }
 

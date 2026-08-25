@@ -26,6 +26,8 @@ export default function PluginManager() {
   const pluginOp = useAppStore((s) => s.pluginOp);
   const pluginOpLogs = useAppStore((s) => s.pluginOpLogs);
   const startPluginOp = useAppStore((s) => s.startPluginOp);
+  const pluginVers = useAppStore((s) => s.pluginVers);
+  const refreshPluginVersions = useAppStore((s) => s.refreshPluginVersions);
 
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"list" | "terminal">("list");
@@ -44,24 +46,26 @@ export default function PluginManager() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [pluginOpLogs.at(-1)?.id]);
 
-  // 完成监听：running → false 转变时提示并刷新列表（无论弹框是否打开）
+  // 完成监听：running → false 转变时提示并刷新列表与版本信息（无论弹框是否打开）
   useEffect(() => {
     const running = pluginOp?.running ?? false;
     if (prevRunningRef.current && !running && pluginOp) {
       message.info("插件已变更，请稍后刷新页面或重启服务");
       void refreshStatus();
+      void refreshPluginVersions();
     }
     prevRunningRef.current = running;
-  }, [pluginOp?.running, pluginOp, message, refreshStatus]);
-
-  if (!tauri) return null;
-
-  const running = pluginOp?.running ?? false;
+  }, [pluginOp?.running, pluginOp, message, refreshStatus, refreshPluginVersions]);
 
   const openManager = () => {
     setOpen(true);
     setView(pluginOp?.running ? "terminal" : "list");
+    void refreshPluginVersions();
   };
+
+  if (!tauri) return null;
+
+  const running = pluginOp?.running ?? false;
 
   const confirmOp = (kind: Exclude<PluginOpKind, "add">, pluginName: string) => {
     const verb = OP_VERB[kind];
@@ -172,27 +176,40 @@ export default function PluginManager() {
             {plugins.length === 0 ? (
               <div className="plugin-empty">暂无用户插件</div>
             ) : (
-              plugins.map((p) => (
-                <div key={p} className="plugin-row">
-                  <span className="plugin-name">{p}</span>
-                  <button
-                    className="pm-btn pm-btn-sm"
-                    type="button"
-                    disabled={running}
-                    onClick={() => confirmOp("update", p)}
-                  >
-                    更新
-                  </button>
-                  <button
-                    className="pm-btn pm-btn-sm danger"
-                    type="button"
-                    disabled={running}
-                    onClick={() => confirmOp("remove", p)}
-                  >
-                    删除
-                  </button>
-                </div>
-              ))
+              plugins.map((p) => {
+                const info = pluginVers[p];
+                const outdated =
+                  !!info?.current && !!info?.latest && info.current !== info.latest;
+                return (
+                  <div key={p} className="plugin-row">
+                    <span className="plugin-name">
+                      {p}
+                      {info?.current ? <span className="plugin-ver">{info.current}</span> : null}
+                      {outdated ? (
+                        <span className="plugin-ver new">→ {info.latest}</span>
+                      ) : null}
+                    </span>
+                    {outdated ? (
+                      <button
+                        className="pm-btn pm-btn-sm"
+                        type="button"
+                        disabled={running}
+                        onClick={() => confirmOp("update", p)}
+                      >
+                        更新
+                      </button>
+                    ) : null}
+                    <button
+                      className="pm-btn pm-btn-sm danger"
+                      type="button"
+                      disabled={running}
+                      onClick={() => confirmOp("remove", p)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                );
+              })
             )}
           </div>
         ) : (
