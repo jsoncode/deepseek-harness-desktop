@@ -9,6 +9,8 @@ export type MarketSort = "weekly" | "stars" | "date";
 export interface MarketPlugin {
   key: string;
   name: string;
+  /** 安装时传给 `dsh plugin add` 的规格：NPM 为包名，GitHub 为 github:{full_name} */
+  spec: string;
   author: string;
   avatarUrl: string | null;
   weekly: number | null;
@@ -84,6 +86,7 @@ export async function fetchMarketPage(
       items: (g.items ?? []).map((it) => ({
         key: it.full_name ?? it.name ?? Math.random().toString(36).slice(2),
         name: it.name ?? it.full_name ?? "—",
+        spec: `github:${it.full_name ?? it.name ?? ""}`,
         author: it.owner?.login ?? "—",
         avatarUrl: it.owner?.avatar_url ?? null,
         // GitHub 不提供仓库级下载数
@@ -117,6 +120,7 @@ export async function fetchMarketPage(
   const items: MarketPlugin[] = (n.objects ?? []).map((o) => ({
     key: o.package?.name ?? Math.random().toString(36).slice(2),
     name: o.package?.name ?? "—",
+    spec: o.package?.name ?? "",
     author: o.package?.publisher?.username ?? "—",
     avatarUrl: o.package?.publisher?.username
       ? `https://github.com/${o.package.publisher.username}.png?size=64`

@@ -576,6 +576,227 @@ html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled):not(
   border-color: rgba(15, 23, 42, 0.28);
 }
 
+/* ---- 插件市场（大弹框）---- */
+
+/* 毛玻璃增强：半透明面板底，透出应用背景 */
+.plugin-manager-modal.mk-market .ant-modal-content {
+  background:
+    linear-gradient(160deg, rgba(23, 28, 40, 0.72), rgba(12, 15, 22, 0.8));
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+}
+
+html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.78), rgba(246, 247, 251, 0.86));
+}
+
+.pm-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 36px;
+}
+
+/* 源切换 / tab / 排序 共用分段胶囊组 */
+.pm-seg {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+}
+
+.pm-seg button {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.pm-seg button:hover:not(.active):not(:disabled) {
+  color: var(--text-1);
+}
+
+.pm-seg button.active {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+}
+
+.pm-seg button.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.plugin-manager-modal .mk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.plugin-manager-modal .mk-search {
+  width: 240px;
+}
+
+.mk-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.mk-table {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow-y: auto;
+  height: 480px;
+  background: var(--panel);
+}
+
+.mk-grid {
+  display: grid;
+  grid-template-columns:
+    44px 44px minmax(200px, 1.4fr) minmax(100px, 0.9fr)
+    118px minmax(170px, 1.2fr) 84px 96px 158px;
+  align-items: center;
+  gap: 0 10px;
+  padding: 8px 12px;
+}
+
+.mk-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-strong);
+  font-size: 12px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.mk-row {
+  border-bottom: 1px solid var(--border);
+  transition: background 0.12s ease;
+}
+
+.mk-row:hover {
+  background: var(--panel-strong);
+}
+
+.mk-num {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mk-num.muted {
+  color: var(--text-3);
+  opacity: 0.7;
+}
+
+.mk-right {
+  text-align: right;
+}
+
+.mk-name {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.mk-author {
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mk-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.mk-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+.mk-avatar-fallback {
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #22d3ee);
+}
+
+.mk-empty {
+  padding: 48px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.mk-error,
+.mk-empty.mk-error {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.mk-loading-overlay {
+  position: absolute;
+  inset: 44px 0 0;
+  display: grid;
+  place-items: center;
+  background: rgba(7, 9, 13, 0.35);
+  z-index: 3;
+}
+
+html[data-theme="light"] .mk-loading-overlay {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.mk-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding-top: 12px;
+}
+
+.mk-pager-info {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
 /* 主按钮 */
 .launch-actions {
   display: flex;
