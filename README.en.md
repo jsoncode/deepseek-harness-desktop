@@ -118,7 +118,7 @@ The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build +
 | --- | --- |
 | `/` Launch | Centered logo + primary button. Shows **Open App** when a service is already running, otherwise **Launch App**. |
 | `/terminal` Terminal | Streaming logs of the global install (`pnpm add -g @deepseek-ai/dsh@latest`) and `dsh web` startup; auto-navigates to the preview once the service is ready. |
-| `/preview` Preview | iframe of the local service with refresh / copy URL / open in browser and a disconnected-state overlay. |
+| `/preview` Preview | iframe of the local service with refresh / copy URL / open in browser; the titlebar indicator turns red when the service disconnects. |
 
 System tray (right-click): **Open** restores the window, **Open in Browser** opens the service URL in your default browser, **Quit** stops the service and exits.
 
