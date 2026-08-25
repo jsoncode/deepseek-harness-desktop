@@ -19,14 +19,25 @@ pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
 pub const PLUGIN_INSTALL_LOG_EVENT: &str = "dsh://plugin-install-log";
 pub const PLUGIN_INSTALL_EXIT_EVENT: &str = "dsh://plugin-install-exit";
+pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
+pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
 
 // ---------------------------------------------------------------------------
 // 状态与负载
 // ---------------------------------------------------------------------------
 
+/// 进行中的插件 CLI 操作
+pub struct PluginOpState {
+    pub pid: u32,
+    pub kind: String,
+    pub name: String,
+}
+
 pub struct AppState {
     /// 正在运行的 `dsh web` 子进程 pid（无则为 None）
     pub child_pid: Mutex<Option<u32>>,
+    /// 进行中的插件 CLI 操作（单并发，无则为 None）
+    pub plugin_op: Mutex<Option<PluginOpState>>,
     /// 已探测到的服务 URL
     pub detected_url: Mutex<Option<String>>,
     /// 子进程输出中出现的候选 URL（用于持续复探与停止时按端口兜底清理）
@@ -37,6 +48,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             child_pid: Mutex::new(None),
+            plugin_op: Mutex::new(None),
             detected_url: Mutex::new(None),
             pending_urls: Mutex::new(Vec::new()),
         }
@@ -698,6 +710,104 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         }
     });
     Ok(())
+}
+
+/// 校验插件 CLI 操作类型
+fn validate_plugin_op(op: &str) -> Result<(), String> {
+    match op {
+        "add" | "update" | "remove" => Ok(()),
+        _ => Err(format!("不支持的插件操作: {op}")),
+    }
+}
+
+/// 执行 `dsh plugin --profile web {op} {name}`（流式输出、可终止、单并发）。
+/// dsh CLI 会转发 pnpm 并按安装结果对账 profile bundles（见宿主 apps/cli/src/plugin.ts）。
+/// 进程退出由泵线程发 exit 事件并清理状态。
+#[tauri::command]
+pub fn run_plugin_op(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    op: String,
+    name: String,
+) -> Result<(), String> {
+    validate_plugin_op(&op)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("插件名称不能为空".into());
+    }
+    {
+        let guard = state.plugin_op.lock().unwrap();
+        if guard.is_some() {
+            return Err("已有插件操作正在进行中，请稍后再试".into());
+        }
+    }
+    let dsh = resolve_dsh().ok_or("未找到 dsh，请先全局安装 @deepseek-ai/dsh")?;
+    // 先占位再 spawn，防并发；spawn 失败回滚
+    *state.plugin_op.lock().unwrap() = Some(PluginOpState {
+        pid: 0,
+        kind: op.clone(),
+        name: name.clone(),
+    });
+
+    emit_log(
+        &app,
+        PLUGIN_OP_LOG_EVENT,
+        "system",
+        &format!("$ dsh plugin --profile web {op} {name}"),
+    );
+
+    let mut cmd = Command::new(&dsh.program);
+    cmd.args(&dsh.args)
+        .arg("plugin")
+        .arg("--profile")
+        .arg("web")
+        .arg(&op)
+        .arg(&name)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    match hide_window(&mut cmd).spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            if let Some(st) = state.plugin_op.lock().unwrap().as_mut() {
+                st.pid = pid;
+            }
+            emit_log(
+                &app,
+                PLUGIN_OP_LOG_EVENT,
+                "system",
+                &format!("进程已启动（PID {pid}），输出如下"),
+            );
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                pump_process(&app2, child, PLUGIN_OP_LOG_EVENT, PLUGIN_OP_EXIT_EVENT);
+                if let Some(s) = app2.try_state::<AppState>() {
+                    *s.plugin_op.lock().unwrap() = None;
+                }
+            });
+            Ok(())
+        }
+        Err(e) => {
+            *state.plugin_op.lock().unwrap() = None;
+            emit_log(&app, PLUGIN_OP_LOG_EVENT, "error", &format!("启动失败: {e}"));
+            Err(format!("启动插件操作失败: {e}"))
+        }
+    }
+}
+
+/// 终止当前插件 CLI 操作（整树杀灭，避免 Windows shell 链上的孤儿进程）；
+/// 返回是否存在被终止的操作。exit 事件由泵线程照常发出。
+#[tauri::command]
+pub fn cancel_plugin_op(state: State<'_, AppState>) -> Result<bool, String> {
+    let pid = state.plugin_op.lock().unwrap().take().map(|s| s.pid);
+    match pid {
+        Some(pid) if pid != 0 => {
+            kill_tree(pid);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 pub fn kill_tree(pid: u32) {
