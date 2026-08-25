@@ -1,6 +1,7 @@
+import { Tooltip } from "antd";
+import { BorderOutlined, CloseOutlined, MinusOutlined, SwitcherOutlined } from "@ant-design/icons";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
-import { CloseIcon, MaximizeIcon, MinusIcon, RestoreIcon } from "./icons";
 import { tauri } from "../lib/tauri";
 
 export default function WindowControls() {
@@ -40,36 +41,43 @@ export default function WindowControls() {
 
   return (
     <div className="window-controls">
-      <button
-        type="button"
-        className="win-btn"
-        title="最小化"
-        aria-label="最小化"
-        onClick={() => void win?.minimize()}
-      >
-        <MinusIcon size={14} />
-      </button>
+      <Tooltip title="最小化">
+        <button
+          type="button"
+          className="win-btn"
+          aria-label="最小化"
+          onClick={() => void win?.minimize()}
+        >
+          <MinusOutlined style={{ fontSize: 14 }} />
+        </button>
+      </Tooltip>
       {/* id="win-maximize"：Windows 11 上 snap-layout 插件在此处放置原生 HTMAXBUTTON 命中区，
           悬停触发系统磁吸布局预览，点击走原生最大化/还原；onClick 仅作为非 Windows 兜底 */}
-      <button
-        type="button"
-        id="win-maximize"
-        className="win-btn"
-        title={maximized ? "还原" : "最大化"}
-        aria-label={maximized ? "还原" : "最大化"}
-        onClick={() => void win?.toggleMaximize()}
-      >
-        {maximized ? <RestoreIcon size={14} /> : <MaximizeIcon size={14} />}
-      </button>
-      <button
-        type="button"
-        className="win-btn win-btn-close"
-        title="关闭"
-        aria-label="关闭"
-        onClick={() => void win?.close()}
-      >
-        <CloseIcon size={14} />
-      </button>
+      <Tooltip title={maximized ? "还原" : "最大化"}>
+        <button
+          type="button"
+          id="win-maximize"
+          className="win-btn"
+          aria-label={maximized ? "还原" : "最大化"}
+          onClick={() => void win?.toggleMaximize()}
+        >
+          {maximized ? (
+            <SwitcherOutlined style={{ fontSize: 14 }} />
+          ) : (
+            <BorderOutlined style={{ fontSize: 14 }} />
+          )}
+        </button>
+      </Tooltip>
+      <Tooltip title="关闭">
+        <button
+          type="button"
+          className="win-btn win-btn-close"
+          aria-label="关闭"
+          onClick={() => void win?.close()}
+        >
+          <CloseOutlined style={{ fontSize: 14 }} />
+        </button>
+      </Tooltip>
     </div>
   );
 }
