@@ -578,6 +578,11 @@ html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled):not(
 
 /* ---- 插件市场（大弹框）---- */
 
+/* 插件管理弹框：90vw，最大 1280 */
+.plugin-manager-modal {
+  max-width: 1280px;
+}
+
 /* 毛玻璃增强：半透明面板底，透出应用背景 */
 .plugin-manager-modal.mk-market .ant-modal-content {
   background:

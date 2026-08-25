@@ -546,7 +546,7 @@ export default function PluginManager() {
         open={open}
         className={`plugin-manager-modal${view === "market" ? " mk-market" : ""}`}
         onCancel={() => setOpen(false)}
-        width={1080}
+        width="90vw"
         title={
           view === "terminal" ? (
             `正在${OP_VERB[pluginOp?.kind ?? "add"]} · ${pluginOp?.name ?? ""}`
