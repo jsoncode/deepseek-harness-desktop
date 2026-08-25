@@ -1,6 +1,7 @@
 import { CaretRightFilled, HomeOutlined, StopOutlined } from "@ant-design/icons";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
+import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /** 日志行前缀符号（终端页与插件操作终端共用） */
@@ -27,23 +28,10 @@ export default function Terminal() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const { phase, logs, initialized, init, startFlow, stop, reset } = useAppStore();
 
-  // 进入页面后仅启动一次流程（失败/停止后不自动重启，避免循环拉起）
-  const startedRef = useRef(false);
+  // 进入页面仅同步应用状态；不再自动启动服务（启动由用户在启动页手动点击触发）
   useEffect(() => {
-    const maybeStart = (s: ReturnType<typeof useAppStore.getState>) => {
-      if (startedRef.current) return;
-      if (s.phase === "idle" || s.phase === "error" || s.phase === "stopped") {
-        startedRef.current = true;
-        void s.startFlow();
-      }
-    };
-    if (!initialized) {
-      void init().then(() => maybeStart(useAppStore.getState()));
-      return;
-    }
-    maybeStart(useAppStore.getState());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialized, phase]);
+    if (!initialized) void init();
+  }, [initialized, init]);
 
   // 仅当本页参与的启动流程（starting → running）才自动进入预览页；
   // 进入页面时服务已在运行（phase=running）则不跳转，避免打断查看日志
@@ -93,7 +81,9 @@ export default function Terminal() {
         <div className={`term-progress${busy ? " active" : ""}`} />
         <div className="term-body" ref={bodyRef}>
           {logs.length === 0 ? (
-            <div className="term-empty">等待输出…</div>
+            <div className="term-empty">
+              {tauri ? "等待输出…" : "浏览器预览模式：启动/停止服务需在桌面应用内操作"}
+            </div>
           ) : (
             logs.map((l) => (
               <div key={l.id} className={`term-line ${l.stream}`}>

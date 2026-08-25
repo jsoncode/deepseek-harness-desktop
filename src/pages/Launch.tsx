@@ -32,11 +32,12 @@ interface EnvRow {
 
 export default function Launch() {
   const navigate = useNavigate();
-  const { phase, url, dshInstalled, pnpmPath, plugins, initialized, init, refreshStatus } =
+  const { phase, url, dshInstalled, dshVersion, pnpmPath, plugins, initialized, init, refreshStatus } =
     useAppStore();
   const nodePath = useAppStore((s) => s.nodePath);
   const nodeVersion = useAppStore((s) => s.nodeVersion);
   const pnpmVersion = useAppStore((s) => s.pnpmVersion);
+  const startFlow = useAppStore((s) => s.startFlow);
 
   useEffect(() => {
     if (!initialized) {
@@ -108,7 +109,11 @@ export default function Launch() {
 
     envRows.push(
       dshInstalled
-        ? { name: "dsh CLI", state: "ok", detail: <span>已安装</span> }
+        ? {
+            name: "dsh CLI",
+            state: "ok",
+            detail: dshVersion ? <span>已安装 v{dshVersion}</span> : <span>已安装</span>,
+          }
         : {
             name: "dsh CLI",
             state: "warn",
@@ -121,6 +126,12 @@ export default function Launch() {
   let statusClass = "launch-status";
   if (phase === "checking") {
     statusText = "正在检测运行环境…";
+    statusClass += " busy";
+  } else if (phase === "installing") {
+    statusText = "正在安装 @deepseek-ai/dsh…";
+    statusClass += " busy";
+  } else if (phase === "starting") {
+    statusText = "正在启动本地服务…";
     statusClass += " busy";
   } else if (phase === "running") {
     statusText = (
@@ -144,7 +155,13 @@ export default function Launch() {
       navigate("/preview");
       return;
     }
-    navigate("/terminal");
+    // 手动点击启动：直接在启动页执行启动流程（不再跳转终端页自动启动）
+    if (!tauri) {
+      // 浏览器预览模式：无后端，跳转终端页展示说明
+      navigate("/terminal");
+      return;
+    }
+    void startFlow();
   };
 
   let btnText = "启动应用";

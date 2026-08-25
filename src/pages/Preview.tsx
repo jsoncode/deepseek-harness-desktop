@@ -1,4 +1,4 @@
-import { ArrowLeftOutlined } from "@ant-design/icons";
+import { HomeOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
@@ -61,7 +61,7 @@ export default function Preview() {
           <div className="big">{syncing ? <span className="spinner-ring" /> : "🛰"}</div>
           <div>{syncing ? "正在检测本地服务…" : "未检测到本地服务地址"}</div>
           <button className="btn-secondary" onClick={() => navigate("/")}>
-            <ArrowLeftOutlined style={{ fontSize: 14 }} /> 返回启动页
+            <HomeOutlined style={{ fontSize: 14 }} /> 返回启动页
           </button>
         </div>
       </div>

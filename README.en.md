@@ -30,7 +30,7 @@ For new users: grab the installer for your platform and double-click to install 
 **First run (two steps)**:
 
 1. Install [Node.js](https://nodejs.org/) ≥ 22.19 and [pnpm](https://pnpm.io/installation) — the app automatically runs `pnpm add -g @deepseek-ai/dsh@latest` to install DSH and start the local service;
-2. Open the app and click **Launch App** — it auto-navigates to the preview once the service is ready.
+2. Open the app and click **Launch App** to start the service manually (the launch page shows the dsh CLI version and install/start progress); once ready, click **Open App** to enter the preview.
 
 > - On Windows, if SmartScreen warns you, choose **More info → Run anyway**.
 > - On macOS, the app is not notarized: on first open go to **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**.
@@ -116,8 +116,8 @@ The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build +
 
 | Page | Description |
 | --- | --- |
-| `/` Launch | Centered logo + primary button. Shows **Open App** when a service is already running, otherwise **Launch App**. |
-| `/terminal` Terminal | Streaming logs of the global install (`pnpm add -g @deepseek-ai/dsh@latest`) and `dsh web` startup; auto-navigates to the preview once the service is ready. |
+| `/` Launch | Centered logo + environment pre-check card (Node.js / pnpm / dsh CLI versions) + primary button. Shows **Open App** when a service is already running, otherwise **Launch App** (starts only on manual click — never auto-starts on page entry). |
+| `/terminal` Terminal | Streaming logs of the global install (`pnpm add -g @deepseek-ai/dsh@latest`) and `dsh web` startup; entering the page never auto-starts the service, it only shows logs. |
 | `/preview` Preview | iframe of the local service with refresh / copy URL / open in browser; the titlebar indicator turns red when the service disconnects. |
 
 System tray (right-click): **Open** restores the window, **Open in Browser** opens the service URL in your default browser, **Quit** stops the service and exits.

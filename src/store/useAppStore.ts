@@ -31,6 +31,7 @@ interface AppStore {
   logs: LogEntry[];
   url: string | null;
   dshInstalled: boolean;
+  dshVersion: string | null;
   serviceRunning: boolean;
   childRunning: boolean;
   pnpmPath: string | null;
@@ -206,6 +207,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     logs: [],
     url: null,
     dshInstalled: false,
+    dshVersion: null,
     serviceRunning: false,
     childRunning: false,
     pnpmPath: null,
@@ -316,6 +318,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         const s: StatusPayload = await api.appStatus();
         set({
           dshInstalled: s.dsh_installed,
+          dshVersion: s.dsh_version,
           serviceRunning: s.service_running,
           childRunning: s.child_running,
           url: s.url,
@@ -347,6 +350,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         const s: StatusPayload = await api.appStatus();
         set({
           dshInstalled: s.dsh_installed,
+          dshVersion: s.dsh_version,
           serviceRunning: s.service_running,
           childRunning: s.child_running,
           url: s.url,

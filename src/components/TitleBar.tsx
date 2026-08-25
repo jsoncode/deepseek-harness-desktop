@@ -1,10 +1,10 @@
 import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
 import {
-  ArrowLeftOutlined,
   CodeOutlined,
   CopyOutlined,
   ExportOutlined,
+  HomeOutlined,
   ReloadOutlined,
   StopOutlined,
   SyncOutlined,
@@ -133,7 +133,7 @@ export default function TitleBar() {
         </Tooltip>
         <Tooltip title="返回启动页">
           <button className="icon-btn" type="button" aria-label="返回启动页" onClick={() => navigate("/")}>
-            <ArrowLeftOutlined />
+            <HomeOutlined />
           </button>
         </Tooltip>
         <div className="url-pill">

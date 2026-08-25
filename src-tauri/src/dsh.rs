@@ -76,6 +76,7 @@ pub struct UrlPayload {
 #[derive(Serialize, Clone)]
 pub struct StatusPayload {
     pub dsh_installed: bool,
+    pub dsh_version: Option<String>,
     pub service_running: bool,
     pub child_running: bool,
     pub url: Option<String>,
@@ -164,15 +165,16 @@ fn resolve_node() -> Option<PathBuf> {
     run_where("node").into_iter().find(|p| is_exec_shim(p))
 }
 
-/// 执行 `<program> --version` 并解析首行输出版本号（去前导 v，如 `22.21.1`）。
+/// 执行 `<program> [args...] --version` 并解析首行输出版本号（去前导 v，如 `22.21.1`）。
 ///
 /// 带 2 秒超时：子进程挂起时不阻塞 app_status；失败/超时/输出不合预期一律 None。
 /// 输出首行必须形如 `major.minor[.patch]` 才视为有效版本。
-fn read_tool_version(program: &PathBuf) -> Option<String> {
-    let program = program.clone();
+fn read_exec_version(program: &str, args: &[String]) -> Option<String> {
+    let program = program.to_string();
+    let args = args.to_vec();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = hide_window(Command::new(&program).arg("--version")).output();
+        let out = hide_window(Command::new(&program).args(&args).arg("--version")).output();
         let _ = tx.send(out);
     });
     // recv_timeout 与子进程 output 是两层 Result，任一失败（超时/进程出错）都按 None 处理
@@ -189,6 +191,16 @@ fn read_tool_version(program: &PathBuf) -> Option<String> {
     let mut parts = ver.split('.');
     parts.next()?.parse::<u64>().ok()?;
     Some(ver.to_string())
+}
+
+/// 执行 `<program> --version` 并解析首行输出版本号（node / pnpm 等无前置参数的工具）
+fn read_tool_version(program: &PathBuf) -> Option<String> {
+    read_exec_version(&program.to_string_lossy(), &[])
+}
+
+/// 读取已解析的 dsh 可执行文件版本（`.ps1` 包装经 powershell 前置参数执行）
+fn read_dsh_version(dsh: &DshExec) -> Option<String> {
+    read_exec_version(&dsh.program, &dsh.args)
 }
 
 /// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
@@ -540,6 +552,7 @@ fn try_detect_url(app: &AppHandle, line: &str) {
 #[tauri::command]
 pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     let dsh = resolve_dsh();
+    let dsh_version = dsh.as_ref().and_then(read_dsh_version);
     let dsh_installed = dsh.is_some();
     let dsh_path = dsh.map(|d| d.display);
 
@@ -587,6 +600,7 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
 
     StatusPayload {
         dsh_installed,
+        dsh_version,
         service_running,
         child_running,
         url,

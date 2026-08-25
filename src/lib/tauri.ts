@@ -31,6 +31,7 @@ export interface UrlPayload {
 
 export interface StatusPayload {
   dsh_installed: boolean;
+  dsh_version: string | null;
   service_running: boolean;
   child_running: boolean;
   url: string | null;
