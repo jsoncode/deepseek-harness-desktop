@@ -257,14 +257,6 @@ body {
   animation: fadeUp 0.7s 0.08s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.launch-subtitle {
-  margin: 8px 0 0;
-  font-size: 15px;
-  color: var(--text-2);
-  letter-spacing: 0.04em;
-  animation: fadeUp 0.7s 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
 .launch-status {
   display: flex;
   align-items: center;
@@ -390,6 +382,37 @@ body {
   color: var(--danger);
 }
 
+/* Plugins 小节：用户插件列表（bundles ∩ dependencies） */
+.env-section-title {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-strong);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.plugin-remove-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.plugin-remove-btn:hover {
+  background: rgba(248, 113, 113, 0.12);
+}
+
 /* 主按钮 */
 .launch-actions {
   display: flex;
@@ -468,33 +491,6 @@ body {
   background: var(--panel-strong);
   border-color: rgba(255, 255, 255, 0.24);
   transform: translateY(-1px);
-}
-
-.launch-footer {
-  position: absolute;
-  bottom: 22px;
-  left: 0;
-  right: 0;
-  display: flex;
-  justify-content: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  animation: fadeUp 0.7s 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.env-chip {
-  padding: 4px 12px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
-.env-chip b {
-  color: var(--text-2);
-  font-weight: 500;
 }
 
 /* ==========================================================================

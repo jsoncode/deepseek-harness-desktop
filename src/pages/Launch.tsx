@@ -1,7 +1,8 @@
 import { useEffect, type ReactNode } from "react";
+import { App as AntApp } from "antd";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import { tauri } from "../lib/tauri";
+import { api, tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /** 环境要求：Node.js ≥ 22.19 */
@@ -32,7 +33,8 @@ interface EnvRow {
 
 export default function Launch() {
   const navigate = useNavigate();
-  const { phase, url, dshInstalled, pnpmPath, dshPath, initialized, init, refreshStatus } =
+  const { modal, message } = AntApp.useApp();
+  const { phase, url, dshInstalled, pnpmPath, plugins, initialized, init, refreshStatus } =
     useAppStore();
   const nodePath = useAppStore((s) => s.nodePath);
   const nodeVersion = useAppStore((s) => s.nodeVersion);
@@ -134,10 +136,29 @@ export default function Launch() {
     statusText = "启动失败，请检查终端日志";
     statusClass += " error";
   } else if (phase === "stopped") {
-    statusText = "服务已停止，点击重新启动";
+    statusText = "服务已停止";
   } else {
     statusText = dshInstalled ? "环境就绪 · 点击启动本地服务" : "首次使用 · 将自动安装 @deepseek-ai/dsh";
   }
+
+  const confirmRemove = (name: string) => {
+    modal.confirm({
+      title: "移除插件",
+      content: `确定移除插件 ${name}？将同时从 bundles 与 dependencies 中删除。`,
+      okText: "移除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await api.removePlugin(name);
+          await refreshStatus();
+          message.success(`已移除 ${name}`);
+        } catch (e) {
+          message.error(String(e instanceof Error ? e.message : e));
+        }
+      },
+    });
+  };
 
   const handlePrimary = () => {
     if (phase === "running") {
@@ -163,7 +184,6 @@ export default function Launch() {
       </div>
 
       <h1 className="launch-title">DeepSeek Harness Desktop</h1>
-      <p className="launch-subtitle">DeepSeek Harness · 本地服务启动器</p>
 
       <div className={statusClass}>
         <span className="dot" />
@@ -181,6 +201,30 @@ export default function Launch() {
               <span className="env-detail">{r.detail}</span>
             </div>
           ))}
+          {tauri ? (
+            <>
+              <div className="env-section-title">Plugins</div>
+              {plugins.length === 0 ? (
+                <div className="env-row">
+                  <span className="env-detail">暂无用户插件</span>
+                </div>
+              ) : (
+                plugins.map((name) => (
+                  <div key={name} className="env-row">
+                    <span className="env-mark ok">◆</span>
+                    <span className="env-name">{name}</span>
+                    <button
+                      className="plugin-remove-btn"
+                      type="button"
+                      onClick={() => confirmRemove(name)}
+                    >
+                      移除
+                    </button>
+                  </div>
+                ))
+              )}
+            </>
+          ) : null}
           {startGated ? (
             <div className="env-hint">请先修复以上环境问题，修复后重启本应用再启动服务</div>
           ) : null}
@@ -204,27 +248,6 @@ export default function Launch() {
           {btnText}
         </button>
       </div>
-
-      {initialized ? (
-        <div className="launch-footer">
-          {nodeVersion ? (
-            <span className="env-chip">
-              node <b>v{nodeVersion}</b>
-            </span>
-          ) : null}
-          {pnpmPath ? (
-            <span className="env-chip">
-              pnpm <b>{pnpmPath.split(/[\\/]/).slice(-2).join("/")}</b>
-            </span>
-          ) : null}
-          {dshPath ? (
-            <span className="env-chip">
-              dsh <b>{dshPath.split(/[\\/]/).slice(-2).join("/")}</b>
-            </span>
-          ) : null}
-          <span className="env-chip">v0.1.0</span>
-        </div>
-      ) : null}
     </div>
   );
 }
