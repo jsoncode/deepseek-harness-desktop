@@ -1,5 +1,6 @@
 import { ClusterOutlined } from "@ant-design/icons";
-import { App as AntApp, Badge, Input, Modal, Tooltip } from "antd";
+import { App as AntApp, Badge, Input, Modal, Table, Tooltip } from "antd";
+import type { ColumnsType } from "antd/es/table";
 import { useEffect, useRef, useState } from "react";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
@@ -38,10 +39,29 @@ function Avatar({ url, name }: { url: string | null; name: string }) {
   );
 }
 
+/** 表格行数据（市场行与已安装行统一） */
+interface MkRow {
+  key: string;
+  seq: number;
+  name: string;
+  spec: string;
+  author: string;
+  avatarUrl: string | null;
+  weekly: number | null;
+  monthly: number | null;
+  stars: number | null;
+  /** 最新可用版本；本地链接包为 null */
+  latest: string | null;
+  releasedAt: string | null;
+  installedHere: boolean;
+  current: string | null;
+}
+
 /**
  * 插件管理：标题栏入口 + 大尺寸插件市场弹框。
- * 市场视图：GitHub/NPM 双源搜索、排序、分页、安装/更新/卸载；
+ * 市场视图：GitHub/NPM 双源搜索、排序、分页（antd Table，固定操作列）、安装/更新/卸载；
  * 终端视图：流式展示 `dsh plugin` 操作日志，支持终止与后台运行。
+ * 视图/tab/翻页切换带方向感穿梭动画。
  */
 export default function PluginManager() {
   const { modal, message } = AntApp.useApp();
@@ -73,18 +93,23 @@ export default function PluginManager() {
   const [market, setMarket] = useState<MarketPage | null>(null);
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState<string | null>(null);
+  /** 内容区穿梭动画：n 变化触发重挂载，cls 决定入场方向 */
+  const [paneAnim, setPaneAnim] = useState<{ n: number; cls: string }>({ n: 0, cls: "" });
+  const bumpPane = (cls: string) => setPaneAnim((p) => ({ n: p.n + 1, cls }));
 
   useEffect(() => {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 搜索防抖
+  // 搜索防抖（提交时内容区渐隐过渡）
   useEffect(() => {
     const t = setTimeout(() => {
       setQuery(queryInput);
       setPage(1);
+      bumpPane("mk-fade");
     }, 400);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryInput]);
 
   // 市场数据拉取（仅市场视图 + 所有插件 tab）
@@ -143,6 +168,25 @@ export default function PluginManager() {
     void refreshPluginVersions();
   };
 
+  /** 带方向感的穿梭切换 */
+  const switchTab = (mode: "all" | "installed") => {
+    if (tabMode === mode) return;
+    bumpPane(mode === "installed" ? "mk-from-right" : "mk-from-left");
+    setTabMode(mode);
+    setPage(1);
+    if (mode === "installed") void refreshPluginVersions();
+  };
+
+  const switchSource = (s: MarketSource) => {
+    if (source === s) return;
+    bumpPane(s === "npm" ? "mk-from-right" : "mk-from-left");
+    setSource(s);
+    setSort(s === "github" ? "stars" : "weekly");
+    setPage(1);
+    setQuery("");
+    setQueryInput("");
+  };
+
   const confirmOp = (kind: PluginOpKind, target: string) => {
     const verb = OP_VERB[kind];
     modal.confirm({
@@ -187,43 +231,35 @@ export default function PluginManager() {
     });
   };
 
-  const switchSource = (s: MarketSource) => {
-    setSource(s);
-    setSort(s === "github" ? "stars" : "weekly");
-    setPage(1);
-    setQuery("");
-    setQueryInput("");
-  };
-
-  /** 行内操作按钮组（市场行 / 已安装 tab 行共用） */
-  const renderActions = (name: string, spec: string, installedHere: boolean) => (
+  /** 行内操作按钮组（固定列渲染） */
+  const renderActions = (_: unknown, r: MkRow) => (
     <div className="mk-actions">
-      {!installedHere ? (
+      {!r.installedHere ? (
         <button
           className="pm-btn pm-btn-sm primary"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("add", spec)}
+          onClick={() => confirmOp("add", r.spec)}
         >
           安装
         </button>
       ) : null}
-      {installedHere && isOutdated(name) ? (
+      {r.installedHere && isOutdated(r.name) ? (
         <button
           className="pm-btn pm-btn-sm"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("update", name)}
+          onClick={() => confirmOp("update", r.name)}
         >
           更新
         </button>
       ) : null}
-      {installedHere ? (
+      {r.installedHere ? (
         <button
           className="pm-btn pm-btn-sm danger"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("remove", name)}
+          onClick={() => confirmOp("remove", r.name)}
         >
           卸载
         </button>
@@ -231,11 +267,121 @@ export default function PluginManager() {
     </div>
   );
 
-  const sortChips: Array<{ key: MarketSort; label: string; disabledIn: MarketSource[] }> = [
-    { key: "weekly", label: "周下载", disabledIn: ["github"] },
-    { key: "stars", label: "Stars", disabledIn: ["npm"] },
-    { key: "date", label: "发布日期", disabledIn: [] },
+  const columns: ColumnsType<MkRow> = [
+    {
+      title: "#",
+      key: "seq",
+      width: 48,
+      render: (_, r) => <span className="mk-num">{r.seq}</span>,
+    },
+    {
+      title: "",
+      key: "avatar",
+      width: 52,
+      render: (_, r) => <Avatar url={r.avatarUrl} name={r.author} />,
+    },
+    {
+      title: "插件名称",
+      dataIndex: "name",
+      ellipsis: true,
+      render: (_, r) => (
+        <span className="mk-name" title={r.name}>
+          {r.name}
+          {r.installedHere && r.current ? (
+            <span className="plugin-ver">(本机 v{r.current})</span>
+          ) : null}
+          {isOutdated(r.name) && pluginVers[r.name]?.latest ? (
+            <span className="plugin-ver new">→ {pluginVers[r.name]?.latest}</span>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      title: "作者",
+      dataIndex: "author",
+      width: 120,
+      ellipsis: true,
+      render: (v: string) => <span className="mk-author">{v}</span>,
+    },
+    {
+      title: "周/月下载",
+      key: "downloads",
+      width: 122,
+      render: (_, r) => (
+        <span className={`mk-num${r.weekly === null ? " muted" : ""}`}>
+          {r.weekly === null ? "—" : `${formatCount(r.weekly)} / ${formatCount(r.monthly)}`}
+        </span>
+      ),
+    },
+    {
+      title: "版本",
+      key: "ver",
+      width: 170,
+      render: (_, r) => (
+        <span className={`mk-num${r.latest === null ? " muted" : ""}`}>{r.latest ?? "—"}</span>
+      ),
+    },
+    {
+      title: "Stars",
+      key: "stars",
+      width: 84,
+      render: (_, r) => (
+        <span className={`mk-num${r.stars === null ? " muted" : ""}`}>
+          {r.stars === null ? "—" : `★ ${formatCount(r.stars)}`}
+        </span>
+      ),
+    },
+    {
+      title: "发布日期",
+      key: "date",
+      width: 98,
+      render: (_, r) => (
+        <span className={`mk-num${r.releasedAt ? "" : " muted"}`}>{formatDate(r.releasedAt)}</span>
+      ),
+    },
+    {
+      title: "操作",
+      key: "actions",
+      fixed: "right",
+      width: 156,
+      render: renderActions,
+    },
   ];
+
+  // ---- 数据源组装 ----
+  const allRows: MkRow[] = (market?.items ?? []).map((it, idx) => ({
+    key: it.key,
+    seq: (page - 1) * pageSizeOf(source) + idx + 1,
+    name: it.name,
+    spec: it.spec,
+    author: it.author,
+    avatarUrl: it.avatarUrl,
+    weekly: it.weekly,
+    monthly: it.monthly,
+    stars: it.stars,
+    latest: it.version,
+    releasedAt: it.releasedAt,
+    installedHere: installedSet.has(it.name),
+    current: pluginVers[it.name]?.current ?? null,
+  }));
+
+  const installedRows: MkRow[] = plugins.map((p, idx) => ({
+    key: p,
+    seq: idx + 1,
+    name: p,
+    spec: p,
+    author: "本机",
+    avatarUrl: null,
+    weekly: null,
+    monthly: null,
+    stars: null,
+    latest: pluginVers[p]?.latest ?? null,
+    releasedAt: null,
+    installedHere: true,
+    current: pluginVers[p]?.current ?? null,
+  }));
+
+  const rows = tabMode === "all" ? allRows : installedRows;
 
   const marketBody = (
     <div className="mk-wrap">
@@ -251,26 +397,26 @@ export default function PluginManager() {
           <button
             type="button"
             className={tabMode === "all" ? "active" : ""}
-            onClick={() => {
-              setTabMode("all");
-              setPage(1);
-            }}
+            onClick={() => switchTab("all")}
           >
             所有插件({formatCount(tabMode === "all" ? market?.total : market?.total)})
           </button>
           <button
             type="button"
             className={tabMode === "installed" ? "active" : ""}
-            onClick={() => {
-              setTabMode("installed");
-              void refreshPluginVersions();
-            }}
+            onClick={() => switchTab("installed")}
           >
             已安装({plugins.length})
           </button>
         </div>
         <div className="pm-seg mk-sort">
-          {sortChips.map((c) => (
+          {(
+            [
+              { key: "weekly", label: "周下载", disabledIn: ["github"] },
+              { key: "stars", label: "Stars", disabledIn: ["npm"] },
+              { key: "date", label: "发布日期", disabledIn: [] },
+            ] as Array<{ key: MarketSort; label: string; disabledIn: MarketSource[] }>
+          ).map((c) => (
             <button
               key={c.key}
               type="button"
@@ -283,6 +429,7 @@ export default function PluginManager() {
               onClick={() => {
                 setSort(c.key);
                 setPage(1);
+                bumpPane("mk-fade");
               }}
             >
               {c.label}
@@ -296,112 +443,53 @@ export default function PluginManager() {
 
       {marketError ? <div className="mk-error">{marketError}</div> : null}
 
-      <div className={`mk-table${marketLoading ? " loading" : ""}`}>
-        <div className="mk-head mk-grid">
-          <span>#</span>
-          <span />
-          <span>插件名称</span>
-          <span>作者</span>
-          <span>周/月下载</span>
-          <span>版本</span>
-          <span>Stars</span>
-          <span>发布日期</span>
-          <span className="mk-right">操作</span>
-        </div>
+      {/* 穿梭动画面板：tab/源/翻页/搜索变化时按方向滑入 */}
+      <div key={paneAnim.n} className={`mk-pane ${paneAnim.cls}`}>
+        <Table
+          className="mk-ant-table"
+          size="small"
+          rowKey="key"
+          columns={columns}
+          dataSource={rows}
+          loading={marketLoading && tabMode === "all"}
+          pagination={false}
+          sticky
+          scroll={{ x: 1010 }}
+          locale={{
+            emptyText: tabMode === "installed" ? "本机尚未安装任何插件" : "无匹配插件",
+          }}
+        />
 
-        {tabMode === "installed" ? (
-          plugins.length === 0 ? (
-            <div className="mk-empty">本机尚未安装任何插件</div>
-          ) : (
-            plugins.map((p, i) => {
-              const info = pluginVers[p];
-              return (
-                <div key={p} className="mk-row mk-grid">
-                  <span className="mk-num">{i + 1}</span>
-                  <Avatar url={null} name={p} />
-                  <span className="mk-name" title={p}>
-                    {p}
-                    {info?.current ? <span className="plugin-ver">{info.current}</span> : null}
-                    {isOutdated(p) && info?.latest ? (
-                      <span className="plugin-ver new">→ {info.latest}</span>
-                    ) : null}
-                  </span>
-                  <span className="mk-author">本机</span>
-                  <span className="mk-num muted">—</span>
-                  <span className="mk-num">
-                    {info?.latest ? `最新 ${info.latest}` : info?.current ?? "—"}
-                  </span>
-                  <span className="mk-num muted">—</span>
-                  <span className="mk-num muted">—</span>
-                  {renderActions(p, p, true)}
-                </div>
-              );
-            })
-          )
-        ) : marketError ? (
-          <div className="mk-empty mk-error">{marketError}</div>
-        ) : !market || market.items.length === 0 ? (
-          <div className="mk-empty">{marketLoading ? "加载中…" : "无匹配插件"}</div>
-        ) : (
-          market.items.map((it, idx) => {
-            const installed = installedSet.has(it.name);
-            return (
-              <div key={it.key} className="mk-row mk-grid">
-                <span className="mk-num">{(page - 1) * pageSizeOf(source) + idx + 1}</span>
-                <Avatar url={it.avatarUrl} name={it.author} />
-                <span className="mk-name" title={it.name}>
-                  {it.name}
-                </span>
-                <span className="mk-author" title={it.author}>
-                  {it.author}
-                </span>
-                <span className="mk-num">
-                  {formatCount(it.weekly)} / {formatCount(it.monthly)}
-                </span>
-                <span className="mk-num">
-                  {it.version ?? "—"}
-                  {installed && pluginVers[it.name]?.current ? (
-                    <span className="plugin-ver">(已装 v{pluginVers[it.name]?.current})</span>
-                  ) : null}
-                </span>
-                <span className="mk-num">{it.stars === null ? "—" : `★ ${formatCount(it.stars)}`}</span>
-                <span className="mk-num">{formatDate(it.releasedAt)}</span>
-                {renderActions(it.name, it.spec, installed)}
-              </div>
-            );
-          })
-        )}
-
-        {marketLoading ? (
-          <div className="mk-loading-overlay">
-            <span className="spinner-ring" />
+        {tabMode === "all" ? (
+          <div className="mk-pager">
+            <button
+              className="pm-btn pm-btn-sm"
+              type="button"
+              disabled={page <= 1 || marketLoading}
+              onClick={() => {
+                setPage((p) => p - 1);
+                bumpPane("mk-from-left");
+              }}
+            >
+              ◀ 上一页
+            </button>
+            <span className="mk-pager-info">
+              第 {page} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
+            </span>
+            <button
+              className="pm-btn pm-btn-sm"
+              type="button"
+              disabled={page >= totalPages || marketLoading}
+              onClick={() => {
+                setPage((p) => p + 1);
+                bumpPane("mk-from-right");
+              }}
+            >
+              下一页 ▶
+            </button>
           </div>
         ) : null}
       </div>
-
-      {tabMode === "all" ? (
-        <div className="mk-pager">
-          <button
-            className="pm-btn pm-btn-sm"
-            type="button"
-            disabled={page <= 1 || marketLoading}
-            onClick={() => setPage((p) => p - 1)}
-          >
-            ◀ 上一页
-          </button>
-          <span className="mk-pager-info">
-            第 {page} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
-          </span>
-          <button
-            className="pm-btn pm-btn-sm"
-            type="button"
-            disabled={page >= totalPages || marketLoading}
-            onClick={() => setPage((p) => p + 1)}
-          >
-            下一页 ▶
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 
@@ -490,7 +578,7 @@ export default function PluginManager() {
               {running ? (
                 <>
                   <button className="pm-btn danger" type="button" onClick={cancelOpConfirm}>
-                    终止安装
+                    终止操作
                   </button>
                   <button className="pm-btn" type="button" onClick={() => setOpen(false)}>
                     后台运行
@@ -511,7 +599,8 @@ export default function PluginManager() {
           )
         }
       >
-        {view === "market" ? marketBody : terminalBody}
+        {/* 视图切换上浮缩放过渡 */}
+        <div key={view} className="mk-view-enter">{view === "market" ? marketBody : terminalBody}</div>
       </Modal>
 
       {/* 手动安装输入弹框 */}

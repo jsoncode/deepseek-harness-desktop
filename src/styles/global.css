@@ -652,41 +652,69 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   flex-direction: column;
 }
 
-.mk-table {
-  position: relative;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow-y: auto;
-  height: 480px;
-  background: var(--panel);
+/* 穿梭动画：内容区按方向滑入淡显 */
+@keyframes mkFromRight {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: none; }
 }
 
-.mk-grid {
-  display: grid;
-  grid-template-columns:
-    44px 44px minmax(200px, 1.4fr) minmax(100px, 0.9fr)
-    118px minmax(170px, 1.2fr) 84px 96px 158px;
-  align-items: center;
-  gap: 0 10px;
-  padding: 8px 12px;
+@keyframes mkFromLeft {
+  from { opacity: 0; transform: translateX(-28px); }
+  to { opacity: 1; transform: none; }
 }
 
-.mk-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
+@keyframes mkFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes mkViewIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.mk-pane.mk-from-right { animation: mkFromRight 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.mk-pane.mk-from-left { animation: mkFromLeft 0.28s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.mk-pane.mk-fade { animation: mkFadeIn 0.22s ease both; }
+
+.mk-view-enter { animation: mkViewIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mk-pane.mk-from-right,
+  .mk-pane.mk-from-left,
+  .mk-pane.mk-fade,
+  .mk-view-enter {
+    animation: none;
+  }
+}
+
+/* antd Table 市场皮肤：透明底融入毛玻璃面板 */
+.plugin-manager-modal .mk-ant-table .ant-table {
+  background: transparent;
+  color: var(--text-1);
+}
+
+.plugin-manager-modal .mk-ant-table .ant-table-thead > tr > th {
   background: var(--panel-strong);
-  font-size: 12px;
   color: var(--text-3);
+  font-size: 12px;
   letter-spacing: 0.04em;
-}
-
-.mk-row {
   border-bottom: 1px solid var(--border);
-  transition: background 0.12s ease;
 }
 
-.mk-row:hover {
+.plugin-manager-modal .mk-ant-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border);
+}
+
+.plugin-manager-modal .mk-ant-table .ant-table-tbody > tr > td.ant-table-cell-fix-left,
+.plugin-manager-modal .mk-ant-table .ant-table-tbody > tr > td.ant-table-cell-fix-right,
+.plugin-manager-modal .mk-ant-table .ant-table-cell-fix-left,
+.plugin-manager-modal .mk-ant-table .ant-table-cell-fix-right {
+  background: transparent;
+}
+
+.plugin-manager-modal .mk-ant-table .ant-table-tbody > tr:hover > td,
+.plugin-manager-modal .mk-ant-table .ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
   background: var(--panel-strong);
 }
 
@@ -702,10 +730,6 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
 .mk-num.muted {
   color: var(--text-3);
   opacity: 0.7;
-}
-
-.mk-right {
-  text-align: right;
 }
 
 .mk-name {
@@ -768,19 +792,6 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   border: 1px solid rgba(248, 113, 113, 0.35);
   color: var(--danger);
   font-size: 13px;
-}
-
-.mk-loading-overlay {
-  position: absolute;
-  inset: 44px 0 0;
-  display: grid;
-  place-items: center;
-  background: rgba(7, 9, 13, 0.35);
-  z-index: 3;
-}
-
-html[data-theme="light"] .mk-loading-overlay {
-  background: rgba(255, 255, 255, 0.45);
 }
 
 .mk-pager {
