@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import { meetsNodeRequirement } from "../lib/envReq";
@@ -40,19 +40,8 @@ export default function Launch() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 用户点击启动/安装后（starting → running）自动进入预览页；
-  // 进入页面时服务已在运行/已在启动（非本次点击触发）则不跳转，避免打断查看启动页信息
-  const prevPhase = useRef(phase);
-  const startedHere = useRef(false);
-  useEffect(() => {
-    const prev = prevPhase.current;
-    prevPhase.current = phase;
-    if (startedHere.current && phase === "running" && prev === "starting") {
-      const t = setTimeout(() => navigate("/preview"), 1200);
-      return () => clearTimeout(t);
-    }
-  }, [phase, navigate]);
-
+  // 点击「启动/安装」后直接进入终端页：过程日志全程可见；
+  // 服务就绪（running）后由终端页自动转入预览页
   const busy = phase === "checking" || phase === "installing" || phase === "starting";
 
   // ---- 环境判定 ----
@@ -168,7 +157,8 @@ export default function Launch() {
       navigate("/terminal");
       return;
     }
-    startedHere.current = true;
+    // 立即切换到终端页，再触发安装/启动链路（顺序保证用户第一时间看到日志）
+    navigate("/terminal");
     if (needsInstall) {
       void installEnvAndStart();
     } else {

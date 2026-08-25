@@ -66,15 +66,15 @@ interface GhItem {
   owner?: { login?: string; avatar_url?: string };
 }
 
-/** 拉取一页市场列表。GitHub 的 stars/date 走服务端排序；NPM 接口不支持全量排序，在客户端排当前页 */
+/** 拉取一页市场列表。请求恒定使用 dsh-plugin 关键字/topic 全集（搜索为调用方本地过滤）。
+ *  GitHub 的 stars/date 走服务端排序；NPM 接口不支持全量排序，在客户端排当前页 */
 export async function fetchMarketPage(
   source: MarketSource,
   page: number,
-  query: string,
   sort: MarketSort,
 ): Promise<MarketPage> {
   if (source === "github") {
-    const q = `topic:dsh-plugin${query ? ` ${query}` : ""}`;
+    const q = "topic:dsh-plugin";
     const sortParam =
       sort === "stars"
         ? "&sort=stars&order=desc"
@@ -110,7 +110,7 @@ export async function fetchMarketPage(
     };
   }
 
-  const text = `keywords:dsh-plugin${query ? ` ${query}` : ""}`;
+  const text = "keywords:dsh-plugin";
   const from = (page - 1) * NPM_PAGE_SIZE;
   const url =
     `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +

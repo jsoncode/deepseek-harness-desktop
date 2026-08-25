@@ -429,7 +429,37 @@ fn pnpm_global_bin() -> Option<PathBuf> {
         return None;
     }
     let p = PathBuf::from(dir);
-    p.exists().then_some(p)
+    // 目录可能尚未创建（全新环境首次使用 pnpm）：主动建出，保证可注入 PATH
+    if !p.exists() {
+        std::fs::create_dir_all(&p).ok()?;
+    }
+    Some(p)
+}
+
+/// 为即将执行的 pnpm / dsh 子进程注入全局 bin 相关环境：
+/// 把 pnpm 全局目录前置到子进程 PATH，并设置 PNPM_HOME。
+/// 背景：未执行过 `pnpm setup` 的机器上该目录不在 PATH，`pnpm add -g` 会直接报错
+/// （the configured global bin directory ... is not in PATH）。
+/// 仅影响本次子进程，不改用户 shell 配置；当前 PATH 已包含时不重复记日志。
+fn apply_pnpm_env(app: &AppHandle, event: &'static str, cmd: &mut Command) {
+    let Some(dir) = pnpm_global_bin() else { return };
+    #[cfg(windows)]
+    let sep = ";";
+    #[cfg(not(windows))]
+    let sep = ":";
+    let cur = std::env::var("PATH").unwrap_or_default();
+    let dir_str = dir.to_string_lossy().into_owned();
+    let already = cur.split(sep).any(|p| p.trim().eq_ignore_ascii_case(dir_str.as_str()));
+    cmd.env("PATH", format!("{dir_str}{sep}{cur}"));
+    cmd.env("PNPM_HOME", &dir);
+    if !already {
+        emit_log(
+            app,
+            event,
+            "system",
+            &format!("检测到未运行过 pnpm setup：已为本进程临时注入全局目录 {}", dir.display()),
+        );
+    }
 }
 
 /// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）
@@ -1034,16 +1064,17 @@ pub fn install_dsh(app: AppHandle) -> Result<(), String> {
         "system",
         &format!("$ {} add -g @deepseek-ai/dsh@latest", pnpm.display()),
     );
-    let child = hide_window(
-        Command::new(&pnpm)
-            .args(["add", "-g", "@deepseek-ai/dsh@latest"])
-            .args(npm_mirror_args())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null()),
-    )
-    .spawn()
-    .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
+    let mut cmd = Command::new(&pnpm);
+    cmd.args(["add", "-g", "@deepseek-ai/dsh@latest"])
+        .args(npm_mirror_args());
+    // 未运行过 pnpm setup 的环境会因全局目录不在 PATH 而失败，这里显式补齐
+    apply_pnpm_env(&app, INSTALL_LOG_EVENT, &mut cmd);
+    let child = hide_window(&mut cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
     let app2 = app.clone();
     std::thread::spawn(move || {
         pump_process(&app2, child, INSTALL_LOG_EVENT, INSTALL_EXIT_EVENT);
@@ -1188,6 +1219,9 @@ pub fn run_plugin_op(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
+
+    // dsh 插件操作内部同样会调用 pnpm，一并注入全局目录环境
+    apply_pnpm_env(&app, PLUGIN_OP_LOG_EVENT, &mut cmd);
 
     match hide_window(&mut cmd).spawn() {
         Ok(child) => {

@@ -1,7 +1,7 @@
-import { ClusterOutlined } from "@ant-design/icons";
+import { ClusterOutlined, SearchOutlined } from "@ant-design/icons";
 import { App as AntApp, Badge, Input, Table, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useRef, useState, type Key } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import AppModal from "./AppModal";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
@@ -37,6 +37,81 @@ function Avatar({ url, name }: { url: string | null; name: string }) {
       onError={() => setFailed(true)}
       draggable={false}
     />
+  );
+}
+
+/**
+ * 插件名模糊匹配（忽略大小写）：除直接小写包含外，还归一化 -/_/. 与空白分隔符后比较，
+ * 因此 dsh_jenkins、DshJenkins、dsh-jenkins 均可互相命中。
+ */
+function nameMatches(name: string, rawQuery: string): boolean {
+  const q = rawQuery.trim();
+  if (!q) return true;
+  if (name.toLowerCase().includes(q.toLowerCase())) return true;
+  const normalize = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, "");
+  return normalize(name).includes(normalize(q));
+}
+
+/**
+ * 滑块式分段选择：active 指示块在选项之间平滑穿梭滑动（替代变色胶囊）。
+ * 测量目标按钮 offsetLeft/offsetWidth 驱动 thumb 位移；窗口尺寸变化时自动校正。
+ */
+function SlidingSeg<T extends string>({
+  value,
+  options,
+  onChange,
+  getDisabled,
+  getTitle,
+  className = "",
+}: {
+  value: T;
+  options: Array<{ key: T; label: ReactNode }>;
+  onChange: (key: T) => void;
+  getDisabled?: (key: T) => boolean;
+  getTitle?: (key: T) => string | undefined;
+  className?: string;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [thumb, setThumb] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+
+  const measure = useCallback(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const el = wrap.querySelector<HTMLButtonElement>('button[data-seg="' + value + '"]');
+    if (!el) return;
+    setThumb({ left: el.offsetLeft, width: el.offsetWidth });
+  }, [value]);
+
+  // 值变化后先测量再绘制，避免 thumb 初始闪到原点
+  useLayoutEffect(() => {
+    measure();
+  }, [measure]);
+
+  useEffect(() => {
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [measure]);
+
+  return (
+    <div className={"pm-seg" + (className ? " " + className : "")} ref={wrapRef}>
+      <span className="pm-seg-thumb" style={{ left: thumb.left, width: thumb.width }} />
+      {options.map((o) => {
+        const disabled = getDisabled?.(o.key) ?? false;
+        return (
+          <button
+            key={o.key}
+            type="button"
+            data-seg={o.key}
+            title={getTitle?.(o.key)}
+            className={(value === o.key ? "active" : "") + (disabled ? " disabled" : "")}
+            disabled={disabled}
+            onClick={() => !disabled && onChange(o.key)}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -81,13 +156,15 @@ export default function PluginManager() {
   const [view, setView] = useState<"market" | "terminal">("market");
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
+  /** 「查看」小弹框当前展示的插件行 */
+  const [descRow, setDescRow] = useState<MkRow | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const prevRunningRef = useRef<boolean>(false);
 
   // ---- 市场状态 ----
   const [source, setSource] = useState<MarketSource>("npm");
   const [tabMode, setTabMode] = useState<"all" | "installed">("all");
-  const [queryInput, setQueryInput] = useState("");
+  /** 本地搜索词：只作用于前端名称过滤，不参与接口请求 */
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<MarketSort>("weekly");
   const [page, setPage] = useState(1);
@@ -97,31 +174,22 @@ export default function PluginManager() {
   /** 内容区穿梭动画：n 变化触发重挂载，cls 决定入场方向 */
   const [paneAnim, setPaneAnim] = useState<{ n: number; cls: string }>({ n: 0, cls: "" });
   const bumpPane = (cls: string) => setPaneAnim((p) => ({ n: p.n + 1, cls }));
-  /** 展开行 keys：市场行默认全展开显示描述，已安装行（无描述）全折叠 */
-  const [expandedKeys, setExpandedKeys] = useState<readonly Key[]>([]);
 
   useEffect(() => {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 搜索防抖（提交时内容区渐隐过渡）
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setQuery(queryInput);
-      setPage(1);
-      bumpPane("mk-fade");
-    }, 400);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryInput]);
+  // 本地搜索即时过滤（无网络请求），无需防抖
 
-  // 市场数据拉取（仅市场视图 + 所有插件 tab）
+  // 市场数据拉取（仅市场视图 + 所有插件 tab）。
+  // 接口恒定使用 keywords:dsh-plugin / topic:dsh-plugin 全集，与搜索词完全解耦，
+  // 因此依赖里不含 query —— 输入搜索词不会触发任何网络请求。
   useEffect(() => {
     if (!open || view !== "market" || tabMode !== "all") return;
     let alive = true;
     setMarketLoading(true);
     setMarketError(null);
-    fetchMarketPage(source, page, query, sort)
+    fetchMarketPage(source, page, sort)
       .then((p) => {
         if (alive) setMarket(p);
       })
@@ -134,7 +202,7 @@ export default function PluginManager() {
     return () => {
       alive = false;
     };
-  }, [open, view, tabMode, source, query, sort, page]);
+  }, [open, view, tabMode, source, sort, page]);
 
   // 终端自动滚动到底部
   useEffect(() => {
@@ -186,8 +254,6 @@ export default function PluginManager() {
     setSource(s);
     setSort(s === "github" ? "stars" : "weekly");
     setPage(1);
-    setQuery("");
-    setQueryInput("");
   };
 
   const confirmOp = (kind: PluginOpKind, target: string) => {
@@ -238,6 +304,13 @@ export default function PluginManager() {
   /** 行内操作按钮组（固定列渲染） */
   const renderActions = (_: unknown, r: MkRow) => (
     <div className="mk-actions">
+      <button
+        className="pm-btn pm-btn-sm"
+        type="button"
+        onClick={() => setDescRow(r)}
+      >
+        查看
+      </button>
       {!r.installedHere ? (
         <button
           className="pm-btn pm-btn-sm primary"
@@ -341,7 +414,7 @@ export default function PluginManager() {
       title: "操作",
       key: "actions",
       fixed: "right",
-      width: 156,
+      width: 200,
       render: renderActions,
     },
   ];
@@ -363,7 +436,9 @@ export default function PluginManager() {
     current: pluginVers[it.name]?.current ?? null,
   }));
 
-  const installedRows: MkRow[] = plugins.map((p) => ({
+  // 已安装 tab：本地名称模糊过滤
+  const visibleInstalled = plugins.filter((p) => nameMatches(p, query));
+  const installedRows: MkRow[] = visibleInstalled.map((p) => ({
     key: p,
     name: p,
     spec: p,
@@ -379,15 +454,13 @@ export default function PluginManager() {
     current: pluginVers[p]?.current ?? null,
   }));
 
-  const rows = tabMode === "all" ? allRows : installedRows;
-
-  // 展开 keys 跟随当前行数据：市场行全部展开显示描述，已安装行全部折叠
-  useEffect(() => {
-    setExpandedKeys(
-      tabMode === "all" ? allRows.map((r) => r.key) : [],
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabMode, market, page, source, query, sort]);
+  // 所有插件 tab：对当前页结果再做一次名称模糊兜底（所见即名称命中）
+  const rows =
+    tabMode === "all"
+      ? query.trim()
+        ? allRows.filter((r) => nameMatches(r.name, query) || nameMatches(r.spec, query))
+        : allRows
+      : installedRows;
 
   const marketBody = (
     <div className="mk-wrap">
@@ -404,60 +477,60 @@ export default function PluginManager() {
             </button>
           </div>
         ) : null}
+        {/* 工具栏两行：第一行 搜索(flex)+手动安装；第二行 视图tab(左)+排序(右，仅所有插件) */}
         <div className="mk-toolbar">
-          <Input
-            className="mk-search"
-            placeholder="搜索插件…"
-            allowClear
-            value={queryInput}
-            onChange={(e) => setQueryInput(e.target.value)}
-          />
-          <div className="pm-seg">
-            <button
-              type="button"
-              className={tabMode === "all" ? "active" : ""}
-              onClick={() => switchTab("all")}
-            >
-              所有插件({formatCount(tabMode === "all" ? market?.total : market?.total)})
-            </button>
-            <button
-              type="button"
-              className={tabMode === "installed" ? "active" : ""}
-              onClick={() => switchTab("installed")}
-            >
-              已安装({plugins.length})
+          <div className="mk-row">
+            <Input
+              className="mk-search"
+              placeholder="按插件名称模糊搜索（忽略大小写）"
+              allowClear
+              prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <button className="pm-btn pm-btn-sm mk-add-btn" type="button" onClick={() => setAddOpen(true)}>
+              手动安装
             </button>
           </div>
-          <div className="pm-seg mk-sort">
-            {(
-              [
-                { key: "weekly", label: "周下载", disabledIn: ["github"] },
-                { key: "stars", label: "Stars", disabledIn: ["npm"] },
-                { key: "date", label: "发布日期", disabledIn: [] },
-              ] as Array<{ key: MarketSort; label: string; disabledIn: MarketSource[] }>
-            ).map((c) => (
-              <button
-                key={c.key}
-                type="button"
-                title={c.disabledIn.includes(source) ? "当前插件源不支持该排序" : undefined}
-                className={
-                  (sort === c.key && tabMode === "all" ? "active" : "") +
-                  (c.disabledIn.includes(source) ? " disabled" : "")
+          <div className="mk-row">
+            <SlidingSeg
+              value={tabMode}
+              options={[
+                {
+                  key: "all",
+                  label: "所有插件(" + formatCount(tabMode === "all" ? market?.total : visibleInstalled.length) + ")",
+                },
+                { key: "installed", label: "已安装(" + visibleInstalled.length + ")" },
+              ]}
+              onChange={switchTab}
+            />
+            {tabMode === "all" ? (
+              <SlidingSeg
+                className="mk-row-sort"
+                value={sort}
+                options={[
+                  { key: "weekly", label: "周下载" },
+                  { key: "stars", label: "Stars" },
+                  { key: "date", label: "发布日期" },
+                ]}
+                getDisabled={(k) =>
+                  k === "weekly" ? source !== "npm" : k === "stars" ? source !== "github" : false
                 }
-                disabled={c.disabledIn.includes(source)}
-                onClick={() => {
-                  setSort(c.key);
+                getTitle={(k) =>
+                  k === "weekly" && source !== "npm"
+                    ? "NPM 源不支持该排序"
+                    : k === "stars" && source !== "github"
+                      ? "GitHub 源不支持该排序"
+                      : undefined
+                }
+                onChange={(k) => {
+                  setSort(k);
                   setPage(1);
                   bumpPane("mk-fade");
                 }}
-              >
-                {c.label}
-              </button>
-            ))}
+              />
+            ) : null}
           </div>
-          <button className="pm-btn pm-btn-sm" type="button" onClick={() => setAddOpen(true)}>
-            手动安装
-          </button>
         </div>
         {marketLoading && tabMode === "all" ? (
           <div className="mk-loading">
@@ -478,22 +551,14 @@ export default function PluginManager() {
           pagination={false}
           scroll={{ x: 1010 }}
           locale={{
-            emptyText: tabMode === "installed" ? "本机尚未安装任何插件" : "无匹配插件",
-          }}
-          expandable={{
-            // 市场行默认展开显示插件描述；已安装行无描述 → 全部折叠
-            expandedRowKeys: expandedKeys,
-            expandedRowRender: (r: MkRow) => (
-              <div className="mk-desc">
-                {r.description ? (
-                  r.description
-                ) : (
-                  <span className="mk-desc-empty">暂无描述</span>
-                )}
-              </div>
-            ),
-            // 隐藏展开箭头：描述随行常驻，避免行内箭头误导可点击性
-            expandIcon: () => null,
+            emptyText:
+              tabMode === "installed"
+                ? query.trim()
+                  ? "没有匹配的已安装插件"
+                  : "本机尚未安装任何插件"
+                : query.trim()
+                  ? "当前页无名称匹配的插件，可尝试翻页或更换关键词"
+                  : "无匹配插件",
           }}
         />
       </div>
@@ -554,28 +619,25 @@ export default function PluginManager() {
         className={`plugin-manager-modal${view === "market" ? " mk-market" : ""}`}
         onCancel={() => setOpen(false)}
         width="90vw"
+        styles={{
+          // 固定弹框高度 80vh：header/footer 固定，body 不滚动，内部面板自行滚动
+          container: { height: "80vh" },
+          body: { overflowY: "hidden", display: "flex", flexDirection: "column" },
+        }}
         title={
           view === "terminal" ? (
             `正在${OP_VERB[pluginOp?.kind ?? "add"]} · ${pluginOp?.name ?? ""}`
           ) : (
             <div className="pm-title-row">
               <span>插件管理</span>
-              <div className="pm-seg">
-                <button
-                  type="button"
-                  className={source === "github" ? "active" : ""}
-                  onClick={() => switchSource("github")}
-                >
-                  GitHub
-                </button>
-                <button
-                  type="button"
-                  className={source === "npm" ? "active" : ""}
-                  onClick={() => switchSource("npm")}
-                >
-                  NPM
-                </button>
-              </div>
+              <SlidingSeg
+                value={source}
+                options={[
+                  { key: "github", label: "GitHub" },
+                  { key: "npm", label: "NPM" },
+                ]}
+                onChange={(s) => switchSource(s)}
+              />
             </div>
           )
         }
@@ -640,6 +702,36 @@ export default function PluginManager() {
       >
         {/* 视图切换上浮缩放过渡 */}
         <div key={view} className="mk-view-enter">{view === "market" ? marketBody : terminalBody}</div>
+      </AppModal>
+
+      {/* 插件介绍小弹框 */}
+      <AppModal
+        open={descRow !== null}
+        className="pm-desc-modal"
+        title={descRow ? `插件介绍 · ${descRow.name}` : "插件介绍"}
+        footer={null}
+        width={560}
+        onCancel={() => setDescRow(null)}
+      >
+        {descRow ? (
+          <div className="pm-desc-body">
+            <div className="pm-desc-meta">
+              <Avatar url={descRow.avatarUrl} name={descRow.author} />
+              <span className="mk-name">{descRow.name}</span>
+              {descRow.latest ? <span className="plugin-ver">v{descRow.latest}</span> : null}
+              {descRow.installedHere && descRow.current ? (
+                <span className="plugin-ver">(本机 v{descRow.current})</span>
+              ) : null}
+            </div>
+            <div className="pm-desc-text">
+              {descRow.description ? (
+                descRow.description
+              ) : (
+                <span className="mk-desc-empty">暂无介绍</span>
+              )}
+            </div>
+          </div>
+        ) : null}
       </AppModal>
 
       {/* 手动安装输入弹框 */}

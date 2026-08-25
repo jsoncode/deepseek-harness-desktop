@@ -603,17 +603,33 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   padding-right: 36px;
 }
 
-/* 源切换 / tab / 排序 共用分段胶囊组 */
+/* 源切换 / tab / 排序 共用滑块分段组：active 指示块在选项间穿梭滑动 */
 .pm-seg {
+  position: relative;
   display: inline-flex;
-  gap: 4px;
+  gap: 0;
   padding: 3px;
   border-radius: 999px;
   background: var(--panel-strong);
   border: 1px solid var(--border);
 }
 
-.pm-seg button {
+.pm-seg-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  box-shadow: 0 6px 16px -6px rgba(99, 102, 241, 0.7);
+  transition:
+    left 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.pm-seg > button {
+  position: relative;
+  z-index: 1;
   border: none;
   background: transparent;
   color: var(--text-2);
@@ -621,40 +637,83 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   padding: 5px 14px;
   border-radius: 999px;
   cursor: pointer;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
+  white-space: nowrap;
+  transition: color 0.15s ease;
 }
 
-.pm-seg button:hover:not(.active):not(:disabled) {
+.pm-seg > button:hover:not(.active):not(:disabled) {
   color: var(--text-1);
 }
 
-.pm-seg button.active {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+.pm-seg > button.active {
   color: #fff;
+  font-weight: 600;
 }
 
-.pm-seg button.disabled {
-  opacity: 0.35;
+.pm-seg > button.disabled {
+  opacity: 0.38;
   cursor: not-allowed;
 }
 
+/* 工具栏两行：搜索行 + 视图/排序行 */
 .plugin-manager-modal .mk-toolbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 10px;
   margin-bottom: 12px;
 }
 
+.mk-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 搜索框占据剩余空间（上限 520px），手动安装按钮紧随其后 */
 .plugin-manager-modal .mk-search {
-  width: 240px;
+  flex: 1;
+  min-width: 0;
+  max-width: 520px;
+}
+
+.mk-row-sort {
+  margin-left: auto;
 }
 
 .mk-wrap {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* 弹框固定 80vh：header/footer 固定，body 不滚动，
+   表格区与终端区在各自面板内滚动 */
+.plugin-manager-modal .mk-view-enter {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.plugin-manager-modal .mk-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.plugin-manager-modal .plugin-term {
+  flex: 1;
+  min-height: 0;
+}
+
+.plugin-manager-modal .plugin-term .term-body {
+  height: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 /* 顶部固定区：进行中横幅 + 搜索工具栏 + 加载/错误提示，表格滚动时保持可见 */
@@ -1532,6 +1591,60 @@ html[data-theme="light"] .mk-op-banner {
 }
 
 /* --------------------------------------------------------------------------
+   重启过渡页（Restarting）：全屏居中 loading + 阶段文案 + 失败重试
+   -------------------------------------------------------------------------- */
+
+.restarting {
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+/* 复用 .spinner-ring 基类，放大一号突出重启动作 */
+.restarting-spinner {
+  width: 56px;
+  height: 56px;
+  border-width: 4px;
+}
+
+.restarting-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+  animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.restarting-sub {
+  font-size: 13px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  animation: fadeUp 0.5s 0.06s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.restarting-fail {
+  font-size: 44px;
+  line-height: 1;
+  color: var(--danger);
+  animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.restarting-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+/* 失败态操作按钮比启动页次按钮小一号 */
+.restarting-btn {
+  padding: 9px 22px;
+  font-size: 13.5px;
+  border-radius: 999px;
+}
+
+/* --------------------------------------------------------------------------
    浅色主题（html[data-theme="light"]，由 useThemeStore 驱动）
    -------------------------------------------------------------------------- */
 
@@ -1672,5 +1785,35 @@ html[data-theme="light"] .term-window ::-webkit-scrollbar-thumb:hover {
 html[data-theme="light"] .plugin-fail-msg {
   background: rgba(15, 23, 42, 0.04);
   border-color: rgba(15, 23, 42, 0.12);
+}
+
+/* --------------------------------------------------------------------------
+   插件介绍小弹框（操作列「查看」）
+   -------------------------------------------------------------------------- */
+
+.pm-desc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pm-desc-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pm-desc-text {
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 

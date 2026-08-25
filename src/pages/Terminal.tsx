@@ -40,8 +40,8 @@ export default function Terminal() {
     const prev = prevPhase.current;
     prevPhase.current = phase;
     if (phase === "running" && prev === "starting") {
-      const t = setTimeout(() => navigate("/preview"), 1200);
-      return () => clearTimeout(t);
+      // url 事件在服务探活成功后才发出，就绪即跳转，不再人为停留
+      navigate("/preview");
     }
   }, [phase, navigate]);
 
