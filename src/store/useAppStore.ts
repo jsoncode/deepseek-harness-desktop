@@ -31,6 +31,7 @@ interface AppStore {
   pnpmVersion: string | null;
   plugins: string[];
   profileReady: boolean;
+  serviceAlive: boolean;
   error: string | null;
   initialized: boolean;
 
@@ -53,6 +54,48 @@ const MAX_LOGS = 3000;
 const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
 /** 重新启动服务时的日志分隔线 */
 const RESTART_SEPARATOR = "────── 重新启动服务 ──────";
+
+/** 服务健康轮询：仅运行中探测；连续 2 次失败才判定断连，任一次成功即恢复 */
+let healthTimer: ReturnType<typeof setInterval> | null = null;
+let healthFailCount = 0;
+const HEALTH_INTERVAL_MS = 6000;
+
+function healthTick() {
+  const s = useAppStore.getState();
+  if (!s.url || s.phase !== "running") return;
+  const markDead = () => {
+    healthFailCount += 1;
+    if (healthFailCount >= 2 && useAppStore.getState().serviceAlive) {
+      useAppStore.setState({ serviceAlive: false });
+    }
+  };
+  void api
+    .probeService(s.url)
+    .then((ok) => {
+      if (ok) {
+        healthFailCount = 0;
+        if (!useAppStore.getState().serviceAlive) useAppStore.setState({ serviceAlive: true });
+      } else {
+        markDead();
+      }
+    })
+    .catch(markDead);
+}
+
+/** 按 url/phase 启停健康轮询定时器（由 store subscribe 驱动） */
+function syncHealthPolling() {
+  const s = useAppStore.getState();
+  const shouldPoll = Boolean(s.url) && s.phase === "running";
+  if (shouldPoll && healthTimer === null) {
+    healthFailCount = 0;
+    healthTimer = setInterval(healthTick, HEALTH_INTERVAL_MS);
+  } else if (!shouldPoll && healthTimer !== null) {
+    clearInterval(healthTimer);
+    healthTimer = null;
+    // 离开运行态：恢复默认存活，灯色交由 phase 表达（已停止 → 红）
+    if (!useAppStore.getState().serviceAlive) useAppStore.setState({ serviceAlive: true });
+  }
+}
 
 function now(): string {
   return new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -122,7 +165,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     });
 
     onEvent<UrlPayload>(EVENTS.url, (p) => {
-      set({ url: p.url, serviceRunning: true, childRunning: true });
+      set({ url: p.url, serviceRunning: true, childRunning: true, serviceAlive: true });
       get().appendLog("success", `🚀 服务已就绪：${p.url}`);
       set({ phase: "running" });
     });
@@ -142,6 +185,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pnpmVersion: null,
     plugins: [],
     profileReady: false,
+    serviceAlive: true,
     error: null,
     initialized: false,
 
@@ -191,6 +235,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           pnpmVersion: s.pnpm_version,
           plugins: s.plugins ?? [],
           profileReady: s.profile_ready,
+          serviceAlive: s.service_running,
           phase: s.service_running
             ? "running"
             : s.child_running
@@ -221,6 +266,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           pnpmVersion: s.pnpm_version,
           plugins: s.plugins ?? [],
           profileReady: s.profile_ready,
+          serviceAlive: s.service_running,
           phase: s.service_running
             ? "running"
             : s.child_running
@@ -309,3 +355,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
   };
 });
+
+// url/phase 变化时启停健康轮询（模块加载完成后再挂订阅，避免 TDZ）
+useAppStore.subscribe((s, prev) => {
+  if (s.url !== prev.url || s.phase !== prev.phase) syncHealthPolling();
+});
+syncHealthPolling(); // HMR/热启动兜底
