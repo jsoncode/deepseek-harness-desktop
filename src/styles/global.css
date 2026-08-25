@@ -769,6 +769,11 @@ body {
   cursor: not-allowed;
 }
 
+/* antd Tooltip 包裹层：保证 disabled 按钮也能触发气泡 */
+.tip-wrap {
+  display: inline-flex;
+}
+
 .url-pill {
   flex: 1;
   min-width: 0;

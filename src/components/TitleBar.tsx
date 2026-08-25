@@ -1,16 +1,17 @@
+import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
+import {
+  ArrowLeftOutlined,
+  CodeOutlined,
+  CopyOutlined,
+  ExportOutlined,
+  ReloadOutlined,
+  StopOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import {
-  ArrowLeftIcon,
-  CopyIcon,
-  ExternalIcon,
-  RefreshIcon,
-  RotateCwIcon,
-  StopIcon,
-  TerminalSquareIcon,
-} from "./icons";
 import ThemeSwitch from "./ThemeSwitch";
 import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
@@ -92,63 +93,76 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        <button
-          className="icon-btn stop-btn"
-          type="button"
-          title="停止服务"
-          aria-label="停止服务"
-          disabled={!serviceRunning || restarting}
-          onClick={confirmStop}
-        >
-          <StopIcon />
-        </button>
-        <button
-          className="icon-btn"
-          type="button"
-          title="重启服务"
-          aria-label="重启服务"
-          disabled={restarting || busy}
-          onClick={confirmRestart}
-        >
-          {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由消息气泡提示 */}
-          <RotateCwIcon />
-        </button>
-        <button
-          className="icon-btn"
-          type="button"
-          title="查看日志"
-          aria-label="查看日志"
-          onClick={() => navigate("/terminal")}
-        >
-          <TerminalSquareIcon />
-        </button>
-        <button className="icon-btn" type="button" title="返回启动页" aria-label="返回启动页" onClick={() => navigate("/")}>
-          <ArrowLeftIcon />
-        </button>
+        {/* 停止键外包 span：antd 对 disabled 按钮不弹气泡，包裹层保证置灰时也能提示原因 */}
+        <Tooltip title={!serviceRunning ? "服务未运行" : "停止服务"}>
+          <span className="tip-wrap">
+            <button
+              className="icon-btn stop-btn"
+              type="button"
+              aria-label="停止服务"
+              disabled={!serviceRunning || restarting}
+              onClick={confirmStop}
+            >
+              <StopOutlined />
+            </button>
+          </span>
+        </Tooltip>
+        <Tooltip title="重启服务">
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="重启服务"
+            disabled={restarting || busy}
+            onClick={confirmRestart}
+          >
+            {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由消息气泡提示 */}
+            <ReloadOutlined />
+          </button>
+        </Tooltip>
+        <Tooltip title="查看日志">
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="查看日志"
+            onClick={() => navigate("/terminal")}
+          >
+            <CodeOutlined />
+          </button>
+        </Tooltip>
+        <Tooltip title="返回启动页">
+          <button className="icon-btn" type="button" aria-label="返回启动页" onClick={() => navigate("/")}>
+            <ArrowLeftOutlined />
+          </button>
+        </Tooltip>
         <div className="url-pill">
           <span className="dot" />
           <span className="url-value">{url ?? "未检测到服务"}</span>
         </div>
-        <button className="icon-btn" type="button" title="刷新" aria-label="刷新" onClick={bumpReload}>
-          <RefreshIcon />
-        </button>
-        <button className="icon-btn" type="button" title="复制地址" aria-label="复制地址" onClick={() => void copyUrl()}>
-          <CopyIcon />
-        </button>
-        <button
-          className="icon-btn"
-          type="button"
-          title="在浏览器中打开"
-          aria-label="在浏览器中打开"
-          onClick={() => {
-            if (url)
-              void api.openInBrowser(url).catch((e) =>
-                message.error(String(e instanceof Error ? e.message : e)),
-              );
-          }}
-        >
-          <ExternalIcon />
-        </button>
+        <Tooltip title="刷新">
+          <button className="icon-btn" type="button" aria-label="刷新" onClick={bumpReload}>
+            <SyncOutlined />
+          </button>
+        </Tooltip>
+        <Tooltip title="复制地址">
+          <button className="icon-btn" type="button" aria-label="复制地址" onClick={() => void copyUrl()}>
+            <CopyOutlined />
+          </button>
+        </Tooltip>
+        <Tooltip title="在浏览器中打开">
+          <button
+            className="icon-btn"
+            type="button"
+            aria-label="在浏览器中打开"
+            onClick={() => {
+              if (url)
+                void api.openInBrowser(url).catch((e) =>
+                  message.error(String(e instanceof Error ? e.message : e)),
+                );
+            }}
+          >
+            <ExportOutlined />
+          </button>
+        </Tooltip>
       </div>
 
       <div className="titlebar-right">
