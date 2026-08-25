@@ -269,7 +269,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 30px 0 20px;
+  margin: 30px 0 22px;
   padding: 8px 16px;
   border-radius: 999px;
   background: var(--panel);
@@ -318,6 +318,76 @@ body {
   max-width: 460px;
   text-align: center;
   animation: fadeUp 0.7s 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 环境检查卡片：逐项展示 Node.js / pnpm / dsh 状态 */
+.env-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(500px, 92%);
+  margin-bottom: 22px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  animation: fadeUp 0.7s 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.env-card.bad {
+  border-color: rgba(248, 113, 113, 0.45);
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.12);
+}
+
+/* 服务运行中发现环境变化：不阻断，仅黄色提醒 */
+.env-card.warn {
+  border-color: rgba(250, 204, 21, 0.4);
+}
+
+.env-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.env-mark {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.env-mark.ok {
+  color: var(--success);
+}
+
+.env-mark.bad {
+  color: var(--danger);
+}
+
+.env-mark.warn {
+  color: var(--warn);
+}
+
+.env-name {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.env-detail {
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.env-hint {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-strong);
+  font-size: 12.5px;
+  color: var(--danger);
 }
 
 /* 主按钮 */
