@@ -394,23 +394,21 @@ body {
   color: var(--text-3);
 }
 
-.plugin-remove-btn {
-  margin-left: auto;
-  flex-shrink: 0;
-  border: none;
-  background: transparent;
-  color: var(--danger);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 2px 8px;
-  border-radius: 6px;
-  transition:
-    background 0.15s ease,
-    opacity 0.15s ease;
+/* 启动页插件小标签（只读展示；管理入口在标题栏插件管理弹框） */
+.plugin-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.plugin-remove-btn:hover {
-  background: rgba(248, 113, 113, 0.12);
+.plugin-tag {
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
 }
 
 /* 插件管理弹框（列表视图 + 操作终端视图） */

@@ -1,8 +1,7 @@
 import { useEffect, type ReactNode } from "react";
-import { App as AntApp } from "antd";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import { api, tauri } from "../lib/tauri";
+import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /** 环境要求：Node.js ≥ 22.19 */
@@ -33,7 +32,6 @@ interface EnvRow {
 
 export default function Launch() {
   const navigate = useNavigate();
-  const { modal, message } = AntApp.useApp();
   const { phase, url, dshInstalled, pnpmPath, plugins, initialized, init, refreshStatus } =
     useAppStore();
   const nodePath = useAppStore((s) => s.nodePath);
@@ -141,25 +139,6 @@ export default function Launch() {
     statusText = dshInstalled ? "环境就绪 · 点击启动本地服务" : "首次使用 · 将自动安装 @deepseek-ai/dsh";
   }
 
-  const confirmRemove = (name: string) => {
-    modal.confirm({
-      title: "移除插件",
-      content: `确定移除插件 ${name}？将同时从 bundles 与 dependencies 中删除。`,
-      okText: "移除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          await api.removePlugin(name);
-          await refreshStatus();
-          message.success(`已移除 ${name}`);
-        } catch (e) {
-          message.error(String(e instanceof Error ? e.message : e));
-        }
-      },
-    });
-  };
-
   const handlePrimary = () => {
     if (phase === "running") {
       navigate("/preview");
@@ -204,25 +183,14 @@ export default function Launch() {
           {tauri ? (
             <>
               <div className="env-section-title">Plugins</div>
-              {plugins.length === 0 ? (
-                <div className="env-row">
-                  <span className="env-detail">暂无用户插件</span>
-                </div>
-              ) : (
-                plugins.map((name) => (
-                  <div key={name} className="env-row">
-                    <span className="env-mark ok">◆</span>
-                    <span className="env-name">{name}</span>
-                    <button
-                      className="plugin-remove-btn"
-                      type="button"
-                      onClick={() => confirmRemove(name)}
-                    >
-                      移除
-                    </button>
-                  </div>
-                ))
-              )}
+              <div className="plugin-tags">
+                {plugins.map((p) => (
+                  <span key={p} className="plugin-tag">
+                    {p}
+                  </span>
+                ))}
+              </div>
+              {plugins.length === 0 ? <div className="plugin-empty">暂无用户插件</div> : null}
             </>
           ) : null}
           {startGated ? (
