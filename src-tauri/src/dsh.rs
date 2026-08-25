@@ -65,6 +65,9 @@ pub struct StatusPayload {
     pub url: Option<String>,
     pub pnpm_path: Option<String>,
     pub dsh_path: Option<String>,
+    pub node_path: Option<String>,
+    pub node_version: Option<String>,
+    pub pnpm_version: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +139,38 @@ fn resolve_pnpm() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 通过 PATH 查找 node 可执行文件
+fn resolve_node() -> Option<PathBuf> {
+    run_where("node").into_iter().find(|p| is_exec_shim(p))
+}
+
+/// 执行 `<program> --version` 并解析首行输出版本号（去前导 v，如 `22.21.1`）。
+///
+/// 带 2 秒超时：子进程挂起时不阻塞 app_status；失败/超时/输出不合预期一律 None。
+/// 输出首行必须形如 `major.minor[.patch]` 才视为有效版本。
+fn read_tool_version(program: &PathBuf) -> Option<String> {
+    let program = program.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = hide_window(Command::new(&program).arg("--version")).output();
+        let _ = tx.send(out);
+    });
+    // recv_timeout 与子进程 output 是两层 Result，任一失败（超时/进程出错）都按 None 处理
+    let output = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(out)) => out,
+        _ => return None,
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    let ver = line.strip_prefix('v').unwrap_or(line);
+    let mut parts = ver.split('.');
+    parts.next()?.parse::<u64>().ok()?;
+    Some(ver.to_string())
 }
 
 /// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
@@ -491,7 +526,12 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     let dsh_path = dsh.map(|d| d.display);
 
     let pnpm = resolve_pnpm();
+    let pnpm_version = pnpm.as_ref().and_then(|p| read_tool_version(p));
     let pnpm_path = pnpm.map(|p| p.to_string_lossy().into_owned());
+
+    let node = resolve_node();
+    let node_version = node.as_ref().and_then(|p| read_tool_version(p));
+    let node_path = node.map(|p| p.to_string_lossy().into_owned());
 
     let child_running = {
         let guard = state.child_pid.lock().unwrap();
@@ -532,6 +572,9 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
         url,
         pnpm_path,
         dsh_path,
+        node_path,
+        node_version,
+        pnpm_version,
     }
 }
 
