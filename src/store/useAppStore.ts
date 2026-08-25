@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, EVENTS, onEvent, tauri, withTimeout, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { meetsNodeRequirement } from "../lib/envReq";
 
 // ---------------------------------------------------------------------------
 // 应用状态机：checking → idle | installing → starting → running
@@ -61,6 +62,10 @@ interface AppStore {
   refreshStatus: () => Promise<void>;
   ensurePluginsThenStart: () => Promise<void>;
   startFlow: () => Promise<void>;
+  /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务 */
+  installEnvAndStart: () => Promise<void>;
+  /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
+  envInstallTool: "node" | "pnpm" | null;
   stop: () => Promise<void>;
   reset: () => void;
   appendLog: (stream: StreamKind, text: string) => void;
@@ -84,6 +89,39 @@ const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
 const RESTART_SEPARATOR = "────── 重新启动服务 ──────";
 /** 插件操作日志上限 */
 const MAX_PLUGIN_OP_LOGS = 1000;
+/** 环境依赖单步安装的等待上限：winget/brew 下载安装可能耗时数分钟 */
+const ENV_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+// 环境依赖安装为事件驱动（后端流式转发、退出码异步通知）。
+// 链路严格按 node → pnpm → dsh 顺序执行，同一时刻只有一步在等待，
+// 因此用单槽 resolver 即可：waitEnvExit 挂槽，env-install-exit 事件触发。
+let envExitResolve: ((code: number) => void) | null = null;
+let envExitTimer: ReturnType<typeof setTimeout> | null = null;
+
+function waitEnvExit(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      envExitResolve = null;
+      envExitTimer = null;
+      reject(new Error(`安装超时（超过 ${Math.round(ENV_INSTALL_TIMEOUT_MS / 60000)} 分钟），请查看日志或重试`));
+    }, ENV_INSTALL_TIMEOUT_MS);
+    envExitTimer = timer;
+    envExitResolve = (code) => {
+      clearTimeout(timer);
+      envExitTimer = null;
+      resolve(code);
+    };
+  });
+}
+
+/** invoke 同步失败时不会有 exit 事件，必须摘除挂着的 resolver 防止链路悬挂 */
+function dropEnvExitWait() {
+  if (envExitTimer) {
+    clearTimeout(envExitTimer);
+    envExitTimer = null;
+  }
+  envExitResolve = null;
+}
 
 /** 服务健康轮询：仅运行中探测；连续 2 次失败才判定断连，任一次成功即恢复 */
 let healthTimer: ReturnType<typeof setInterval> | null = null;
@@ -179,6 +217,19 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     });
 
+    // 环境依赖安装（node/pnpm）：日志进主终端流；退出码交给链路中的 waiter 续接
+    onEvent<LogLine>(EVENTS.envInstallLog, (p) => {
+      const stream: StreamKind =
+        p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
+      get().appendLog(stream, p.line);
+    });
+
+    onEvent<ExitPayload>(EVENTS.envInstallExit, (p) => {
+      const r = envExitResolve;
+      envExitResolve = null;
+      r?.(p.code);
+    });
+
     onEvent<LogLine>(EVENTS.pluginInstallLog, (p) => {
       get().appendLog("system", p.line);
     });
@@ -236,6 +287,28 @@ export const useAppStore = create<AppStore>((set, get) => {
     });
   }
 
+  /** 无条件拉取最新环境状态并合并进 store（phase 由调用方链路控制，不在此改动）；
+   *  安装链每步之后调用，用于确认上一步安装是否真正生效 */
+  async function pullStatusFields(): Promise<void> {
+    const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
+    set({
+      dshInstalled: s.dsh_installed,
+      dshVersion: s.dsh_version,
+      serviceRunning: s.service_running,
+      childRunning: s.child_running,
+      url: s.url,
+      pnpmPath: s.pnpm_path,
+      dshPath: s.dsh_path,
+      nodePath: s.node_path,
+      nodeVersion: s.node_version,
+      pnpmVersion: s.pnpm_version,
+      plugins: s.plugins ?? [],
+      profileReady: s.profile_ready,
+      serviceAlive: s.service_running,
+      initialized: true,
+    });
+  }
+
   return {
     phase: "checking",
     logs: [],
@@ -258,6 +331,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pluginLoadError: null,
     error: null,
     initialized: false,
+    envInstallTool: null,
 
     appendLog: (stream, text) => {
       const entry: LogEntry = {
@@ -466,6 +540,81 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
+    /** 一键安装缺失的环境依赖并自动启动：node → pnpm → dsh →（既有链）插件依赖 → dsh web。
+     *  每步安装后刷新 PATH 并重测环境，确认生效才进入下一步；
+   *  dsh 安装沿用 install-exit 事件链，装完自动续接启动。 */
+    installEnvAndStart: async () => {
+      if (!tauri) return;
+      const st = get();
+      if (st.phase === "installing" || st.phase === "starting" || st.phase === "running") return;
+      set({ error: null });
+      if (get().logs.length > 0) {
+        get().appendLog("system", RESTART_SEPARATOR);
+      }
+      get().appendLog("system", "开始检查并自动安装缺失的运行环境依赖…");
+
+      // 单步安装：invoke 触发 → 等待 exit 事件 → 校验退出码；invoke 同步失败时摘除 waiter 防悬挂
+      const runStep = async (tool: "node" | "pnpm", label: string) => {
+        set({ phase: "installing", envInstallTool: tool });
+        const waiter = waitEnvExit();
+        try {
+          await api.installEnvTool(tool);
+        } catch (e) {
+          dropEnvExitWait();
+          throw e;
+        }
+        const code = await waiter;
+        if (code !== 0) {
+          throw new Error(`${label}安装失败（退出码 ${code}），请查看下方日志`);
+        }
+        get().appendLog("success", `✅ ${label}安装完成`);
+      };
+
+      try {
+        // ① Node.js（Windows: winget / macOS: brew；中文系统 npm 类安装自动走国内镜像）
+        if (!meetsNodeRequirement(get().nodeVersion)) {
+          get().appendLog(
+            "system",
+            "未检测到可用的 Node.js（≥22.19）：Windows 使用 winget、macOS 使用 Homebrew 自动安装 LTS 版本…",
+          );
+          await runStep("node", "Node.js");
+          await api.refreshSearchPath();
+          await pullStatusFields();
+          if (!meetsNodeRequirement(get().nodeVersion)) {
+            throw new Error("Node.js 已执行安装但当前会话仍未探测到，请重启本应用后重试");
+          }
+        }
+
+        // ② pnpm（npm 全局安装）
+        if (!get().pnpmPath) {
+          get().appendLog("system", "未检测到 pnpm，开始通过 npm 全局安装…");
+          await runStep("pnpm", "pnpm");
+          await api.refreshSearchPath();
+          await pullStatusFields();
+          if (!get().pnpmPath) {
+            throw new Error("pnpm 已执行安装但当前会话仍未探测到，请重启本应用后重试");
+          }
+        }
+
+        set({ phase: "installing", envInstallTool: null });
+        // ③ dsh：沿用既有事件链——install-exit 成功后自动续接插件依赖安装与服务启动
+        if (!get().dshInstalled) {
+          get().appendLog("system", "开始全局安装 @deepseek-ai/dsh@latest …");
+          await api.installDsh();
+          return; // 后续流程由既有事件链驱动，本函数到此结束
+        }
+
+        // 环境全部就绪 → 直接进入现有启动链（含插件依赖与 dsh web 启动、自动打开）
+        get().appendLog("success", "✅ 运行环境就绪");
+        set({ envInstallTool: null });
+        void get().ensurePluginsThenStart();
+      } catch (e) {
+        dropEnvExitWait();
+        const msg = e instanceof Error ? e.message : String(e);
+        get().appendLog("error", `❌ ${msg}`);
+        set({ phase: "error", error: msg, envInstallTool: null });
+      }
+    },
     stop: async () => {
       // 先置 stopped，避免 kill 触发 web-exit 事件时被误判为 error
       set({ phase: "stopped", childRunning: false, serviceRunning: false, url: null });

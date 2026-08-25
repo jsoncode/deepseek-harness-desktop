@@ -1,28 +1,9 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
+import { meetsNodeRequirement } from "../lib/envReq";
 import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
-
-/** 环境要求：Node.js ≥ 22.19 */
-const MIN_NODE_MAJOR = 22;
-const MIN_NODE_MINOR = 19;
-
-function parseNodeVersion(v: string | null): { major: number; minor: number } | null {
-  if (!v) return null;
-  const m = /^(\d+)\.(\d+)/.exec(v);
-  if (!m) return null;
-  return { major: Number(m[1]), minor: Number(m[2]) };
-}
-
-function meetsNodeRequirement(version: string | null): boolean {
-  const parsed = parseNodeVersion(version);
-  if (!parsed) return false;
-  return (
-    parsed.major > MIN_NODE_MAJOR ||
-    (parsed.major === MIN_NODE_MAJOR && parsed.minor >= MIN_NODE_MINOR)
-  );
-}
 
 interface EnvRow {
   name: string;
@@ -32,8 +13,19 @@ interface EnvRow {
 
 export default function Launch() {
   const navigate = useNavigate();
-  const { phase, url, dshInstalled, dshVersion, pnpmPath, plugins, initialized, init, refreshStatus } =
-    useAppStore();
+  const {
+    phase,
+    url,
+    dshInstalled,
+    dshVersion,
+    pnpmPath,
+    plugins,
+    initialized,
+    init,
+    refreshStatus,
+    envInstallTool,
+    installEnvAndStart,
+  } = useAppStore();
   const nodePath = useAppStore((s) => s.nodePath);
   const nodeVersion = useAppStore((s) => s.nodeVersion);
   const pnpmVersion = useAppStore((s) => s.pnpmVersion);
@@ -48,7 +40,7 @@ export default function Launch() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 用户点击启动后（starting → running）自动进入预览页；
+  // 用户点击启动/安装后（starting → running）自动进入预览页；
   // 进入页面时服务已在运行/已在启动（非本次点击触发）则不跳转，避免打断查看启动页信息
   const prevPhase = useRef(phase);
   const startedHere = useRef(false);
@@ -66,12 +58,10 @@ export default function Launch() {
   // ---- 环境判定 ----
   const nodeOk = meetsNodeRequirement(nodeVersion);
   const pnpmOk = Boolean(pnpmPath);
-  const envAllOk = nodeOk && pnpmOk; // dsh 未安装不阻断（会自动安装）
-  // 仅主按钮会触发启动流程的状态才阻断；运行中"打开应用"、浏览器预览模式不受影响
-  const startGated =
-    tauri && !envAllOk && (phase === "idle" || phase === "stopped" || phase === "error");
-  // 阻断时红框；服务运行中发现环境变化仅黄框提醒，不阻断
-  const cardState = startGated ? "bad" : envAllOk ? "" : "warn";
+  // 任一依赖缺失（node / pnpm / dsh）→ 主按钮变为「安装」：全自动依次安装后自动启动并打开
+  const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled);
+  // 缺依赖时环境卡片黄框提醒（不再阻断按钮）；全部就绪为默认样式
+  const cardState = !tauri ? "" : needsInstall ? "warn" : "";
 
   // ---- 环境检查行 ----
   const envRows: EnvRow[] = [];
@@ -88,13 +78,13 @@ export default function Launch() {
       envRows.push({
         name: "Node.js",
         state: "bad",
-        detail: <>未检测到 Node.js，请安装 LTS 版本（≥ 22.19）：https://nodejs.org/</>,
+        detail: <>未检测到 · 点击「安装」将自动安装 LTS 版本（≥ 22.19：Windows 走 winget / macOS 走 Homebrew）</>,
       });
     } else if (!nodeVersion) {
       envRows.push({
         name: "Node.js",
         state: "bad",
-        detail: <>已找到 Node 但无法读取版本，建议重新安装 LTS 版本</>,
+        detail: <>已找到 Node 但无法读取版本，点击「安装」尝试修复</>,
       });
     } else {
       envRows.push({
@@ -114,9 +104,7 @@ export default function Launch() {
         : {
             name: "pnpm",
             state: "bad",
-            detail: (
-              <span>未检测到 pnpm，请执行 npm install -g pnpm（https://pnpm.io/zh-CN/installation）</span>
-            ),
+            detail: <span>未检测到 · 点击「安装」将通过 npm 自动全局安装</span>,
           },
     );
 
@@ -130,7 +118,7 @@ export default function Launch() {
         : {
             name: "dsh CLI",
             state: "warn",
-            detail: <span>未安装 · 首次启动时自动安装 @deepseek-ai/dsh</span>,
+            detail: <span>未安装 · 点击「安装」将自动全局安装 @deepseek-ai/dsh</span>,
           },
     );
   }
@@ -141,7 +129,12 @@ export default function Launch() {
     statusText = "正在检测运行环境…";
     statusClass += " busy";
   } else if (phase === "installing") {
-    statusText = "正在安装 @deepseek-ai/dsh…";
+    statusText =
+      envInstallTool === "node"
+        ? "正在安装 Node.js LTS…"
+        : envInstallTool === "pnpm"
+          ? "正在安装 pnpm…"
+          : "正在安装 @deepseek-ai/dsh…";
     statusClass += " busy";
   } else if (phase === "starting") {
     statusText = "正在启动本地服务…";
@@ -155,12 +148,14 @@ export default function Launch() {
     );
     statusClass += " running";
   } else if (phase === "error") {
-    statusText = "启动失败，请检查终端日志";
+    statusText = "操作失败，请检查终端日志";
     statusClass += " error";
   } else if (phase === "stopped") {
     statusText = "服务已停止";
   } else {
-    statusText = dshInstalled ? "环境就绪 · 点击启动本地服务" : "首次使用 · 将自动安装 @deepseek-ai/dsh";
+    statusText = needsInstall
+      ? "检测到缺失依赖 · 点击「安装」自动配置并启动"
+      : "环境就绪 · 点击启动本地服务";
   }
 
   const handlePrimary = () => {
@@ -168,22 +163,31 @@ export default function Launch() {
       navigate("/preview");
       return;
     }
-    // 手动点击启动：直接在启动页执行启动流程（不再跳转终端页自动启动）
     if (!tauri) {
       // 浏览器预览模式：无后端，跳转终端页展示说明
       navigate("/terminal");
       return;
     }
     startedHere.current = true;
-    void startFlow();
+    if (needsInstall) {
+      void installEnvAndStart();
+    } else {
+      void startFlow();
+    }
   };
 
-  let btnText = "启动应用";
+  let btnText = needsInstall ? "安装" : "启动应用";
   if (phase === "checking") btnText = "检测中…";
   else if (phase === "running") btnText = "打开应用";
-  else if (phase === "installing") btnText = "安装中…";
+  else if (phase === "installing")
+    btnText =
+      envInstallTool === "node"
+        ? "安装 Node.js…"
+        : envInstallTool === "pnpm"
+          ? "安装 pnpm…"
+          : "安装中…";
   else if (phase === "starting") btnText = "启动中…";
-  else if (phase === "error" || phase === "stopped") btnText = "重新启动";
+  else if (phase === "error" || phase === "stopped") btnText = needsInstall ? "安装" : "重新启动";
 
   return (
     <div className="page launch">
@@ -201,10 +205,10 @@ export default function Launch() {
       </div>
 
       {initialized ? (
-        <div className={`env-card ${cardState}`.trimEnd()}>
+        <div className={"env-card" + (cardState ? " " + cardState : "")}>
           {envRows.map((r) => (
             <div key={r.name} className="env-row">
-              <span className={`env-mark ${r.state}`}>
+              <span className={"env-mark " + r.state}>
                 {r.state === "ok" ? "✓" : r.state === "warn" ? "○" : "✗"}
               </span>
               <span className="env-name">{r.name}</span>
@@ -224,9 +228,6 @@ export default function Launch() {
               {plugins.length === 0 ? <div className="plugin-empty">暂无用户插件</div> : null}
             </>
           ) : null}
-          {startGated ? (
-            <div className="env-hint">请先修复以上环境问题，修复后重启本应用再启动服务</div>
-          ) : null}
         </div>
       ) : null}
 
@@ -239,7 +240,7 @@ export default function Launch() {
       <div className="launch-actions">
         <button
           className="btn-primary"
-          disabled={busy || startGated}
+          disabled={busy}
           onClick={handlePrimary}
           style={{ minWidth: 220 }}
         >

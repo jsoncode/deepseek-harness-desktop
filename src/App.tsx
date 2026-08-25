@@ -1,6 +1,8 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from "antd";
 import { useEffect, useLayoutEffect } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router";
+import { useUiStore } from "./store/useUiStore";
+import BottomBar from "./components/BottomBar";
 import PluginFailureModal from "./components/PluginFailureModal";
 import TitleBar from "./components/TitleBar";
 import Launch from "./pages/Launch";
@@ -32,6 +34,9 @@ const LIGHT_TOKENS = {
 export default function App() {
   const effective = useThemeStore((s) => s.effective);
   const initTheme = useThemeStore((s) => s.init);
+  // 全局刷新纪元：刷新按钮自增，作为内容区 key 使当前页面（启动页/终端页/服务预览页）
+  // 整体重挂载——任何页面都能被刷新，而不止服务预览页
+  const reloadKey = useUiStore((s) => s.reloadKey);
 
   useEffect(() => {
     initTheme();
@@ -61,7 +66,7 @@ export default function App() {
         <HashRouter>
           <div className="app-shell">
             <TitleBar />
-            <div className="app-content">
+            <div className="app-content" key={reloadKey}>
               <Routes>
                 <Route path="/" element={<Launch />} />
                 <Route path="/terminal" element={<Terminal />} />
@@ -69,6 +74,8 @@ export default function App() {
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </div>
+            {/* 底部导航条：flex 布局最后一个元素，占位且固定在窗口底部 */}
+            <BottomBar />
           </div>
         </HashRouter>
       </AntApp>

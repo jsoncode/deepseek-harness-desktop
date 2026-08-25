@@ -14,6 +14,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // ---------------------------------------------------------------------------
 pub const INSTALL_LOG_EVENT: &str = "dsh://install-log";
 pub const INSTALL_EXIT_EVENT: &str = "dsh://install-exit";
+pub const ENV_INSTALL_LOG_EVENT: &str = "dsh://env-install-log";
+pub const ENV_INSTALL_EXIT_EVENT: &str = "dsh://env-install-exit";
 pub const WEB_LOG_EVENT: &str = "dsh://web-log";
 pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
@@ -228,6 +230,188 @@ fn read_tool_version(program: &PathBuf) -> Option<String> {
 /// 读取已解析的 dsh 可执行文件版本（`.ps1` 包装经 powershell 前置参数执行）
 fn read_dsh_version(dsh: &DshExec) -> Option<String> {
     read_exec_version(&dsh.program, &dsh.args)
+}
+
+// ---------------------------------------------------------------------------
+// PATH 刷新与环境依赖安装辅助
+// ---------------------------------------------------------------------------
+
+/// 把新目录合并进当前进程的 PATH（新目录优先、去重）。
+///
+/// 安装器（winget/brew/npm 全局安装）写入的新路径只反映在注册表/登录配置里，
+/// 本进程与后续子进程继承的还是启动时的旧 PATH——不刷新的话，刚装好的
+/// node/pnpm 在同一会话里永远探测不到。前端在每步安装后调用
+/// refresh_search_path 触发本合并。
+#[cfg(any(windows, target_os = "macos"))]
+fn merge_into_process_path(new_dirs: Vec<String>) {
+    #[cfg(windows)]
+    let sep = ';';
+    #[cfg(not(windows))]
+    let sep = ':';
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut merged: Vec<String> = Vec::new();
+    for d in new_dirs.into_iter().chain(current.split(sep).map(|s| s.to_string())) {
+        let d = d.trim().to_string();
+        if d.is_empty() {
+            continue;
+        }
+        #[cfg(windows)]
+        let dup = merged.iter().any(|m| m.eq_ignore_ascii_case(&d));
+        #[cfg(not(windows))]
+        let dup = merged.iter().any(|m| m == &d);
+        if !dup {
+            merged.push(d);
+        }
+    }
+    // Vec<String>::join 只接受 &str；char 分隔符在此不可用
+    let sep_str: String = sep.to_string();
+    std::env::set_var("PATH", merged.join(&sep_str));
+}
+
+/// macOS：读取登录 shell 的 PATH（结果进程内缓存）。
+/// GUI 应用从 Finder 启动时不经过 .zprofile/.zshrc，/opt/homebrew/bin 等
+/// 目录常缺席，导致明明装了 node/pnpm/dsh 却探测不到；登录 shell 会加载完整配置。
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let mut cmd = Command::new(shell);
+            cmd.args(["-l", "-c", "printf %s \"$PATH\""]);
+            let out = run_with_timeout(cmd, Duration::from_secs(6))?;
+            if !out.status.success() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!text.is_empty()).then_some(text)
+        })
+        .clone()
+}
+
+/// macOS：把登录 shell 的 PATH 合并进当前进程 PATH（幂等，重复调用开销极低）。
+#[cfg(target_os = "macos")]
+fn merge_login_shell_path() {
+    if let Some(p) = login_shell_path() {
+        let dirs: Vec<String> = p
+            .split(':')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        merge_into_process_path(dirs);
+    }
+}
+
+/// 环境检测前的搜索路径兜底：macOS 合并登录 shell PATH；其他平台为 no-op。
+pub fn ensure_search_path() {
+    #[cfg(target_os = "macos")]
+    merge_login_shell_path();
+}
+
+/// 读取用户环境目录（如 %LOCALAPPDATA%）
+#[cfg(windows)]
+fn env_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var).map(PathBuf::from)
+}
+
+/// 定位 npm 可执行文件：
+/// - Windows：where.exe 解析（取 .exe/.cmd/.bat shim），全局安装在用户目录无需管理员；
+/// - macOS/Linux：先 which（ensure_search_path 已合并登录 PATH），再常见固定位置兜底。
+fn resolve_npm() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        run_where("npm").into_iter().find(|p| is_exec_shim(p))
+    }
+    #[cfg(not(windows))]
+    {
+        for p in run_where("npm") {
+            return Some(p);
+        }
+        for c in ["/opt/homebrew/bin/npm", "/usr/local/bin/npm"] {
+            let p = PathBuf::from(c);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 系统语言检测与 npm 国内镜像
+// ---------------------------------------------------------------------------
+
+/// 系统语言是否为中文（进程内缓存，应用打开后首次使用时收集一次）。
+/// - Windows：注册表 PreferredUILanguages（reg query 快速读取，无需额外依赖）；
+/// - macOS/Linux：LANG / LC_ALL 环境变量以 zh 开头。
+/// 检测失败一律按非中文处理：绝不改动用户的源配置。
+fn system_is_chinese() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            // 注意：builder 链返回 &mut Command，需先绑定到变量再按值传给 run_with_timeout
+            let mut reg = Command::new("reg");
+            reg.args([
+                "query",
+                "HKCU\\Control Panel\\Desktop",
+                "/v",
+                "PreferredUILanguages",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+            if let Some(output) = run_with_timeout(reg, Duration::from_secs(3)) {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    for tok in text.split_whitespace() {
+                        let t = tok.to_lowercase();
+                        // 形如 zh-CN / zh-Hans / zh
+                        if t == "zh" || t.starts_with("zh-") || t.starts_with("zh_") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            // 兜底：终端/WSL 场景会话里带 LANG
+            std::env::var("LANG")
+                .map(|v| v.to_lowercase().starts_with("zh"))
+                .unwrap_or(false)
+        }
+        #[cfg(not(windows))]
+        {
+            for k in ["LC_ALL", "LANG"] {
+                if let Ok(v) = std::env::var(k) {
+                    if v.to_lowercase().starts_with("zh") {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    })
+}
+
+/// 中文系统下为 npm/pnpm 安装追加华为云国内镜像源参数；
+/// 非中文系统返回空切片（完全不动用户源配置）。
+fn npm_mirror_args() -> Vec<&'static str> {
+    if system_is_chinese() {
+        vec!["--registry", "https://repo.huaweicloud.com/repository/npm/"]
+    } else {
+        Vec::new()
+    }
+}
+
+/// 中文系统时先输出一条提示日志（让用户知道本次下载走国内镜像源）
+fn log_npm_mirror(app: &AppHandle, event: &'static str) {
+    if system_is_chinese() {
+        emit_log(
+            app,
+            event,
+            "system",
+            "已检测到中文系统：本次安装使用国内镜像源 https://repo.huaweicloud.com/repository/npm/",
+        );
+    }
 }
 
 /// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
@@ -581,8 +765,29 @@ fn try_detect_url(app: &AppHandle, line: &str) {
 // 命令
 // ---------------------------------------------------------------------------
 
+/// 环境检测：子进程解析/版本读取/服务探测均为秒级阻塞操作。
+/// Tauri 同步命令在【主线程】执行，会冻结整个窗口（表现为启动时"卡死"）；
+/// 因此必须是 async 命令并把重活移交 spawn_blocking 线程池，主线程零阻塞。
 #[tauri::command]
-pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
+pub async fn app_status(state: State<'_, AppState>) -> Result<StatusPayload, String> {
+    // 主线程仅做微秒级锁快照；State 借用无法移入 'static 闭包，先取出所需值
+    let child_running = state.child_pid.lock().unwrap().is_some();
+    let detected_url = state.detected_url.lock().unwrap().clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        app_status_blocking(child_running, detected_url)
+    })
+    .await
+    .map_err(|e| format!("环境检测任务异常: {e}"))?;
+    // 探测到运行中的服务则记入状态，供托盘"浏览器中打开"与停止兜底复用
+    if let Some(u) = &payload.url {
+        *state.detected_url.lock().unwrap() = Some(u.clone());
+    }
+    Ok(payload)
+}
+
+fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> StatusPayload {
+    // macOS 先合并登录 shell PATH（GUI 启动时 PATH 常缺 /opt/homebrew/bin 等目录）
+    ensure_search_path();
     // 工具解析与版本读取并行执行：每个子进程调用都带超时（见 run_with_timeout），
     // 并行后 app_status 最坏耗时约等于最慢单次调用，而不是三者之和。
     let (dsh, pnpm, node) = std::thread::scope(|s| {
@@ -608,13 +813,9 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
 
     let (profile_ready, plugins) = read_profile_plugins();
 
-    let child_running = {
-        let guard = state.child_pid.lock().unwrap();
-        guard.is_some()
-    };
-
+    // child_running / detected_url 已由 async 包装层快照传入
     let mut candidates: Vec<String> = Vec::new();
-    if let Some(url) = state.detected_url.lock().unwrap().clone() {
+    if let Some(url) = detected_url {
         candidates.push(url);
     }
     candidates.extend(default_candidates());
@@ -635,9 +836,7 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
             url = probe_parallel(&extra, 400);
         }
     }
-    if let Some(ref u) = url {
-        *state.detected_url.lock().unwrap() = Some(u.clone());
-    }
+    // 命中服务 URL 时由 async 包装层写回 AppState（此处不持有状态句柄）
     let service_running = url.is_some();
 
     StatusPayload {
@@ -656,15 +855,179 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     }
 }
 
+/// 服务探活：同样移交线程池，避免健康轮询周期性阻塞主线程
 #[tauri::command]
-pub fn probe_service(url: String) -> bool {
-    probe_url(&url, 800)
+pub async fn probe_service(url: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || probe_url(&url, 800))
+        .await
+        .map_err(|e| format!("服务探测任务异常: {e}"))
 }
 
+/// 流式启动一个安装子进程：命令行回显与输出经 log_event 逐行转发，
+/// 退出码经 exit_event 异步通知前端续接下一步。
+fn spawn_streamed(
+    app: AppHandle,
+    display: &str,
+    mut cmd: Command,
+    log_event: &'static str,
+    exit_event: &'static str,
+) -> Result<(), String> {
+    emit_log(&app, log_event, "system", &format!("$ {display}"));
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let child = hide_window(&mut cmd)
+        .spawn()
+        .map_err(|e| format!("启动安装进程失败: {e}"))?;
+    std::thread::spawn(move || pump_process(&app, child, log_event, exit_event));
+    Ok(())
+}
+
+/// 按平台安装缺失的环境依赖（tool = "node" | "pnpm"）。
+///
+/// 全自动链路由前端驱动：每步安装完成后调用 refresh_search_path 刷新 PATH、
+/// 重测环境，再决定下一步；本命令只负责单步安装并流式转发输出。
+/// - Windows / node：winget install -e --id OpenJS.NodeJS.LTS
+///   （静默 + 免交互 + 自动接受协议；MSI 安装器可能弹 UAC 授权窗口，属正常现象）
+/// - macOS / node：brew install node（无 Homebrew 时报错并引导先安装 brew）
+/// - 两平台 / pnpm：npm install -g pnpm（npm 随 Node.js 分发，全局目录用户可写）
+#[tauri::command]
+pub fn install_env_tool(app: AppHandle, tool: String) -> Result<(), String> {
+    match tool.as_str() {
+        "node" => install_tool_node(app),
+        "pnpm" => install_tool_pnpm(app),
+        _ => Err(format!("不支持的环境依赖: {tool}")),
+    }
+}
+
+fn install_tool_node(app: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let winget = run_where("winget")
+            .into_iter()
+            .next()
+            .or_else(|| {
+                // winget 以应用执行别名形式存在于 WindowsApps（where.exe 偶发解析不到）
+                env_dir("LOCALAPPDATA")
+                    .map(|d| d.join("Microsoft\\WindowsApps\\winget.exe"))
+                    .filter(|p| p.is_file())
+            })
+            .ok_or("未找到 winget。请手动安装 Node.js LTS：https://nodejs.org/")?;
+        let mut cmd = Command::new(&winget);
+        cmd.args([
+            "install",
+            "-e",
+            "--id",
+            "OpenJS.NodeJS.LTS",
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ]);
+        let display = format!(
+            "{} install -e --id OpenJS.NodeJS.LTS --silent",
+            winget.display()
+        );
+        return spawn_streamed(
+            app,
+            &display,
+            cmd,
+            ENV_INSTALL_LOG_EVENT,
+            ENV_INSTALL_EXIT_EVENT,
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let brew = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file())
+            .ok_or(
+                "未找到 Homebrew。请先在终端执行 Homebrew 官方安装脚本（https://brew.sh），完成后重新点击安装",
+            )?;
+        let mut cmd = Command::new(&brew);
+        cmd.args(["install", "node"]);
+        let display = format!("{} install node", brew.display());
+        return spawn_streamed(
+            app,
+            &display,
+            cmd,
+            ENV_INSTALL_LOG_EVENT,
+            ENV_INSTALL_EXIT_EVENT,
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = app;
+        Err("当前平台暂不支持自动安装 Node.js，请手动安装：https://nodejs.org/".into())
+    }
+}
+
+fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
+    let npm = resolve_npm()
+        .ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
+    log_npm_mirror(&app, ENV_INSTALL_LOG_EVENT);
+    let mut cmd = Command::new(&npm);
+    cmd.args(["install", "-g", "pnpm"]);
+    cmd.args(npm_mirror_args());
+    let display = format!("{} install -g pnpm", npm.display());
+    spawn_streamed(
+        app,
+        &display,
+        cmd,
+        ENV_INSTALL_LOG_EVENT,
+        ENV_INSTALL_EXIT_EVENT,
+    )
+}
+
+/// 刷新本进程的 PATH：Windows 经 PowerShell 读注册表 Machine/User Path
+/// （[Environment]::GetEnvironmentVariable 自动展开 REG_EXPAND_SZ）；
+/// macOS 合并登录 shell 的 PATH。每步环境依赖安装完成后由前端调用，
+/// 使刚装好的工具无需重启应用即可被 where/which 探测到。
+/// PowerShell 冷启动可达数秒 → async 命令移交线程池，避免阻塞主线程。
+#[tauri::command]
+pub async fn refresh_search_path() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(refresh_search_path_blocking)
+        .await
+        .map_err(|e| format!("刷新 PATH 失败: {e}"))?
+}
+
+fn refresh_search_path_blocking() -> Result<(), String> {
+    ensure_search_path();
+    #[cfg(windows)]
+    {
+        const SCRIPT: &str = concat!(
+            "$m=[Environment]::GetEnvironmentVariable('Path','Machine');",
+            "$u=[Environment]::GetEnvironmentVariable('Path','User');",
+            "($m,$u | Where-Object { $_ }) -join ';'"
+        );
+        let out = run_with_timeout(
+            {
+                let mut c = Command::new("powershell");
+                c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
+                c
+            },
+            Duration::from_secs(8),
+        )
+        .ok_or("读取系统 PATH 超时")?;
+        if !out.status.success() {
+            return Err("读取系统 PATH 失败".into());
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let dirs: Vec<String> = text
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        merge_into_process_path(dirs);
+    }
+    Ok(())
+}
 /// 全局安装 @deepseek-ai/dsh@latest（流式输出）
 #[tauri::command]
 pub fn install_dsh(app: AppHandle) -> Result<(), String> {
     let pnpm = resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+    log_npm_mirror(&app, INSTALL_LOG_EVENT);
     emit_log(
         &app,
         INSTALL_LOG_EVENT,
@@ -674,6 +1037,7 @@ pub fn install_dsh(app: AppHandle) -> Result<(), String> {
     let child = hide_window(
         Command::new(&pnpm)
             .args(["add", "-g", "@deepseek-ai/dsh@latest"])
+            .args(npm_mirror_args())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null()),
@@ -890,9 +1254,8 @@ pub fn kill_tree(pid: u32) {
     }
 }
 
-/// 停止 dsh web（杀死整棵进程树，并按子进程输出过的端口兜底清理脱离进程）
-#[tauri::command]
-pub fn stop_dsh_web(state: State<'_, AppState>) {
+/// 同步停止（仅应用退出钩子使用）：进程即将结束，阻塞无碍。
+pub fn stop_dsh_web_sync(state: &AppState) {
     let pid = state.child_pid.lock().unwrap().take();
     if let Some(pid) = pid {
         kill_tree(pid);
@@ -907,6 +1270,29 @@ pub fn stop_dsh_web(state: State<'_, AppState>) {
     }
     // 服务已停止，清除已探测 URL，避免托盘"浏览器中打开"打开死链
     *state.detected_url.lock().unwrap() = None;
+}
+
+/// 停止 dsh web：杀树 + 兜底清理耗时秒级，移交线程池执行避免冻结窗口
+#[tauri::command]
+pub async fn stop_dsh_web(state: State<'_, AppState>) -> Result<(), String> {
+    let pid = state.child_pid.lock().unwrap().take();
+    let urls = state.pending_urls.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+        std::thread::sleep(Duration::from_millis(600));
+        for url in &urls {
+            if let Some(port) = url_port(url) {
+                kill_listener(port);
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("停止服务失败: {e}"))?;
+    // 服务已停止，清除已探测 URL，避免托盘"浏览器中打开"打开死链
+    *state.detected_url.lock().unwrap() = None;
+    Ok(())
 }
 
 fn url_port(url: &str) -> Option<u16> {
@@ -1145,6 +1531,7 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
     }
     let pnpm =
         resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+    log_npm_mirror(&app, PLUGIN_INSTALL_LOG_EVENT);
     emit_log(
         &app,
         PLUGIN_INSTALL_LOG_EVENT,
@@ -1155,6 +1542,7 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
         Command::new(&pnpm)
             .arg("install")
             .current_dir(&dir)
+            .args(npm_mirror_args())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null()),

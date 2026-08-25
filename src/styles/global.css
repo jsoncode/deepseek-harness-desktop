@@ -1434,7 +1434,8 @@ html[data-theme="light"] .mk-op-banner {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 8px;
+  /* 右侧留出更大间距：末尾的"在浏览器中打开"与窗口控制按钮（最小化）分开，不贴在一起 */
+  padding: 0 28px 0 8px;
 }
 
 .titlebar-center .icon-btn {
@@ -1447,13 +1448,14 @@ html[data-theme="light"] .mk-op-banner {
   flex-shrink: 0;
 }
 
-.theme-switch {
+/* 主题切换已迁移到底部导航条；以下仅为标题栏场景保留的间距与分隔线 */
+.titlebar .theme-switch {
   margin-right: 14px;
   position: relative;
 }
 
 /* 与窗口控制按钮（最小化）之间的分隔线：拉大间距并在视觉上分离 */
-.theme-switch::after {
+.titlebar .theme-switch::after {
   content: "";
   position: absolute;
   right: -8px;
@@ -1499,6 +1501,34 @@ html[data-theme="light"] .mk-op-banner {
 .win-btn-close:hover {
   background: #e81123;
   color: #fff;
+}
+
+/* --------------------------------------------------------------------------
+   底部导航条（BottomBar）：flex 纵向布局的最后一个元素，
+   占据真实布局空间并固定在窗口最底部
+   -------------------------------------------------------------------------- */
+
+.bottombar {
+  position: relative;
+  z-index: 10;
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  min-height: 44px;
+  padding: 0 12px;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  user-select: none;
+}
+
+/* 左侧图标按钮组：直接复用全局 .icon-btn（含 .stop-btn 危险色悬停），
+   名称说明交给 Tooltip，按钮上不展示文案 */
+.bottombar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 34px 按钮 + 上下各 5px = 与标题栏同高的 44px */
+  padding: 5px 0;
 }
 
 /* --------------------------------------------------------------------------

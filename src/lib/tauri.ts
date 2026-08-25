@@ -47,6 +47,8 @@ export interface StatusPayload {
 export const EVENTS = {
   installLog: "dsh://install-log",
   installExit: "dsh://install-exit",
+  envInstallLog: "dsh://env-install-log",
+  envInstallExit: "dsh://env-install-exit",
   pluginInstallLog: "dsh://plugin-install-log",
   pluginInstallExit: "dsh://plugin-install-exit",
   pluginOpLog: "dsh://plugin-op-log",
@@ -86,6 +88,12 @@ export const api = {
   appStatus: () => requireTauri(() => invoke<StatusPayload>("app_status")),
   probeService: (url: string) => requireTauri(() => invoke<boolean>("probe_service", { url })),
   installDsh: () => requireTauri(() => invoke<void>("install_dsh")),
+  /** 安装缺失的环境依赖：tool = "node" | "pnpm"（按平台自动选择 winget/brew/npm 指令） */
+  installEnvTool: (tool: "node" | "pnpm") =>
+    requireTauri(() => invoke<void>("install_env_tool", { tool })),
+  /** 刷新本进程 PATH：Windows 读注册表 Machine/User，macOS 合并登录 shell PATH；
+      使刚安装的工具在当前会话立即可被探测，无需重启应用 */
+  refreshSearchPath: () => requireTauri(() => invoke<void>("refresh_search_path")),
   startDshWeb: () => requireTauri(() => invoke<void>("start_dsh_web")),
   stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),

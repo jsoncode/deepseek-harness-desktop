@@ -1,35 +1,31 @@
 import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
-import {
-  CodeOutlined,
-  CopyOutlined,
-  ExportOutlined,
-  HomeOutlined,
-  ReloadOutlined,
-  StopOutlined,
-  SyncOutlined,
-} from "@ant-design/icons";
-import { useState } from "react";
+import { CopyOutlined, ExportOutlined, HomeOutlined, SyncOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import PluginManager from "./PluginManager";
-import ThemeSwitch from "./ThemeSwitch";
 import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
 
+/**
+ * 顶部标题栏：品牌区 + 服务地址/刷新/浏览器打开 + 窗口控制。
+ * 停止/重启服务、查看日志、插件、主题切换已迁移到底部导航条（BottomBar）。
+ */
 export default function TitleBar() {
   const navigate = useNavigate();
-  const { message, modal } = AntApp.useApp();
+  const { message } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
-  const serviceRunning = useAppStore((s) => s.serviceRunning);
   const serviceAlive = useAppStore((s) => s.serviceAlive);
-  const stop = useAppStore((s) => s.stop);
-  const startFlow = useAppStore((s) => s.startFlow);
+  const refreshStatus = useAppStore((s) => s.refreshStatus);
   const bumpReload = useUiStore((s) => s.bumpReload);
-  const [restarting, setRestarting] = useState(false);
+
+  // 刷新：重挂载当前页面（key 纪元 +1）+ 重测环境状态；启动/安装进行中时后端会自动跳过重测
+  const handleRefresh = () => {
+    bumpReload();
+    void refreshStatus();
+  };
 
   const copyUrl = async () => {
     if (!url) return;
@@ -41,52 +37,6 @@ export default function TitleBar() {
     }
   };
 
-  // 重启：停止当前服务 → 重新启动 → 自动刷新已加载的页面
-  const handleRestart = async () => {
-    if (restarting) return;
-    setRestarting(true);
-    message.open({ type: "loading", content: "正在重启服务…", key: "restart", duration: 0 });
-    try {
-      await stop();
-      await startFlow();
-      bumpReload();
-      message.success({ content: "服务已重新启动", key: "restart" });
-    } catch (e) {
-      message.error({ content: `重启失败：${String(e)}`, key: "restart" });
-    } finally {
-      setRestarting(false);
-    }
-  };
-
-  // 危险操作统一弹框确认后再执行
-  const confirmRestart = () => {
-    modal.confirm({
-      title: "重启服务",
-      content: "确定要重启服务吗？正在浏览的页面会短暂中断。",
-      okText: "重启",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: () => void handleRestart(),
-    });
-  };
-
-  const confirmStop = () => {
-    modal.confirm({
-      title: "停止服务",
-      content: "确定要停止当前服务吗？停止后需重新启动才能继续访问。",
-      okText: "停止",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: () => {
-        void stop();
-        navigate("/");
-      },
-    });
-  };
-
-  // 安装/启动过程中禁用重启按钮，避免重复触发
-  const busy = phase === "installing" || phase === "starting";
-
   return (
     <header className="titlebar">
       <div className="titlebar-left">
@@ -95,42 +45,6 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        {/* 停止键外包 span：antd 对 disabled 按钮不弹气泡，包裹层保证置灰时也能提示原因 */}
-        <Tooltip title={!serviceRunning ? "服务未运行" : "停止服务"}>
-          <span className="tip-wrap">
-            <button
-              className="icon-btn stop-btn"
-              type="button"
-              aria-label="停止服务"
-              disabled={!serviceRunning || restarting}
-              onClick={confirmStop}
-            >
-              <StopOutlined />
-            </button>
-          </span>
-        </Tooltip>
-        <Tooltip title="重启服务">
-          <button
-            className="icon-btn"
-            type="button"
-            aria-label="重启服务"
-            disabled={restarting || busy}
-            onClick={confirmRestart}
-          >
-            {/* 重启中不旋转方向性图标（避免怪异动效），loading 状态由消息气泡提示 */}
-            <ReloadOutlined />
-          </button>
-        </Tooltip>
-        <Tooltip title="查看日志">
-          <button
-            className="icon-btn"
-            type="button"
-            aria-label="查看日志"
-            onClick={() => navigate("/terminal")}
-          >
-            <CodeOutlined />
-          </button>
-        </Tooltip>
         <Tooltip title="返回启动页">
           <button className="icon-btn" type="button" aria-label="返回启动页" onClick={() => navigate("/")}>
             <HomeOutlined />
@@ -140,8 +54,8 @@ export default function TitleBar() {
           <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
           <span className="url-value">{url ?? "未检测到服务"}</span>
         </div>
-        <Tooltip title="刷新">
-          <button className="icon-btn" type="button" aria-label="刷新" onClick={bumpReload}>
+        <Tooltip title="刷新（当前页面与环境状态）">
+          <button className="icon-btn" type="button" aria-label="刷新" onClick={handleRefresh}>
             <SyncOutlined />
           </button>
         </Tooltip>
@@ -168,8 +82,6 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-right">
-        <PluginManager />
-        <ThemeSwitch />
         <WindowControls />
       </div>
     </header>

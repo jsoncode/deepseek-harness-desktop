@@ -122,6 +122,8 @@ pub fn run() {
             dsh::app_status,
             dsh::probe_service,
             dsh::install_dsh,
+            dsh::install_env_tool,
+            dsh::refresh_search_path,
             dsh::start_dsh_web,
             dsh::stop_dsh_web,
             dsh::open_in_browser,
@@ -199,7 +201,8 @@ pub fn run() {
         .run(|app_handle, event| {
             if let RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    dsh::stop_dsh_web(state);
+                    // 退出路径用同步版：async 命令无法在 RunEvent 钩子中 await
+                    dsh::stop_dsh_web_sync(&state);
                 }
             }
         });

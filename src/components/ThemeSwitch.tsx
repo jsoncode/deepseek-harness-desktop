@@ -25,7 +25,8 @@ export default function ThemeSwitch() {
         },
       }}
     >
-      <Tooltip title="切换主题">
+      {/* 气泡提示显示在按钮右侧，避免遮挡底部导航条上方的页面内容 */}
+      <Tooltip title="切换主题" placement="right">
         <button type="button" className="icon-btn theme-switch" aria-label="切换主题">
           {mode === "system" ? (
             <DesktopOutlined style={{ fontSize: 15 }} />
