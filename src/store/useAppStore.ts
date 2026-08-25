@@ -26,6 +26,9 @@ interface AppStore {
   childRunning: boolean;
   pnpmPath: string | null;
   dshPath: string | null;
+  nodePath: string | null;
+  nodeVersion: string | null;
+  pnpmVersion: string | null;
   error: string | null;
   initialized: boolean;
 
@@ -115,6 +118,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     childRunning: false,
     pnpmPath: null,
     dshPath: null,
+    nodePath: null,
+    nodeVersion: null,
+    pnpmVersion: null,
     error: null,
     initialized: false,
 
@@ -159,6 +165,9 @@ export const useAppStore = create<AppStore>((set, get) => {
           url: s.url,
           pnpmPath: s.pnpm_path,
           dshPath: s.dsh_path,
+          nodePath: s.node_path,
+          nodeVersion: s.node_version,
+          pnpmVersion: s.pnpm_version,
           phase: s.service_running
             ? "running"
             : s.child_running
@@ -184,6 +193,9 @@ export const useAppStore = create<AppStore>((set, get) => {
           url: s.url,
           pnpmPath: s.pnpm_path,
           dshPath: s.dsh_path,
+          nodePath: s.node_path,
+          nodeVersion: s.node_version,
+          pnpmVersion: s.pnpm_version,
           phase: s.service_running
             ? "running"
             : s.child_running

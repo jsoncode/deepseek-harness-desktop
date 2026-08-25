@@ -28,6 +28,9 @@ export interface StatusPayload {
   url: string | null;
   pnpm_path: string | null;
   dsh_path: string | null;
+  node_path: string | null;
+  node_version: string | null;
+  pnpm_version: string | null;
 }
 
 export const EVENTS = {
