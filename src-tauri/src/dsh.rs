@@ -17,6 +17,8 @@ pub const INSTALL_EXIT_EVENT: &str = "dsh://install-exit";
 pub const WEB_LOG_EVENT: &str = "dsh://web-log";
 pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
+pub const PLUGIN_INSTALL_LOG_EVENT: &str = "dsh://plugin-install-log";
+pub const PLUGIN_INSTALL_EXIT_EVENT: &str = "dsh://plugin-install-exit";
 
 // ---------------------------------------------------------------------------
 // 状态与负载
@@ -881,5 +883,46 @@ pub fn remove_plugin(name: String) -> Result<(), String> {
 
     let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
     std::fs::write(&path, out + "\n").map_err(|e| format!("写回 package.json 失败: {e}"))?;
+    Ok(())
+}
+
+/// 在 profile 目录执行 pnpm install（幂等，无变化秒级完成）；
+/// 目录或 package.json 不存在时直接成功（首次运行尚未生成 profile）。
+/// 输出经 plugin-install-log 流式转发，退出码经 plugin-install-exit 通知前端续接。
+#[tauri::command]
+pub fn install_plugins(app: AppHandle) -> Result<(), String> {
+    let Some(dir) = profile_dir() else {
+        return Ok(());
+    };
+    if !dir.join("package.json").is_file() {
+        return Ok(());
+    }
+    let pnpm =
+        resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+    emit_log(
+        &app,
+        PLUGIN_INSTALL_LOG_EVENT,
+        "system",
+        &format!("$ pnpm install（{}）", dir.display()),
+    );
+    let child = hide_window(
+        Command::new(&pnpm)
+            .arg("install")
+            .current_dir(&dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null()),
+    )
+    .spawn()
+    .map_err(|e| format!("启动 pnpm install 失败: {e}"))?;
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        pump_process(
+            &app2,
+            child,
+            PLUGIN_INSTALL_LOG_EVENT,
+            PLUGIN_INSTALL_EXIT_EVENT,
+        );
+    });
     Ok(())
 }
