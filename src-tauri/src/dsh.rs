@@ -68,6 +68,8 @@ pub struct StatusPayload {
     pub node_path: Option<String>,
     pub node_version: Option<String>,
     pub pnpm_version: Option<String>,
+    pub plugins: Vec<String>,
+    pub profile_ready: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +535,8 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
     let node_version = node.as_ref().and_then(|p| read_tool_version(p));
     let node_path = node.map(|p| p.to_string_lossy().into_owned());
 
+    let (profile_ready, plugins) = read_profile_plugins();
+
     let child_running = {
         let guard = state.child_pid.lock().unwrap();
         guard.is_some()
@@ -575,6 +579,8 @@ pub fn app_status(state: State<'_, AppState>) -> StatusPayload {
         node_path,
         node_version,
         pnpm_version,
+        plugins,
+        profile_ready,
     }
 }
 
@@ -792,4 +798,88 @@ pub fn open_url(url: &str) -> Result<(), String> {
 #[tauri::command]
 pub fn open_in_browser(url: String) -> Result<(), String> {
     open_url(&url)
+}
+
+// ---------------------------------------------------------------------------
+// dsh profile 插件管理（%USERPROFILE%\.dsh\profiles\web\package.json）
+// ---------------------------------------------------------------------------
+
+/// 用户 dsh profile 目录（%USERPROFILE%\.dsh\profiles\web），不存在时 None
+fn profile_dir() -> Option<PathBuf> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let dir = PathBuf::from(home).join(".dsh").join("profiles").join("web");
+    dir.is_dir().then_some(dir)
+}
+
+fn profile_package_json() -> Option<PathBuf> {
+    profile_dir().map(|d| d.join("package.json"))
+}
+
+/// 读取插件列表：按 bundles 数组顺序过滤出存在于 dependencies 中的名字。
+/// 返回 (package.json 存在且可解析, 插件名列表)；文件缺失/解析失败均为 (false, [])
+fn read_profile_plugins() -> (bool, Vec<String>) {
+    let Some(path) = profile_package_json() else {
+        return (false, Vec::new());
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (false, Vec::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (false, Vec::new());
+    };
+    let deps = v.get("dependencies").and_then(|d| d.as_object());
+    let bundles = v
+        .get("dsh")
+        .and_then(|d| d.get("profile"))
+        .and_then(|p| p.get("bundles"))
+        .and_then(|b| b.as_array());
+    let mut plugins = Vec::new();
+    if let (Some(deps), Some(bundles)) = (deps, bundles) {
+        for b in bundles {
+            if let Some(name) = b.as_str() {
+                if deps.contains_key(name) && !plugins.iter().any(|p| p == name) {
+                    plugins.push(name.to_string());
+                }
+            }
+        }
+    }
+    (true, plugins)
+}
+
+/// 从 profile package.json 移除插件：同时删除 bundles 数组项与 dependencies 键，
+/// 写回时保持键顺序（preserve_order）与两空格缩进
+#[tauri::command]
+pub fn remove_plugin(name: String) -> Result<(), String> {
+    let path =
+        profile_package_json().ok_or("未找到插件目录（%USERPROFILE%\\.dsh\\profiles\\web）")?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("package.json 解析失败: {e}"))?;
+
+    let in_deps = v
+        .get_mut("dependencies")
+        .and_then(|d| d.as_object_mut())
+        .map(|o| o.remove(&name).is_some())
+        .unwrap_or(false);
+    let mut in_bundles = false;
+    if let Some(arr) = v
+        .get_mut("dsh")
+        .and_then(|d| d.get_mut("profile"))
+        .and_then(|p| p.get_mut("bundles"))
+        .and_then(|b| b.as_array_mut())
+    {
+        let before = arr.len();
+        arr.retain(|x| x.as_str() != Some(name.as_str()));
+        in_bundles = arr.len() != before;
+    }
+
+    if !in_deps && !in_bundles {
+        return Err(format!("插件 {name} 不在 package.json 中"));
+    }
+
+    let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
+    std::fs::write(&path, out + "\n").map_err(|e| format!("写回 package.json 失败: {e}"))?;
+    Ok(())
 }

@@ -74,6 +74,7 @@ pub fn run() {
             dsh::start_dsh_web,
             dsh::stop_dsh_web,
             dsh::open_in_browser,
+            dsh::remove_plugin,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
