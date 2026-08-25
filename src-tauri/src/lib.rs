@@ -78,6 +78,7 @@ pub fn run() {
             dsh::install_plugins,
             dsh::run_plugin_op,
             dsh::cancel_plugin_op,
+            dsh::check_plugin_updates,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：

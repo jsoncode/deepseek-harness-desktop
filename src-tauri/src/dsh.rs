@@ -27,6 +27,8 @@ pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
 // ---------------------------------------------------------------------------
 
 /// 进行中的插件 CLI 操作
+/// （kind/name 暂未被读取，保留给后续状态查询与日志展示使用）
+#[allow(dead_code)]
 pub struct PluginOpState {
     pub pid: u32,
     pub kind: String,
@@ -994,6 +996,84 @@ pub fn remove_plugin(name: String) -> Result<(), String> {
     let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
     std::fs::write(&path, out + "\n").map_err(|e| format!("写回 package.json 失败: {e}"))?;
     Ok(())
+}
+
+/// 插件版本基础信息（纯本地读取；latest 由前端直查 npm registry）
+#[derive(Serialize)]
+pub struct PluginVersionInfo {
+    pub name: String,
+    pub spec: Option<String>,
+    pub current: Option<String>,
+    pub updatable: bool,
+}
+
+/// 纯 registry 规格才可检查更新（link/file/git/本地路径均排除）
+fn is_registry_spec(spec: &str) -> bool {
+    let s = spec.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let lower = s.to_lowercase();
+    if lower.starts_with("link:")
+        || lower.starts_with("file:")
+        || lower.starts_with("git")
+        || lower.starts_with("github:")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("./")
+        || lower.starts_with("../")
+        || lower.contains("://")
+    {
+        return false;
+    }
+    // Windows 绝对路径（如 D:/workspace/x）
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        return false;
+    }
+    true
+}
+
+/// 读取 node_modules 内已安装版本（支持 @scope/name 嵌套路径）
+fn read_installed_version(dir: &PathBuf, name: &str) -> Option<String> {
+    let mut rel = PathBuf::from("node_modules");
+    for part in name.split('/') {
+        rel = rel.join(part);
+    }
+    let text = std::fs::read_to_string(dir.join(&rel).join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// 插件版本基础信息：名称、依赖规格、当前安装版本、是否可检查更新。
+/// latest 不在此处获取——前端并行直查 registry，比拉起 pnpm outdated 快数倍。
+#[tauri::command]
+pub fn check_plugin_updates() -> Result<Vec<PluginVersionInfo>, String> {
+    let dir = profile_dir().ok_or("未找到插件目录")?;
+    let path = profile_package_json().ok_or("未找到 package.json")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("package.json 解析失败: {e}"))?;
+    let deps = v.get("dependencies").and_then(|d| d.as_object());
+
+    let parsed: (bool, Vec<String>) = read_profile_plugins();
+    let names: Vec<String> = parsed.1;
+    let _ = parsed.0;
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let spec = deps
+                .and_then(|d| d.get(&name))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let updatable = spec.as_deref().map(is_registry_spec).unwrap_or(false);
+            PluginVersionInfo {
+                updatable,
+                current: read_installed_version(&dir, &name),
+                spec,
+                name,
+            }
+        })
+        .collect())
 }
 
 /// 在 profile 目录执行 pnpm install（幂等，无变化秒级完成）；
