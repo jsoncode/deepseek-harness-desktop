@@ -1,7 +1,7 @@
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { ArrowLeftIcon } from "../components/icons";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
@@ -100,7 +100,7 @@ export default function Preview() {
           <div className="big">{syncing ? <span className="spinner-ring" /> : "🛰"}</div>
           <div>{syncing ? "正在检测本地服务…" : "未检测到本地服务地址"}</div>
           <button className="btn-secondary" onClick={() => navigate("/")}>
-            <ArrowLeftIcon size={14} /> 返回启动页
+            <ArrowLeftOutlined style={{ fontSize: 14 }} /> 返回启动页
           </button>
         </div>
       </div>

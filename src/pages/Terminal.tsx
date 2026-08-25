@@ -1,6 +1,6 @@
+import { CaretRightFilled, HomeOutlined, StopOutlined } from "@ant-design/icons";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
-import { HomeIcon, PlayIcon, StopIcon } from "../components/icons";
 import { useAppStore } from "../store/useAppStore";
 
 const MARK: Record<string, string> = {
@@ -119,7 +119,7 @@ export default function Terminal() {
         {phase === "running" ? (
           <>
             <button className="btn-secondary" onClick={() => navigate("/preview")}>
-              <PlayIcon size={14} /> 打开应用
+              <CaretRightFilled style={{ fontSize: 14 }} /> 打开应用
             </button>
             <button
               className="btn-secondary"
@@ -129,7 +129,7 @@ export default function Terminal() {
               }}
               style={{ color: "var(--danger)", borderColor: "rgba(248,113,113,.35)" }}
             >
-              <StopIcon size={14} /> 停止服务
+              <StopOutlined style={{ fontSize: 14 }} /> 停止服务
             </button>
           </>
         ) : null}
@@ -142,7 +142,7 @@ export default function Terminal() {
             }}
             style={{ minWidth: 180 }}
           >
-            <PlayIcon size={15} /> 重试
+            <CaretRightFilled style={{ fontSize: 15 }} /> 重试
           </button>
         ) : null}
         {phase === "stopped" ? (
@@ -154,11 +154,11 @@ export default function Terminal() {
             }}
             style={{ minWidth: 180 }}
           >
-            <PlayIcon size={15} /> 重新启动
+            <CaretRightFilled style={{ fontSize: 15 }} /> 重新启动
           </button>
         ) : null}
         <button className="btn-secondary" onClick={() => navigate("/")}>
-          <HomeIcon size={14} /> 返回启动页
+          <HomeOutlined style={{ fontSize: 14 }} /> 返回启动页
         </button>
       </div>
     </div>
