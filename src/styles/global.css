@@ -433,8 +433,14 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 4px;
+  padding: 7px 8px;
   border-bottom: 1px solid var(--border);
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+
+.plugin-row:hover {
+  background: var(--panel-strong);
 }
 
 .plugin-name {
@@ -465,6 +471,96 @@ body {
 /* 弹框内操作终端：固定高度滚动 */
 .plugin-term .term-body {
   height: 420px;
+}
+
+/* 插件管理弹框：对齐启动页视觉 */
+.plugin-manager-modal .ant-modal-content {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.plugin-manager-modal .ant-modal-header {
+  background: transparent;
+}
+
+.plugin-manager-modal .ant-modal-title {
+  letter-spacing: 0.06em;
+}
+
+.plugin-manager-modal .ant-input {
+  background: var(--panel);
+  border-color: var(--border-strong);
+  border-radius: 10px;
+  color: var(--text-1);
+}
+
+/* 胶囊按钮族：基类对齐启动页 btn-secondary，danger 红描边，primary 渐变实底 */
+.pm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    transform 0.15s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    filter 0.15s ease;
+}
+
+.pm-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: var(--panel-strong);
+}
+
+.pm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pm-btn.danger {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.pm-btn.danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fff;
+  border-color: rgba(248, 113, 113, 0.6);
+}
+
+.pm-btn.primary {
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #22d3ee 100%);
+  box-shadow:
+    0 10px 26px -10px rgba(99, 102, 241, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.pm-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.pm-btn-sm {
+  padding: 4px 14px;
+  font-size: 12px;
+}
+
+html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled) {
+  border-color: rgba(15, 23, 42, 0.28);
 }
 
 /* 主按钮 */

@@ -1,5 +1,5 @@
 import { ClusterOutlined } from "@ant-design/icons";
-import { App as AntApp, Badge, Button, Input, Modal, Tooltip } from "antd";
+import { App as AntApp, Badge, Input, Modal, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
@@ -119,6 +119,7 @@ export default function PluginManager() {
 
       <Modal
         open={open}
+        className="plugin-manager-modal"
         onCancel={() => setOpen(false)}
         title={
           view === "terminal"
@@ -131,15 +132,17 @@ export default function PluginManager() {
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               {running ? (
                 <>
-                  <Button danger onClick={cancelOpConfirm}>
+                  <button className="pm-btn danger" type="button" onClick={cancelOpConfirm}>
                     终止安装
-                  </Button>
-                  <Button onClick={() => setOpen(false)}>后台运行</Button>
+                  </button>
+                  <button className="pm-btn" type="button" onClick={() => setOpen(false)}>
+                    后台运行
+                  </button>
                 </>
               ) : (
-                <Button type="primary" onClick={() => setOpen(false)}>
+                <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
                   关闭
-                </Button>
+                </button>
               )}
             </div>
           ) : null
@@ -156,9 +159,14 @@ export default function PluginManager() {
             ) : null}
 
             <div className="plugin-toolbar">
-              <Button size="small" disabled={running} onClick={() => setAddOpen(true)}>
+              <button
+                className="pm-btn pm-btn-sm"
+                type="button"
+                disabled={running}
+                onClick={() => setAddOpen(true)}
+              >
                 ＋ 新增插件
-              </Button>
+              </button>
             </div>
 
             {plugins.length === 0 ? (
@@ -167,12 +175,22 @@ export default function PluginManager() {
               plugins.map((p) => (
                 <div key={p} className="plugin-row">
                   <span className="plugin-name">{p}</span>
-                  <Button size="small" disabled={running} onClick={() => confirmOp("update", p)}>
+                  <button
+                    className="pm-btn pm-btn-sm"
+                    type="button"
+                    disabled={running}
+                    onClick={() => confirmOp("update", p)}
+                  >
                     更新
-                  </Button>
-                  <Button size="small" danger disabled={running} onClick={() => confirmOp("remove", p)}>
+                  </button>
+                  <button
+                    className="pm-btn pm-btn-sm danger"
+                    type="button"
+                    disabled={running}
+                    onClick={() => confirmOp("remove", p)}
+                  >
                     删除
-                  </Button>
+                  </button>
                 </div>
               ))
             )}
@@ -220,6 +238,7 @@ export default function PluginManager() {
       {/* 新增插件输入弹框 */}
       <Modal
         open={addOpen}
+        className="plugin-manager-modal"
         title="新增插件"
         okText="保存并安装"
         cancelText="取消"
