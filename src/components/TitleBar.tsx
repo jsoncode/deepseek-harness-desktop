@@ -24,6 +24,7 @@ export default function TitleBar() {
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
   const serviceRunning = useAppStore((s) => s.serviceRunning);
+  const serviceAlive = useAppStore((s) => s.serviceAlive);
   const stop = useAppStore((s) => s.stop);
   const startFlow = useAppStore((s) => s.startFlow);
   const bumpReload = useUiStore((s) => s.bumpReload);
@@ -135,7 +136,7 @@ export default function TitleBar() {
           </button>
         </Tooltip>
         <div className="url-pill">
-          <span className="dot" />
+          <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
           <span className="url-value">{url ?? "未检测到服务"}</span>
         </div>
         <Tooltip title="刷新">

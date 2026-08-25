@@ -798,6 +798,19 @@ body {
   flex-shrink: 0;
 }
 
+/* 无服务地址 */
+.url-pill .dot.off {
+  background: var(--text-3);
+  box-shadow: none;
+}
+
+/* 运行中但断连（或已停止）：红色呼吸提醒 */
+.url-pill .dot.down {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.8);
+  animation: pulseDot 1.6s ease-in-out infinite;
+}
+
 .url-pill .url-value {
   flex: 1;
   min-width: 0;
