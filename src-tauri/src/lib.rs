@@ -103,6 +103,49 @@ const PLUGIN_FAILURE_BRIDGE: &str = r##"
 })();
 "##;
 
+/// 注入到 webview 所有 frame 的主题同步监听脚本：
+/// dsh web 前端切换主题时不推送任何事件（调研结论：仅 Cordis 内部
+/// `theme/change` + presenter 写 DOM），但会反映在 iframe 的 DOM 上：
+/// ui-layout 的 ThemePresenter 在暗色时给 `body` 设置
+/// `data-ds-dark-theme` 属性、亮色时移除，并更新 `html` 的 color-scheme。
+/// 本脚本在 iframe 内用 MutationObserver 监听该属性变化，把当前主题
+/// postMessage 给主框架，由前端跟随宿主主题（壳主题设为"跟随宿主"时）。
+///
+/// 与 EXTERNAL_LINK_BRIDGE / PLUGIN_FAILURE_BRIDGE 同理：预览 iframe 是
+/// 跨源页面，前端受同源策略无法直读其 DOM，必须由注入脚本在 iframe
+/// 内部观察并经 postMessage 上报。
+const THEME_SYNC_BRIDGE: &str = r##"
+(() => {
+  // 只处理预览 iframe（子框架）；主框架与 iframe 内的更深层子 frame 跳过
+  if (window.top === window) return;
+  if (window.parent !== window.top) return;
+  if (window.__dshThemeBridgeInstalled) return;
+  try {
+    Object.defineProperty(window, "__dshThemeBridgeInstalled", { value: true });
+  } catch { /* 忽略 */ }
+  const post = (dark) => {
+    try {
+      window.parent.postMessage({ "dsh-desktop:theme-change": true, dark }, "*");
+    } catch { /* 跨源 postMessage 失败的概率极低，忽略 */ }
+  };
+  const report = () => {
+    const dark = document.body ? document.body.hasAttribute("data-ds-dark-theme") : false;
+    post(dark);
+  };
+  const watch = () => {
+    report();
+    if (!document.body) return;
+    const mo = new MutationObserver(report);
+    mo.observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme"] });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", watch, { once: true });
+  } else {
+    watch();
+  }
+})();
+"##;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -157,6 +200,7 @@ pub fn run() {
                 // 走 open_in_browser 命令用系统浏览器打开。
                 .initialization_script_for_all_frames(EXTERNAL_LINK_BRIDGE)
                 .initialization_script_for_all_frames(PLUGIN_FAILURE_BRIDGE)
+                .initialization_script_for_all_frames(THEME_SYNC_BRIDGE)
                 .build()?;
 
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;

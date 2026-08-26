@@ -4,12 +4,15 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
+import { useThemeStore } from "../store/useThemeStore";
 import { useUiStore } from "../store/useUiStore";
 
 /** 桥接脚本发来的外链打开请求标记（与 src-tauri/src/lib.rs 的 EXTERNAL_LINK_BRIDGE 对应） */
 const OPEN_URL_MSG = "dsh-desktop:open-url";
 /** iframe 内插件加载失败上报标记（与 src-tauri/src/lib.rs 的 PLUGIN_FAILURE_BRIDGE 对应） */
 const PLUGIN_FAILED_MSG = "dsh-desktop:plugin-failed";
+/** iframe 内主题变化上报标记（与 src-tauri/src/lib.rs 的 THEME_SYNC_BRIDGE 对应） */
+const THEME_CHANGE_MSG = "dsh-desktop:theme-change";
 
 /**
  * 从插件加载失败的错误项中提取插件名：
@@ -38,6 +41,7 @@ export default function Preview() {
   const initialized = useAppStore((s) => s.initialized);
   const init = useAppStore((s) => s.init);
   const reportPluginLoadError = useAppStore((s) => s.reportPluginLoadError);
+  const setHostTheme = useThemeStore((s) => s.setHostTheme);
   const reloadKey = useUiStore((s) => s.reloadKey);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -59,6 +63,12 @@ export default function Preview() {
       if (!data || typeof data !== "object") return;
       // 只信任预览 iframe 发来的消息，避免页面内其他来源伪造
       if (e.source !== iframeRef.current?.contentWindow) return;
+
+      // 宿主主题变化（iframe 内 body[data-ds-dark-theme] 变化）→ 壳主题跟随
+      if (data[THEME_CHANGE_MSG] === true && typeof data.dark === "boolean") {
+        setHostTheme(data.dark ? "dark" : "light");
+        return;
+      }
 
       // 插件加载失败（iframe 内渲染 "Failed to load plugins" 界面）
       if (data[PLUGIN_FAILED_MSG] === true && Array.isArray(data.items)) {
@@ -85,7 +95,7 @@ export default function Preview() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [message, reportPluginLoadError]);
+  }, [message, reportPluginLoadError, setHostTheme]);
 
   // 无 URL → 空态（状态同步中显示"正在检测"，避免刷新后误报未检测到服务）
   if (!url) {

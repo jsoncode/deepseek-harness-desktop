@@ -1,5 +1,5 @@
 import { Tooltip } from "antd";
-import { DesktopOutlined, MoonOutlined, SunOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, DesktopOutlined, MoonOutlined, SunOutlined } from "@ant-design/icons";
 import { Dropdown } from "antd";
 import { useThemeStore } from "../store/useThemeStore";
 
@@ -16,19 +16,22 @@ export default function ThemeSwitch() {
         selectable: true,
         selectedKeys: [mode],
         items: [
+          { key: "host", label: "跟随宿主", icon: <AppstoreOutlined style={{ fontSize: 14 }} /> },
           { key: "system", label: "跟随系统", icon: <DesktopOutlined style={{ fontSize: 14 }} /> },
           { key: "light", label: "浅色", icon: <SunOutlined style={{ fontSize: 14 }} /> },
           { key: "dark", label: "深色", icon: <MoonOutlined style={{ fontSize: 14 }} /> },
         ],
         onClick: ({ key }) => {
-          if (key === "system" || key === "light" || key === "dark") setMode(key);
+          if (key === "host" || key === "system" || key === "light" || key === "dark") setMode(key);
         },
       }}
     >
       {/* 气泡提示显示在按钮右侧，避免遮挡底部导航条上方的页面内容 */}
       <Tooltip title="切换主题" placement="right">
         <button type="button" className="icon-btn theme-switch" aria-label="切换主题">
-          {mode === "system" ? (
+          {mode === "host" ? (
+            <AppstoreOutlined style={{ fontSize: 15 }} />
+          ) : mode === "system" ? (
             <DesktopOutlined style={{ fontSize: 15 }} />
           ) : effective === "dark" ? (
             <MoonOutlined style={{ fontSize: 15 }} />
