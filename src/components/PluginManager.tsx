@@ -184,11 +184,18 @@ export default function PluginManager() {
   // 市场数据拉取（仅市场视图 + 所有插件 tab）。
   // 接口恒定使用 keywords:dsh-plugin / topic:dsh-plugin 全集，与搜索词完全解耦，
   // 因此依赖里不含 query —— 输入搜索词不会触发任何网络请求。
+  // 加载态用 useApp 的 message 顶部提示（固定 key 避免叠加），完成即销毁。
   useEffect(() => {
     if (!open || view !== "market" || tabMode !== "all") return;
     let alive = true;
     setMarketLoading(true);
     setMarketError(null);
+    message.open({
+      key: "mk-market-loading",
+      type: "loading",
+      content: "正在加载插件…",
+      duration: 0,
+    });
     fetchMarketPage(source, page, sort)
       .then((p) => {
         if (alive) setMarket(p);
@@ -197,11 +204,14 @@ export default function PluginManager() {
         if (alive) setMarketError(String(e instanceof Error ? e.message : e));
       })
       .finally(() => {
+        message.destroy("mk-market-loading");
         if (alive) setMarketLoading(false);
       });
     return () => {
       alive = false;
+      message.destroy("mk-market-loading");
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, view, tabMode, source, sort, page]);
 
   // 终端自动滚动到底部
@@ -477,7 +487,7 @@ export default function PluginManager() {
             </button>
           </div>
         ) : null}
-        {/* 工具栏两行：第一行 搜索(flex)+手动安装；第二行 视图tab(左)+排序(右，仅所有插件) */}
+        {/* 工具栏两行：第一行 搜索框；第二行 视图tab(左) + 排序·手动安装(右) */}
         <div className="mk-toolbar">
           <div className="mk-row">
             <Input
@@ -488,9 +498,6 @@ export default function PluginManager() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
-            <button className="pm-btn pm-btn-sm mk-add-btn" type="button" onClick={() => setAddOpen(true)}>
-              手动安装
-            </button>
           </div>
           <div className="mk-row">
             <SlidingSeg
@@ -504,39 +511,39 @@ export default function PluginManager() {
               ]}
               onChange={switchTab}
             />
-            {tabMode === "all" ? (
-              <SlidingSeg
-                className="mk-row-sort"
-                value={sort}
-                options={[
-                  { key: "weekly", label: "周下载" },
-                  { key: "stars", label: "Stars" },
-                  { key: "date", label: "发布日期" },
-                ]}
-                getDisabled={(k) =>
-                  k === "weekly" ? source !== "npm" : k === "stars" ? source !== "github" : false
-                }
-                getTitle={(k) =>
-                  k === "weekly" && source !== "npm"
-                    ? "NPM 源不支持该排序"
-                    : k === "stars" && source !== "github"
-                      ? "GitHub 源不支持该排序"
-                      : undefined
-                }
-                onChange={(k) => {
-                  setSort(k);
-                  setPage(1);
-                  bumpPane("mk-fade");
-                }}
-              />
-            ) : null}
+            <div className="mk-row-right">
+              {tabMode === "all" ? (
+                <SlidingSeg
+                  className="mk-row-sort"
+                  value={sort}
+                  options={[
+                    { key: "weekly", label: "周下载" },
+                    { key: "stars", label: "Stars" },
+                    { key: "date", label: "发布日期" },
+                  ]}
+                  getDisabled={(k) =>
+                    k === "weekly" ? source !== "npm" : k === "stars" ? source !== "github" : false
+                  }
+                  getTitle={(k) =>
+                    k === "weekly" && source !== "npm"
+                      ? "NPM 源不支持该排序"
+                      : k === "stars" && source !== "github"
+                        ? "GitHub 源不支持该排序"
+                        : undefined
+                  }
+                  onChange={(k) => {
+                    setSort(k);
+                    setPage(1);
+                    bumpPane("mk-fade");
+                  }}
+                />
+              ) : null}
+              <button className="pm-btn pm-btn-sm mk-add-btn" type="button" onClick={() => setAddOpen(true)}>
+                手动安装
+              </button>
+            </div>
           </div>
         </div>
-        {marketLoading && tabMode === "all" ? (
-          <div className="mk-loading">
-            <span className="spinner-ring" /> 正在加载插件…
-          </div>
-        ) : null}
         {marketError ? <div className="mk-error">{marketError}</div> : null}
       </div>
 
