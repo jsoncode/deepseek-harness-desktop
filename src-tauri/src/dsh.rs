@@ -2039,15 +2039,20 @@ mod tests {
         assert!(parse_pnpm_bin_output("undefined\n").is_none());
         assert!(parse_pnpm_bin_output("null\r\n").is_none());
         assert!(parse_pnpm_bin_output("relative/path\n").is_none());
-        let win = parse_pnpm_bin_output("C:\\Users\\a\\AppData\\Local\\pnpm\\bin\r\n");
-        assert!(win.is_some(), "绝对路径应可解析");
-        assert!(win.unwrap().is_absolute());
-        // 注意：is_absolute() 按当前平台判定，unix 风格路径仅在 unix 上视为绝对
+        // is_absolute() 按当前平台判定：Windows 风格路径仅在 Windows 上视为绝对，
+        // unix 风格路径仅在 unix 上视为绝对，两个断言分别按平台门控
+        #[cfg(windows)]
+        {
+            let win = parse_pnpm_bin_output("C:\\Users\\a\\AppData\\Local\\pnpm\\bin\r\n");
+            assert!(win.is_some(), "绝对路径应可解析");
+            assert!(win.unwrap().is_absolute());
+        }
         #[cfg(unix)]
-        assert!(
-            parse_pnpm_bin_output("/home/a/.local/share/pnpm\n").is_some(),
-            "unix 绝对路径应可解析"
-        );
+        {
+            let unix = parse_pnpm_bin_output("/home/a/.local/share/pnpm\n");
+            assert!(unix.is_some(), "unix 绝对路径应可解析");
+            assert!(unix.unwrap().is_absolute());
+        }
     }
 
     /// 候选目录去重与两种布局（home、home/bin）覆盖
