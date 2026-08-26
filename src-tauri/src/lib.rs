@@ -231,6 +231,19 @@ pub fn run() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
             tray_builder.build(app)?;
+
+            // 收养上次会话遗留的孤儿服务：如安装新版本时安装器强杀了旧应用，
+            // dsh web 进程树未被清理、仍占用服务端口，新实例若不接管会导致
+            // "停止/重启"静默无效。后台线程执行（netstat 枚举约几十毫秒），
+            // 即使此处未完成，start_dsh_web 内也会再做一次同样的收养。
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Some(state) = handle.try_state::<AppState>() {
+                    if dsh::adopt_orphan_service(&state) {
+                        eprintln!("[setup] 已接管上次遗留的服务实例");
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

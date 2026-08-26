@@ -1088,6 +1088,20 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     if state.child_pid.lock().unwrap().is_some() {
         return Ok(()); // 已在运行
     }
+    // 收养遗留的孤儿服务：如安装新版本时安装器强杀了旧应用，dsh web 仍在占用服务端口。
+    // 此时直接接管（可停止/继续使用），而不是再拉起一个注定绑定失败的重复实例。
+    if adopt_orphan_service(&state) {
+        emit_log(
+            &app,
+            WEB_LOG_EVENT,
+            "system",
+            "检测到上次未正常退出遗留的服务实例，已接管（可直接停止或继续使用）",
+        );
+        if let Some(url) = state.detected_url.lock().unwrap().clone() {
+            let _ = app.emit(URL_EVENT, UrlPayload { url });
+        }
+        return Ok(());
+    }
     // 新子进程 → 重置上一轮的探测结果，避免误用外部实例/旧 URL
     *state.detected_url.lock().unwrap() = None;
     state.pending_urls.lock().unwrap().clear();
@@ -1295,7 +1309,11 @@ pub fn stop_dsh_web_sync(state: &AppState) {
         kill_tree(pid);
     }
     // 等待树清理，然后按端口兜底（dsh 会派生脱离父链的进程）
-    let urls: Vec<String> = state.pending_urls.lock().unwrap().clone();
+    let mut urls: Vec<String> = state.pending_urls.lock().unwrap().clone();
+    // 兜底：无任何 URL 记录时也清理本应用专属端口（覆盖孤儿服务等场景）
+    if urls.is_empty() {
+        urls.push(format!("http://127.0.0.1:{}", service_port()));
+    }
     std::thread::sleep(Duration::from_millis(600));
     for url in &urls {
         if let Some(port) = url_port(url) {
@@ -1310,7 +1328,11 @@ pub fn stop_dsh_web_sync(state: &AppState) {
 #[tauri::command]
 pub async fn stop_dsh_web(state: State<'_, AppState>) -> Result<(), String> {
     let pid = state.child_pid.lock().unwrap().take();
-    let urls = state.pending_urls.lock().unwrap().clone();
+    let mut urls = state.pending_urls.lock().unwrap().clone();
+    // 兜底：无任何 URL 记录时也清理本应用专属端口（覆盖孤儿服务等场景）
+    if urls.is_empty() {
+        urls.push(format!("http://127.0.0.1:{}", service_port()));
+    }
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(pid) = pid {
             kill_tree(pid);
@@ -1337,32 +1359,97 @@ fn url_port(url: &str) -> Option<u16> {
     host_port.rsplit_once(':')?.1.parse().ok()
 }
 
-/// 杀掉监听指定端口的进程（仅用于我们自己子进程输出过的端口）
-fn kill_listener(port: u16) {
-    let output = hide_window(Command::new("netstat").args(["-ano", "-p", "tcp"]))
-        .output()
-        .ok();
-    let Some(out) = output else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let needle = format!(":{port}");
-    for line in text.lines() {
-        let l = line.trim();
-        if l.contains(&needle) && l.contains("LISTENING") {
-            if let Some(pid_str) = l.split_whitespace().last() {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    let _ = hide_window(
-                        Command::new("taskkill")
-                            .args(["/PID", &pid.to_string(), "/T", "/F"])
-                            .stdout(Stdio::null())
-                            .stderr(Stdio::null()),
-                    )
-                    .status();
+/// 枚举监听指定端口的进程 PID（仅用于本应用专属的服务端口：dev 6088 / release 3080）
+fn listener_pids(port: u16) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        let Some(output) =
+            hide_window(Command::new("netstat").args(["-ano", "-p", "tcp"])).output().ok()
+        else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let needle = format!(":{port}");
+        let mut pids: Vec<u32> = Vec::new();
+        for line in text.lines() {
+            let l = line.trim();
+            if l.contains(&needle) && l.contains("LISTENING") {
+                if let Some(pid_str) = l.split_whitespace().last() {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid != 0 && !pids.contains(&pid) {
+                            pids.push(pid);
+                        }
+                    }
                 }
             }
         }
+        pids
     }
+    #[cfg(not(windows))]
+    {
+        let Some(output) = hide_window(Command::new("lsof").args(["-ti", &format!("tcp:{port}")]))
+            .output()
+            .ok()
+        else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .filter(|pid| *pid != 0)
+            .collect()
+    }
+}
+
+/// 杀掉监听指定端口的进程（仅用于我们自己子进程输出过的端口与本应用专属端口兜底）
+fn kill_listener(port: u16) {
+    for pid in listener_pids(port) {
+        kill_tree(pid);
+    }
+}
+
+/// 收养遗留的孤儿服务实例，返回是否发生收养。
+///
+/// 场景：应用运行中已启动服务，此时用户安装新版本——安装器会【强制结束】本应用进程，
+/// 退出清理钩子（RunEvent::Exit → stop_dsh_web_sync）不会执行，`dsh web` 进程树成为
+/// 孤儿并继续占用服务端口。重装后打开的新实例 AppState 全新（child_pid/pending_urls
+/// 均为空），点"停止"会静默无效、"重启"会拉起一个绑定失败的重复实例。
+///
+/// 处理：检查本应用专属服务端口上是否有监听；有则把监听进程 PID 记入 child_pid、
+/// 把默认 URL 记入 pending_urls/detected_url。之后停止（杀树 + 按端口兜底）与重启
+/// 即恢复正常。只探测本应用固定服务端口（dev/release 天然隔离），绝不误伤其他进程。
+///
+/// 注意：收养的 PID 没有 pump 线程看护，若孤儿后续自行退出，child_pid 会残留到下次
+/// 停止时由 taskkill 对失效 PID 的空操作与端口兜底自然消化，无副作用。
+pub fn adopt_orphan_service(state: &AppState) -> bool {
+    if state.child_pid.lock().unwrap().is_some() {
+        return false; // 已有自己的子进程在管理，无需收养
+    }
+    let port = service_port();
+    let pids = listener_pids(port);
+    if pids.is_empty() {
+        return false;
+    }
+    // 记录第一个监听者作为主管理对象；同端口其余监听者由停止时的按端口兜底统一清理
+    *state.child_pid.lock().unwrap() = Some(pids[0]);
+    {
+        let mut pending = state.pending_urls.lock().unwrap();
+        for u in [
+            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
+        ] {
+            if !pending.contains(&u) {
+                pending.push(u);
+            }
+        }
+    }
+    if state.detected_url.lock().unwrap().is_none() {
+        let url = format!("http://127.0.0.1:{port}");
+        if probe_url(&url, 400) {
+            *state.detected_url.lock().unwrap() = Some(url);
+        }
+    }
+    true
 }
 
 /// 在系统默认浏览器中打开 URL（前端命令与托盘菜单共用）

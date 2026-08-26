@@ -94,9 +94,20 @@ function SlidingSeg<T extends string>({
     measure();
   }, [measure]);
 
+  // 选项文案变化（如「所有插件(N)」数量增减）或窗口尺寸变化都会改变按钮宽度，
+  // 用 ResizeObserver 监听容器尺寸并重测指示块，避免文字跑出高亮胶囊之外
   useEffect(() => {
+    const wrap = wrapRef.current;
+    let ro: ResizeObserver | undefined;
+    if (wrap && typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => measure());
+      ro.observe(wrap);
+    }
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   }, [measure]);
 
   return (
@@ -172,10 +183,15 @@ export default function PluginManager() {
   // ---- 市场状态 ----
   const [source, setSource] = useState<MarketSource>("npm");
   const [tabMode, setTabMode] = useState<"all" | "installed">("all");
-  /** 受控搜索输入：防抖后作为服务端搜索词 */
-  const [query, setQuery] = useState("");
-  /** 实际参与请求的搜索词（防抖同步 / 回车直发）；变化即换词重搜 */
+  /** 每个 tab 独立的关键词：选中哪个 tab 就用哪份关键词搜索，互不干扰 */
+  const [queries, setQueries] = useState<{ all: string; installed: string }>({
+    all: "",
+    installed: "",
+  });
+  /** 【所有插件】tab 实际参与请求的搜索词（防抖同步 / 回车直发）；变化即换词重搜 */
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  /** 当前 tab 生效的搜索关键词 */
+  const query = queries[tabMode];
   const [sort, setSort] = useState<MarketSort>("weekly");
   const [page, setPage] = useState(1);
   /** 当前页市场数据（服务端分页返回） */
@@ -190,17 +206,18 @@ export default function PluginManager() {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 搜索防抖：停止输入约 450ms 后才以新关键词发起服务端搜索，并把分页重置到第 1 页，
-  // 避免每键一请求触发服务器限流，也避免旧页码在新结果集中越界导致"搜索不到"。
-  // setDebouncedQuery 与 setPage 同批提交，只会触发一次请求。
+  // 搜索防抖（仅【所有插件】tab 的服务端搜索）：停止输入约 450ms 后才以新关键词发起请求，
+  // 并把分页重置到第 1 页——避免每键一请求触发限流、旧页码越界导致搜索不到。
+  // setDebouncedQuery 与 setPage 同批提交，只会触发一次请求；
+  // 【已安装】tab 使用自己的关键词做本地即时过滤，不走防抖。
   useEffect(() => {
-    if (query === debouncedQuery) return;
+    if (queries.all === debouncedQuery) return;
     const t = window.setTimeout(() => {
-      setDebouncedQuery(query);
+      setDebouncedQuery(queries.all);
       setPage(1);
     }, 450);
     return () => window.clearTimeout(t);
-  }, [query, debouncedQuery]);
+  }, [queries.all, debouncedQuery]);
 
   // 市场数据拉取（仅市场视图 + 所有插件 tab）：服务端关键词分页搜索。
   // 默认搜索词为 dsh-plugin 全集；输入关键词后整体换词重搜（由 debouncedQuery 驱动）。
@@ -339,7 +356,12 @@ export default function PluginManager() {
           className="pm-btn pm-btn-sm primary"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("add", r.spec)}
+          onClick={(e) => {
+            // 不再弹确认框：先展示完整插件信息（详情弹框），安装动作在详情内直接执行；
+            // 阻止冒泡避免同时触发行点击重复打开详情
+            e.stopPropagation();
+            setDetailRow(r);
+          }}
         >
           {source === "github" ? "源码安装" : "一键安装"}
         </button>
@@ -353,7 +375,11 @@ export default function PluginManager() {
           className="pm-btn pm-btn-sm"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("update", r.name)}
+          onClick={(e) => {
+            // 与安装一致：不弹确认框，先打开详情展示当前/最新版本，更新在详情内直接执行
+            e.stopPropagation();
+            setDetailRow(r);
+          }}
         >
           更新
         </button>
@@ -381,10 +407,11 @@ export default function PluginManager() {
     {
       // 主 cell：插件名称/作者/版本 + 描述（上下布局）
       // 必须设固定 width：antd 在 scroll.x 下未设 width 的列会按内容撑宽，
-      // 长描述会把表格撑破；固定列宽后描述在列宽内单行省略
+      // 长描述会把表格撑破；固定列宽后描述在列宽内单行省略。
+      // 给足宽度保证插件名完整展示不换行截断。
       title: "插件名称",
       key: "plugin",
-      width: 340,
+      width: 440,
       render: (_, r) => (
         <div className="mk-plugin-cell">
           <div className="mk-plugin-head">
@@ -441,9 +468,11 @@ export default function PluginManager() {
       ),
     },
     {
+      // 操作列：表头与单元格统一右对齐，收窄宽度把空间让给插件名称列
       title: "操作",
       key: "actions",
-      width: 156,
+      width: 124,
+      align: "right",
       render: renderActions,
     },
   ];
@@ -468,8 +497,8 @@ export default function PluginManager() {
     current: pluginVers[it.name]?.current ?? null,
   }));
 
-  // 已安装 tab：本地名称模糊过滤
-  const visibleInstalled = plugins.filter((p) => nameMatches(p, query));
+  // 已安装 tab：本地名称模糊过滤（使用本 tab 独立的关键词）
+  const visibleInstalled = plugins.filter((p) => nameMatches(p, queries.installed));
   const installedRows: MkRow[] = visibleInstalled.map((p) => ({
     key: p,
     name: p,
@@ -512,10 +541,14 @@ export default function PluginManager() {
               allowClear
               prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setQueries((prev) => ({ ...prev, [tabMode]: v }));
+              }}
               onPressEnter={() => {
-                // 回车立即换词重搜：跳过防抖等待，并重置到第 1 页
-                setDebouncedQuery(query);
+                // 仅【所有插件】tab 需要回车立即重搜（跳过防抖）；【已安装】为本地即时过滤
+                if (tabMode !== "all") return;
+                setDebouncedQuery(queries.all);
                 setPage(1);
               }}
             />
@@ -533,25 +566,18 @@ export default function PluginManager() {
               onChange={switchTab}
             />
             <div className="mk-row-right">
+              {/* 排序项随源动态展示：GitHub 无周下载、NPM 无 Stars */}
               {tabMode === "all" ? (
                 <SlidingSeg
                   className="mk-row-sort"
                   value={sort}
                   options={[
-                    { key: "weekly", label: "周下载" },
-                    { key: "stars", label: "Stars" },
-                    { key: "date", label: "发布日期" },
+                    ...(source === "npm" ? [{ key: "weekly" as MarketSort, label: "周下载" }] : []),
+                    ...(source === "github"
+                      ? [{ key: "stars" as MarketSort, label: "Stars" }]
+                      : []),
+                    { key: "date" as MarketSort, label: "发布日期" },
                   ]}
-                  getDisabled={(k) =>
-                    k === "weekly" ? source !== "npm" : k === "stars" ? source !== "github" : false
-                  }
-                  getTitle={(k) =>
-                    k === "weekly" && source !== "npm"
-                      ? "NPM 源不支持该排序"
-                      : k === "stars" && source !== "github"
-                        ? "GitHub 源不支持该排序"
-                        : undefined
-                  }
                   onChange={(k) => {
                     setSort(k);
                     setPage(1);
@@ -577,7 +603,7 @@ export default function PluginManager() {
           columns={columns}
           dataSource={rows}
           pagination={false}
-          scroll={{ x: 752 }}
+          scroll={{ x: 820 }}
           onRow={(r) => ({
             onClick: () => setDetailRow(r),
             title: "查看插件详情",
@@ -756,7 +782,8 @@ export default function PluginManager() {
                   onClick={() => {
                     const row = detailRow;
                     setDetailRow(null);
-                    confirmOp("add", row.spec);
+                    // 详情页已明确展示插件来源与版本信息，点击即安装（后台执行），不再二次确认
+                    void startPluginOp("add", row.spec);
                   }}
                 >
                   {source === "github" ? "源码安装" : "一键安装"}
@@ -770,7 +797,8 @@ export default function PluginManager() {
                   onClick={() => {
                     const row = detailRow;
                     setDetailRow(null);
-                    confirmOp("update", row.name);
+                    // 详情页已明确展示本机版本与最新版本，点击即更新（后台执行），不再二次确认
+                    void startPluginOp("update", row.name);
                   }}
                 >
                   更新
@@ -868,6 +896,12 @@ export default function PluginManager() {
               ) : (
                 <span className="mk-desc-empty">暂无描述</span>
               )}
+            </div>
+            {/* 免责声明 */}
+            <div className="pm-detail-disclaimer">
+              以上插件均来自开源社区、由第三方作者维护。本软件不参与插件开发，
+              也未对插件内容做安全审查或作出任何承诺——请自行评估风险，
+              确认信任来源后再决定是否安装。
             </div>
           </div>
         ) : null}

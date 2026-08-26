@@ -579,6 +579,12 @@ body {
   font-size: 12px;
 }
 
+/* 手动安装按钮：对齐旁边分段按钮的字号与视觉高度（分段钮有效内边距约 8px/14px） */
+.plugin-manager-modal .mk-add-btn {
+  padding: 8px 15px;
+  font-size: 12.5px;
+}
+
 html[data-theme="light"] .plugin-manager-modal .pm-btn:hover:not(:disabled):not(.danger) {
   border-color: rgba(15, 23, 42, 0.28);
 }
@@ -619,6 +625,8 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   border-radius: 999px;
   background: var(--panel-strong);
   border: 1px solid var(--border);
+  /* 工具栏空间不足时不被压缩，防止选项文字溢出按钮 */
+  flex: none;
 }
 
 .pm-seg-thumb {
@@ -645,6 +653,8 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   border-radius: 999px;
   cursor: pointer;
   white-space: nowrap;
+  /* 文字宽度变化（数量增减）时按钮始终按内容自适应，不被压缩 */
+  flex: none;
   transition: color 0.15s ease;
 }
 
@@ -918,18 +928,19 @@ html[data-theme="light"] .mk-op-banner {
 .mk-plugin-head {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  /* 名称过长时换行展示而不是截断 */
+  flex-wrap: wrap;
+  gap: 2px 8px;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
 }
 
 .mk-plugin-head .mk-name {
-  flex-shrink: 1;
-  min-width: 0;
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 完整展示插件名：不省略、允许折行 */
+  white-space: normal;
+  word-break: break-all;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .mk-plugin-head .mk-author {
@@ -2019,5 +2030,16 @@ html[data-theme="light"] .plugin-fail-msg {
 html[data-theme="light"] .pm-detail-desc {
   background: rgba(15, 23, 42, 0.03);
   border-color: rgba(15, 23, 42, 0.1);
+}
+
+/* 免责声明：小字弱化展示，不抢视觉焦点 */
+.pm-detail-disclaimer {
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+  border: 1px dashed var(--border);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-3);
 }
 
