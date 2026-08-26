@@ -41,6 +41,7 @@ For new users: grab the installer for your platform and double-click to install 
 
 - **Tiny installer** — installers are only **2–3 MB** across all platforms (~2 MB Windows NSIS, ~3 MB macOS DMG/PKG), so they download and install in seconds (vs. 100+ MB typical for Electron apps).
 - **One-click setup** — automatically installs `@deepseek-ai/dsh` (pnpm global) and starts the local web service; no manual configuration.
+- **pnpm 10/11 compatible** — adapts to the differing global-bin layout between the two major versions (v11 moved shims to `PNPM_HOME/bin`). Even if `pnpm setup` was never run, it injects the bin dir into the session PATH and persists it to the user PATH, so the service starts immediately and stays installed across launches.
 - **Smart service detection** — probes the default port and only trusts URLs printed by its own child process, so it never hijacks an external instance.
 - **Streaming terminal** — macOS-style terminal with live install/start logs, stop/restart, and crash notifications.
 - **Embedded preview** — iframe view of the local DSH web UI with health polling, reload, copy URL, and open-in-browser.

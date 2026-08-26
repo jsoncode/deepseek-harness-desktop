@@ -250,7 +250,10 @@ fn merge_into_process_path(new_dirs: Vec<String>) {
     let sep = ':';
     let current = std::env::var("PATH").unwrap_or_default();
     let mut merged: Vec<String> = Vec::new();
-    for d in new_dirs.into_iter().chain(current.split(sep).map(|s| s.to_string())) {
+    for d in new_dirs
+        .into_iter()
+        .chain(current.split(sep).map(|s| s.to_string()))
+    {
         let d = d.trim().to_string();
         if d.is_empty() {
             continue;
@@ -414,52 +417,281 @@ fn log_npm_mirror(app: &AppHandle, event: &'static str) {
     }
 }
 
-/// pnpm 全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm）
-fn pnpm_global_bin() -> Option<PathBuf> {
-    let pnpm = resolve_pnpm()?;
-    let mut cmd = Command::new(&pnpm);
-    cmd.args(["global", "bin"]);
-    let output = run_with_timeout(cmd, Duration::from_secs(3))?;
-    if !output.status.success() {
+/// 候选 pnpm home 目录（按优先级）：环境变量 PNPM_HOME → 平台默认目录。
+/// 平台默认与 pnpm 自身 getDataDir 的解析保持一致：
+/// win %LOCALAPPDATA%\pnpm、macOS ~/Library/pnpm、Linux $XDG_DATA_HOME/pnpm 或 ~/.local/share/pnpm。
+fn pnpm_home_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(h) = std::env::var("PNPM_HOME") {
+        let h = h.trim();
+        if !h.is_empty() {
+            out.push(PathBuf::from(h));
+        }
+    }
+    #[cfg(windows)]
+    if let Some(la) = env_dir("LOCALAPPDATA") {
+        out.push(la.join("pnpm"));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        out.push(home.join("Library").join("pnpm"));
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+            Some(x) => out.push(x.join("pnpm")),
+            None => {
+                if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                    out.push(home.join(".local").join("share").join("pnpm"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 目录等价比较（Windows 忽略大小写；两端忽略尾部分隔符）
+fn dirs_equal(a: &PathBuf, b: &PathBuf) -> bool {
+    fn norm(p: &PathBuf) -> String {
+        let s = p
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
+        #[cfg(windows)]
+        let s = s.to_lowercase();
+        s
+    }
+    norm(a) == norm(b)
+}
+
+/// 可能的“pnpm 全局 bin 目录”候选：home 本身与 home/bin 两种布局并存——
+/// pnpm ≤10 的 shims 直接放在 PNPM_HOME；pnpm ≥11 固定改为 <PNPM_HOME>/bin
+/// （v11 dist 源码：`bin = globalBinDir ?? join(pnpmHomeDir, "bin")`）。
+fn pnpm_global_bin_candidates() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for home in pnpm_home_candidates() {
+        for cand in [home.clone(), home.join("bin")] {
+            if !out.iter().any(|d| dirs_equal(d, &cand)) {
+                out.push(cand);
+            }
+        }
+    }
+    out
+}
+
+/// 解析 `pnpm bin -g` 输出首行为绝对路径目录。
+/// 过滤异常输出（老命令在新版 pnpm 上会打印 "undefined"，随后报 Command "global" not found）
+/// 与相对路径，避免把垃圾字符串注入 PATH。
+fn parse_pnpm_bin_output(text: &str) -> Option<PathBuf> {
+    let line = text.lines().next()?.trim();
+    if line.is_empty()
+        || line.eq_ignore_ascii_case("undefined")
+        || line.eq_ignore_ascii_case("null")
+    {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let dir = text.lines().next()?.trim();
-    if dir.is_empty() {
+    let p = PathBuf::from(line);
+    if !p.is_absolute() {
         return None;
-    }
-    let p = PathBuf::from(dir);
-    // 目录可能尚未创建（全新环境首次使用 pnpm）：主动建出，保证可注入 PATH
-    if !p.exists() {
-        std::fs::create_dir_all(&p).ok()?;
     }
     Some(p)
 }
 
-/// 为即将执行的 pnpm / dsh 子进程注入全局 bin 相关环境：
-/// 把 pnpm 全局目录前置到子进程 PATH，并设置 PNPM_HOME。
-/// 背景：未执行过 `pnpm setup` 的机器上该目录不在 PATH，`pnpm add -g` 会直接报错
-/// （the configured global bin directory ... is not in PATH）。
-/// 仅影响本次子进程，不改用户 shell 配置；当前 PATH 已包含时不重复记日志。
+/// 探测 pnpm 生效的全局 bin 目录（如 C:\Users\xxx\AppData\Local\pnpm 或 …\pnpm\bin）。
+///
+/// 兼容 pnpm 10 与 11（客户机 GLOBAL_BIN_DIR_NOT_IN_PATH 报错即 v11 未运行过 pnpm setup）：
+/// - v10 校验目录 = 配置 global-bin-dir（默认 %LOCALAPPDATA%\pnpm）?? PNPM_HOME，
+///   且 `bin -g` 不反映 PNPM_HOME、只打印默认/配置值；
+/// - v11 校验目录 = 配置 global-bin-dir ?? <PNPM_HOME|平台默认>/bin，校验必然触发；
+/// - 两版执行 `pnpm bin -g` 时都会先做同一 PATH 检查（v11 实测探测命令本身即失败退出），
+///   因此先把候选目录预注入【探测子进程】的 PATH 再问 pnpm；
+/// - `pnpm global bin` 在 pnpm ≥10 已移除，仅作为更老版本的回退探测保留。
+///
+/// 返回需注入的目录列表 = pnpm 自报目录（可反映自定义 global-bin-dir）∪ 平台推导
+/// 候选（home 与 home/bin 两种布局，覆盖 v10 默认目录与 v11 的 <home>/bin）。
+/// 探测结果缓存：键 = pnpm 路径，值 = 该 pnpm 的全局 bin 目录列表。
+/// 只在探测出非空结果时写入；pnpm 路径变化时自动失效重探。
+static PNPM_GLOBAL_DIRS_CACHE: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
+
+fn detect_pnpm_global_dirs() -> Vec<PathBuf> {
+    let Some(pnpm) = resolve_pnpm() else {
+        // 无 pnpm：仅返回推导候选（无子进程开销，供 resolve_dsh 兜底查找用）
+        return pnpm_global_bin_candidates();
+    };
+    // 按 pnpm 路径键控缓存：环境检测/启动链会多次走到这里，避免每次都付
+    // 秒级探测开销；pnpm 路径变化（如中途新装）时自动重新探测。
+    if let Some((p, dirs)) = PNPM_GLOBAL_DIRS_CACHE.lock().unwrap().clone() {
+        if dirs_equal(&p, &pnpm) {
+            return dirs;
+        }
+    }
+    let candidates = pnpm_global_bin_candidates();
+    // 目录可能尚未创建（全新环境首次使用 pnpm）：主动建出，保证可注入 PATH 且 realpath 可用
+    for d in &candidates {
+        if !d.exists() {
+            std::fs::create_dir_all(d).ok();
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    {
+        let mut push_unique = |d: PathBuf| {
+            if !out.iter().any(|x| dirs_equal(x, &d)) {
+                out.push(d);
+            }
+        };
+        // 探测子进程 PATH：候选目录前置（pnpm 自身的 bin -g 也会先做同一检查）
+        #[cfg(windows)]
+        let sep = ";";
+        #[cfg(not(windows))]
+        let sep = ":";
+        let cur_path = std::env::var("PATH").unwrap_or_default();
+        let mut probe_parts: Vec<String> = candidates
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
+        probe_parts.push(cur_path);
+        let probe_path = probe_parts.join(sep);
+
+        // 1) pnpm 自报的生效目录（可反映自定义 global-bin-dir 配置）；
+        //    现代命令 `bin -g` 成功即足够，失败才回退老命令
+        for (args, timeout) in [
+            (["bin", "-g"], Duration::from_secs(8)),
+            (["global", "bin"], Duration::from_secs(4)),
+        ] {
+            let mut cmd = Command::new(&pnpm);
+            cmd.args(args).env("PATH", &probe_path);
+            if let Some(output) = run_with_timeout(cmd, timeout) {
+                if output.status.success() {
+                    if let Some(dir) =
+                        parse_pnpm_bin_output(&String::from_utf8_lossy(&output.stdout))
+                    {
+                        push_unique(dir);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // 2) 推导候选并入：v10 的 `bin -g` 不反映 PNPM_HOME（默认 global-bin-dir 优先），
+    //    v11 又固定在 <home>/bin——只有并集才能覆盖两版全部布局
+    for c in candidates {
+        if !out.iter().any(|x| dirs_equal(x, &c)) {
+            out.push(c);
+        }
+    }
+    if !out.is_empty() {
+        *PNPM_GLOBAL_DIRS_CACHE.lock().unwrap() = Some((pnpm, out.clone()));
+    }
+    out
+}
+
+/// 把目录幂等追加进用户级注册表 PATH（每次会话最多尝试一轮，后台线程执行不阻塞）。
+/// 等价于 `pnpm setup` 的持久化动作：.NET SetEnvironmentVariable(User) 写入
+/// HKCU\Environment\Path 并广播 WM_SETTINGCHANGE，新开的终端/由 Explorer 启动的
+/// 进程即可见。没有这一步，装好的 dsh 在下次启动应用时又会“找不到”而反复重装。
+#[cfg(windows)]
+fn spawn_persist_user_path(app: AppHandle, event: &'static str, dirs: Vec<String>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SPAWNED: AtomicBool = AtomicBool::new(false);
+    if SPAWNED.swap(true, Ordering::SeqCst) {
+        return; // 本会话已尝试过（脚本自身幂等，无需重复）
+    }
+    const SCRIPT: &str = concat!(
+        "$d=$env:DSH_PNPM_DIR;",
+        "if (-not $d) { exit 2 };",
+        "$p=[Environment]::GetEnvironmentVariable('Path','User');",
+        "if (-not $p) { $p='' };",
+        "$parts=@($p -split ';' | Where-Object { $_ });",
+        "$t=$d.TrimEnd('\\').ToLowerInvariant();",
+        "foreach ($x in $parts) { if ($x.TrimEnd('\\').ToLowerInvariant() -eq $t) { Write-Output 'unchanged'; exit 0 } };",
+        "[Environment]::SetEnvironmentVariable('Path', (($parts + $d) -join ';'), 'User');",
+        "Write-Output 'updated'"
+    );
+    std::thread::spawn(move || {
+        for dir in dirs {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+                .env("DSH_PNPM_DIR", &dir);
+            let updated = match run_with_timeout(c, Duration::from_secs(15)) {
+                Some(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).trim() == "updated"
+                }
+                _ => false, // 失败仅静默跳过：不影响本次安装流程
+            };
+            if updated {
+                emit_log(
+                    &app,
+                    event,
+                    "system",
+                    &format!("已将 pnpm 全局目录写入用户 PATH（新开终端/重启应用后生效）：{dir}"),
+                );
+            }
+        }
+    });
+}
+
+/// 为即将执行的 pnpm / dsh 子进程注入全局 bin 环境：把 pnpm 全局目录前置到子进程 PATH。
+///
+/// 背景：未运行过 `pnpm setup` 的机器上该目录不在 PATH，`pnpm add -g` 会直接报错
+/// （GLOBAL_BIN_DIR_NOT_IN_PATH: The configured global bin directory ... is not in PATH；
+/// pnpm ≥11 因目录恒为 <home>/bin，此校验必然触发）。
+/// 注意【不再覆盖 PNPM_HOME】：v11 的全局目录是 <PNPM_HOME>/bin，若把该环境变量
+/// 改写成 bin 目录本身，pnpm 会解析出 <bin>/bin 双重错位；继承父进程原值即可，
+/// PATH 前置已足以通过两版校验。
+///
+/// 同时：①把目录合并进本应用进程 PATH——安装完成后前端立即续接启动链，
+/// resolve_dsh 要在同一会话内就能找到刚装好的 dsh；②Windows 下后台幂等写入用户级
+/// 注册表 PATH（见 spawn_persist_user_path），避免下次启动反复重装。
+/// 仅影响本会话与用户级 PATH，不改任何 shell 配置文件。
 fn apply_pnpm_env(app: &AppHandle, event: &'static str, cmd: &mut Command) {
-    let Some(dir) = pnpm_global_bin() else { return };
+    let dirs = detect_pnpm_global_dirs();
+    if dirs.is_empty() {
+        emit_log(
+            app,
+            event,
+            "system",
+            "未能确定 pnpm 全局 bin 目录，跳过 PATH 注入（若安装失败请先手动运行 pnpm setup）",
+        );
+        return;
+    }
     #[cfg(windows)]
     let sep = ";";
     #[cfg(not(windows))]
     let sep = ":";
     let cur = std::env::var("PATH").unwrap_or_default();
-    let dir_str = dir.to_string_lossy().into_owned();
-    let already = cur.split(sep).any(|p| p.trim().eq_ignore_ascii_case(dir_str.as_str()));
-    cmd.env("PATH", format!("{dir_str}{sep}{cur}"));
-    cmd.env("PNPM_HOME", &dir);
-    if !already {
+    let strs: Vec<String> = dirs
+        .iter()
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    let missing: Vec<&String> = strs
+        .iter()
+        .filter(|s| {
+            !cur.split(sep)
+                .any(|p| p.trim().eq_ignore_ascii_case(s.as_str()))
+        })
+        .collect();
+    let mut parts = strs.clone();
+    parts.push(cur);
+    cmd.env("PATH", parts.join(sep));
+    if !missing.is_empty() {
+        let list = missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
         emit_log(
             app,
             event,
             "system",
-            &format!("检测到未运行过 pnpm setup：已为本进程临时注入全局目录 {}", dir.display()),
+            &format!("检测到 pnpm 全局目录不在 PATH（可能未运行过 pnpm setup），已为本流程临时注入：{list}"),
         );
     }
+    // 会话内立即可见：合并进本进程 PATH，安装完成后 resolve_dsh 才能立刻找到 dsh
+    #[cfg(any(windows, target_os = "macos"))]
+    merge_into_process_path(strs.clone());
+    // 持久化（仅 Windows）：幂等补写用户级注册表 PATH
+    #[cfg(windows)]
+    spawn_persist_user_path(app.clone(), event, strs);
 }
 
 /// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）
@@ -498,8 +730,9 @@ fn resolve_dsh() -> Option<DshExec> {
             });
         }
     }
-    // 兜底：pnpm 全局 bin 目录
-    if let Some(bin) = pnpm_global_bin() {
+    // 兜底：pnpm 全局 bin 目录（pnpm ≤10 布局 shims 在 home、≥11 在 home/bin，
+    // 对全部候选逐一查找——目录不在进程 PATH 时这是找到 dsh 的关键路径）
+    for bin in detect_pnpm_global_dirs() {
         #[cfg(windows)]
         let names = ["dsh.exe", "dsh.cmd", "dsh.bat"];
         #[cfg(not(windows))]
@@ -540,7 +773,8 @@ pub fn probe_url(url: &str, timeout_ms: u64) -> bool {
         return false;
     };
     for addr in addrs {
-        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)) {
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms))
+        {
             let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
             let req = format!("GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: deepseek-harness-desktop\r\nConnection: close\r\n\r\n");
             let _ = stream.write_all(req.as_bytes());
@@ -560,7 +794,9 @@ fn probe_parallel(urls: &[String], timeout_ms: u64) -> Option<String> {
     let mut handles = Vec::new();
     for u in urls {
         let u = u.clone();
-        handles.push(std::thread::spawn(move || (u.clone(), probe_url(&u, timeout_ms))));
+        handles.push(std::thread::spawn(move || {
+            (u.clone(), probe_url(&u, timeout_ms))
+        }));
     }
     for h in handles {
         if let Ok((u, true)) = h.join() {
@@ -757,9 +993,7 @@ fn pump_process(
     let status = child.wait();
     let _ = h_out.join();
     let _ = h_err.join();
-    let code = status
-        .map(|s| s.code().unwrap_or(-1))
-        .unwrap_or(-1);
+    let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
     let _ = app.emit(exit_event, ExitPayload { code });
 }
 
@@ -824,7 +1058,11 @@ fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> Sta
         let hd = s.spawn(resolve_dsh);
         let hp = s.spawn(resolve_pnpm);
         let hn = s.spawn(resolve_node);
-        (hd.join().ok().flatten(), hp.join().ok().flatten(), hn.join().ok().flatten())
+        (
+            hd.join().ok().flatten(),
+            hp.join().ok().flatten(),
+            hn.join().ok().flatten(),
+        )
     });
     let (dsh_version, pnpm_version, node_version) = std::thread::scope(|s| {
         let hv = s.spawn(|| dsh.as_ref().and_then(read_dsh_version));
@@ -994,8 +1232,8 @@ fn install_tool_node(app: AppHandle) -> Result<(), String> {
 }
 
 fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
-    let npm = resolve_npm()
-        .ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
+    let npm =
+        resolve_npm().ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
     log_npm_mirror(&app, ENV_INSTALL_LOG_EVENT);
     let mut cmd = Command::new(&npm);
     cmd.args(["install", "-g", "pnpm"]);
@@ -1053,10 +1291,20 @@ fn refresh_search_path_blocking() -> Result<(), String> {
     }
     Ok(())
 }
-/// 全局安装 @deepseek-ai/dsh@latest（流式输出）
+/// 全局安装 @deepseek-ai/dsh@latest（流式输出）。
+///
+/// async + spawn_blocking：pnpm 探测（where / `bin -g` 冷启动、杀软扫描）可达数秒，
+/// 同步命令在主线程执行会冻结窗口——与 app_status / refresh_search_path 同一处理。
 #[tauri::command]
-pub fn install_dsh(app: AppHandle) -> Result<(), String> {
-    let pnpm = resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+pub async fn install_dsh(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || install_dsh_blocking(app))
+        .await
+        .map_err(|e| format!("安装任务异常: {e}"))?
+}
+
+fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
+    let pnpm =
+        resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
     log_npm_mirror(&app, INSTALL_LOG_EVENT);
     emit_log(
         &app,
@@ -1067,7 +1315,8 @@ pub fn install_dsh(app: AppHandle) -> Result<(), String> {
     let mut cmd = Command::new(&pnpm);
     cmd.args(["add", "-g", "@deepseek-ai/dsh@latest"])
         .args(npm_mirror_args());
-    // 未运行过 pnpm setup 的环境会因全局目录不在 PATH 而失败，这里显式补齐
+    // 未运行 pnpm setup 的机器会因全局目录不在 PATH 失败（pnpm ≥11 必然触发校验），
+    // 这里显式补齐；同时合并进程 PATH 并持久化到用户注册表（详见 apply_pnpm_env）
     apply_pnpm_env(&app, INSTALL_LOG_EVENT, &mut cmd);
     let child = hide_window(&mut cmd)
         .stdout(Stdio::piped())
@@ -1260,7 +1509,12 @@ pub fn run_plugin_op(
         }
         Err(e) => {
             *state.plugin_op.lock().unwrap() = None;
-            emit_log(&app, PLUGIN_OP_LOG_EVENT, "error", &format!("启动失败: {e}"));
+            emit_log(
+                &app,
+                PLUGIN_OP_LOG_EVENT,
+                "error",
+                &format!("启动失败: {e}"),
+            );
             Err(format!("启动插件操作失败: {e}"))
         }
     }
@@ -1363,8 +1617,9 @@ fn url_port(url: &str) -> Option<u16> {
 fn listener_pids(port: u16) -> Vec<u32> {
     #[cfg(windows)]
     {
-        let Some(output) =
-            hide_window(Command::new("netstat").args(["-ano", "-p", "tcp"])).output().ok()
+        let Some(output) = hide_window(Command::new("netstat").args(["-ano", "-p", "tcp"]))
+            .output()
+            .ok()
         else {
             return Vec::new();
         };
@@ -1462,11 +1717,17 @@ pub fn open_url(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1486,7 +1747,10 @@ fn profile_dir() -> Option<PathBuf> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .ok()?;
-    let dir = PathBuf::from(home).join(".dsh").join("profiles").join("web");
+    let dir = PathBuf::from(home)
+        .join(".dsh")
+        .join("profiles")
+        .join("web");
     dir.is_dir().then_some(dir)
 }
 
@@ -1531,7 +1795,8 @@ fn read_profile_plugins() -> (bool, Vec<String>) {
 pub fn remove_plugin(name: String) -> Result<(), String> {
     let path =
         profile_package_json().ok_or("未找到插件目录（%USERPROFILE%\\.dsh\\profiles\\web）")?;
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
     let mut v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("package.json 解析失败: {e}"))?;
 
@@ -1604,7 +1869,9 @@ fn read_installed_version(dir: &PathBuf, name: &str) -> Option<String> {
     }
     let text = std::fs::read_to_string(dir.join(&rel).join("package.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
+    v.get("version")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
 }
 
 /// 插件版本基础信息：名称、依赖规格、当前安装版本、是否可检查更新。
@@ -1752,12 +2019,73 @@ mod tests {
         let dsh = resolve_dsh();
         let pnpm = resolve_pnpm();
         let node = resolve_node();
-        eprintln!("dsh={:?} pnpm={pnpm:?} node={node:?}", dsh.as_ref().map(|d| &d.display));
+        eprintln!(
+            "dsh={:?} pnpm={pnpm:?} node={node:?}",
+            dsh.as_ref().map(|d| &d.display)
+        );
         let node_version = node.as_ref().and_then(|p| read_tool_version(p));
         let pnpm_version = pnpm.as_ref().and_then(|p| read_tool_version(p));
         let dsh_version = dsh.as_ref().and_then(read_dsh_version);
         eprintln!("node={node_version:?} pnpm={pnpm_version:?} dsh={dsh_version:?}");
         assert!(node.is_some(), "本机应能检测到 node");
         assert!(node_version.is_some(), "node 版本应可读取");
+    }
+
+    /// `pnpm bin -g` 输出解析：拒绝 undefined/空/相对路径等异常输出
+    /// （`global bin` 在 pnpm ≥10 上会打印 "undefined" 并报 Command "global" not found）
+    #[test]
+    fn parse_pnpm_bin_output_rejects_junk() {
+        assert!(parse_pnpm_bin_output("").is_none());
+        assert!(parse_pnpm_bin_output("undefined\n").is_none());
+        assert!(parse_pnpm_bin_output("null\r\n").is_none());
+        assert!(parse_pnpm_bin_output("relative/path\n").is_none());
+        let win = parse_pnpm_bin_output("C:\\Users\\a\\AppData\\Local\\pnpm\\bin\r\n");
+        assert!(win.is_some(), "绝对路径应可解析");
+        assert!(win.unwrap().is_absolute());
+        // 注意：is_absolute() 按当前平台判定，unix 风格路径仅在 unix 上视为绝对
+        #[cfg(unix)]
+        assert!(
+            parse_pnpm_bin_output("/home/a/.local/share/pnpm\n").is_some(),
+            "unix 绝对路径应可解析"
+        );
+    }
+
+    /// 候选目录去重与两种布局（home、home/bin）覆盖
+    #[cfg(windows)]
+    #[test]
+    fn dirs_equal_and_candidates_cover_layouts() {
+        assert!(dirs_equal(
+            &PathBuf::from("C:\\A\\b\\"),
+            &PathBuf::from("c:\\a\\b")
+        ));
+        assert!(!dirs_equal(
+            &PathBuf::from("C:\\pnpm"),
+            &PathBuf::from("C:\\pnpm\\bin")
+        ));
+        // 环境变量未设置时也应给出平台默认候选（不 panic 且非空由真实环境决定，仅验证结构）
+        for c in pnpm_global_bin_candidates() {
+            assert!(c.is_absolute(), "候选目录应为绝对路径: {c:?}");
+        }
+    }
+
+    /// 集成冒烟（依赖本机装有 pnpm）：完整走一遍探测链路
+    /// （where → 候选目录预注入 → `pnpm bin -g` → 输出解析），应得到
+    /// 存在的绝对路径目录——这是修复 GLOBAL_BIN_DIR_NOT_IN_PATH 的核心路径。
+    #[test]
+    fn detect_pnpm_global_dirs_smoke() {
+        if resolve_pnpm().is_none() {
+            eprintln!("本机无 pnpm，跳过");
+            return;
+        }
+        let dirs = detect_pnpm_global_dirs();
+        assert!(
+            !dirs.is_empty(),
+            "装有 pnpm 的机器应至少探测到一个全局 bin 目录"
+        );
+        for d in &dirs {
+            assert!(d.is_absolute(), "{d:?} 应为绝对路径");
+            assert!(d.exists(), "{d:?} 应存在（探测前会主动创建）");
+        }
+        eprintln!("detected global dirs: {dirs:?}");
     }
 }
