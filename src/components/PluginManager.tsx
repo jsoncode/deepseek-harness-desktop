@@ -161,7 +161,6 @@ interface MkRow {
 export default function PluginManager() {
   const { modal, message } = AntApp.useApp();
   const plugins = useAppStore((s) => s.plugins);
-  const serviceRunning = useAppStore((s) => s.serviceRunning);
   const initialized = useAppStore((s) => s.initialized);
   const init = useAppStore((s) => s.init);
   const refreshStatus = useAppStore((s) => s.refreshStatus);
@@ -281,8 +280,10 @@ export default function PluginManager() {
   };
 
   const openManager = () => {
+    // 始终打开列表视图：后台任务进行中时，通过列表顶部的横幅入口进入后台终端，
+    // 插件入口不再被终端视图直接覆盖
     setOpen(true);
-    setView(pluginOp?.running ? "terminal" : "market");
+    setView("market");
     void refreshPluginVersions();
   };
 
@@ -301,22 +302,6 @@ export default function PluginManager() {
     setSource(s);
     setSort(s === "github" ? "stars" : "weekly");
     setPage(1);
-  };
-
-  const confirmOp = (kind: PluginOpKind, target: string) => {
-    const verb = OP_VERB[kind];
-    modal.confirm({
-      title: `${verb}插件`,
-      content: `${serviceRunning ? "服务正在运行中，" : ""}确认要${verb} ${target} 吗？`,
-      okText: verb,
-      okButtonProps: kind === "update" ? undefined : { danger: true },
-      cancelText: "取消",
-      onOk: () => {
-        // 不切到终端视图：保持插件管理弹框打开在插件列表，操作后台执行，
-        // 弹框顶部显示进行中横幅，可点"查看日志"进入终端视图
-        return startPluginOp(kind, target);
-      },
-    });
   };
 
   const submitAdd = () => {
@@ -389,7 +374,11 @@ export default function PluginManager() {
           className="pm-btn pm-btn-sm danger"
           type="button"
           disabled={running}
-          onClick={() => confirmOp("remove", r.name)}
+          onClick={(e) => {
+            // 与安装/更新一致：不弹确认框，先打开详情展示插件信息，卸载在详情内直接执行
+            e.stopPropagation();
+            setDetailRow(r);
+          }}
         >
           卸载
         </button>
@@ -527,8 +516,12 @@ export default function PluginManager() {
             <span>
               正在{OP_VERB[pluginOp.kind]} <b>{pluginOp.name}</b>…
             </span>
-            <button className="pm-btn pm-btn-sm" type="button" onClick={() => setView("terminal")}>
-              查看日志
+            <button
+              className="pm-btn pm-btn-sm primary"
+              type="button"
+              onClick={() => setView("terminal")}
+            >
+              进入后台安装
             </button>
           </div>
         ) : null}
@@ -706,6 +699,16 @@ export default function PluginManager() {
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               {running ? (
                 <>
+                  <button
+                    className="pm-btn"
+                    type="button"
+                    onClick={() => {
+                      setView("market");
+                      bumpPane("mk-from-left");
+                    }}
+                  >
+                    返回列表
+                  </button>
                   <button className="pm-btn danger" type="button" onClick={cancelOpConfirm}>
                     终止操作
                   </button>
@@ -714,9 +717,21 @@ export default function PluginManager() {
                   </button>
                 </>
               ) : (
-                <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
-                  关闭
-                </button>
+                <>
+                  <button
+                    className="pm-btn"
+                    type="button"
+                    onClick={() => {
+                      setView("market");
+                      bumpPane("mk-from-left");
+                    }}
+                  >
+                    返回列表
+                  </button>
+                  <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
+                    关闭
+                  </button>
+                </>
               )}
             </div>
           ) : (
@@ -812,7 +827,8 @@ export default function PluginManager() {
                   onClick={() => {
                     const row = detailRow;
                     setDetailRow(null);
-                    confirmOp("remove", row.name);
+                    // 详情页已明确展示插件信息与安装状态，点击即卸载（后台执行），不再二次确认
+                    void startPluginOp("remove", row.name);
                   }}
                 >
                   卸载
