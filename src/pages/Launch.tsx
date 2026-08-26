@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
-import { meetsNodeRequirement } from "../lib/envReq";
+import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
@@ -47,8 +47,10 @@ export default function Launch() {
   // ---- 环境判定 ----
   const nodeOk = meetsNodeRequirement(nodeVersion);
   const pnpmOk = Boolean(pnpmPath);
-  // 任一依赖缺失（node / pnpm / dsh）→ 主按钮变为「安装」：全自动依次安装后自动启动并打开
-  const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled);
+  // pnpm ≥11 使用隔离的全局虚拟仓库布局，dsh 与其不兼容（点击按钮可一键降级到 pnpm 10）
+  const pnpm11 = pnpmMajorOf(pnpmVersion) >= 11;
+  // 任一依赖缺失（node / pnpm / dsh）或 pnpm ≥11 → 主按钮变为「安装/降级」：全自动处理后启动
+  const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled && !pnpm11);
   // 缺依赖时环境卡片黄框提醒（不再阻断按钮）；全部就绪为默认样式
   const cardState = !tauri ? "" : needsInstall ? "warn" : "";
 
@@ -87,13 +89,20 @@ export default function Launch() {
       pnpmOk
         ? {
             name: "pnpm",
-            state: "ok",
-            detail: pnpmVersion ? <span>已安装 v{pnpmVersion}</span> : <span>已安装</span>,
+            state: pnpm11 ? "warn" : "ok",
+            detail: pnpmVersion ? (
+              <span>
+                已安装 v{pnpmVersion}
+                {pnpm11 ? <span className="env-warn-text">（dsh不支持pnpm11）</span> : null}
+              </span>
+            ) : (
+              <span>已安装</span>
+            ),
           }
         : {
             name: "pnpm",
             state: "bad",
-            detail: <span>未检测到 · 点击「安装」将通过 npm 自动全局安装</span>,
+            detail: <span>未检测到 · 点击「安装」将自动全局安装 pnpm@10（dsh 不支持 pnpm 11）</span>,
           },
     );
 
@@ -142,9 +151,11 @@ export default function Launch() {
   } else if (phase === "stopped") {
     statusText = "服务已停止";
   } else {
-    statusText = needsInstall
-      ? "检测到缺失依赖 · 点击「安装」自动配置并启动"
-      : "环境就绪 · 点击启动本地服务";
+    statusText = pnpm11
+      ? "检测到 pnpm 11 · 点击「降级 pnpm 10」自动降级并启动（dsh 不支持 pnpm 11）"
+      : needsInstall
+        ? "检测到缺失依赖 · 点击「安装」自动配置并启动"
+        : "环境就绪 · 点击启动本地服务";
   }
 
   const handlePrimary = () => {
@@ -166,7 +177,7 @@ export default function Launch() {
     }
   };
 
-  let btnText = needsInstall ? "安装" : "启动应用";
+  let btnText = pnpm11 ? "降级 pnpm 10" : needsInstall ? "安装" : "启动应用";
   if (phase === "checking") btnText = "检测中…";
   else if (phase === "running") btnText = "打开应用";
   else if (phase === "installing")

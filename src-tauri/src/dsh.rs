@@ -955,7 +955,7 @@ fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
     );
 }
 
-/// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件
+/// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件。
 fn pump_process(
     app: &AppHandle,
     mut child: Child,
@@ -1158,7 +1158,8 @@ fn spawn_streamed(
 /// - Windows / node：winget install -e --id OpenJS.NodeJS.LTS
 ///   （静默 + 免交互 + 自动接受协议；MSI 安装器可能弹 UAC 授权窗口，属正常现象）
 /// - macOS / node：brew install node（无 Homebrew 时报错并引导先安装 brew）
-/// - 两平台 / pnpm：npm install -g pnpm（npm 随 Node.js 分发，全局目录用户可写）
+/// - 两平台 / pnpm：npm install -g pnpm@10（锁定 10.x 主版本——dsh 不支持 pnpm 11；
+///   npm 随 Node.js 分发，全局目录用户可写）
 #[tauri::command]
 pub fn install_env_tool(app: AppHandle, tool: String) -> Result<(), String> {
     match tool.as_str() {
@@ -1236,9 +1237,10 @@ fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
         resolve_npm().ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
     log_npm_mirror(&app, ENV_INSTALL_LOG_EVENT);
     let mut cmd = Command::new(&npm);
-    cmd.args(["install", "-g", "pnpm"]);
+    // 锁定 pnpm 10 主版本：dsh 与 pnpm 11 的全局虚拟仓库布局不兼容，不能用默认 latest（11.x）
+    cmd.args(["install", "-g", "pnpm@10"]);
     cmd.args(npm_mirror_args());
-    let display = format!("{} install -g pnpm", npm.display());
+    let display = format!("{} install -g pnpm@10", npm.display());
     spawn_streamed(
         app,
         &display,
@@ -1314,6 +1316,8 @@ fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
     );
     let mut cmd = Command::new(&pnpm);
     cmd.args(["add", "-g", "@deepseek-ai/dsh@latest"])
+        // 关闭“清除模块目录”确认提示（无 TTY 时直接报 ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）
+        .arg("--config.confirm-modules-purge=false")
         .args(npm_mirror_args());
     // 未运行 pnpm setup 的机器会因全局目录不在 PATH 失败（pnpm ≥11 必然触发校验），
     // 这里显式补齐；同时合并进程 PATH 并持久化到用户注册表（详见 apply_pnpm_env）
@@ -1355,6 +1359,19 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     *state.detected_url.lock().unwrap() = None;
     state.pending_urls.lock().unwrap().clear();
     let dsh = resolve_dsh().ok_or("未找到 dsh，请先执行全局安装 @deepseek-ai/dsh")?;
+    // 启动前完整性校验：命令入口存在但读不出版本 = 安装已损坏（全局目录被清理、
+    // 路径失效、shim 悬空等）。直接返回可操作的错误而非用崩溃堆栈糊弄用户。
+    if read_dsh_version(&dsh).is_none() {
+        emit_log(
+            &app,
+            WEB_LOG_EVENT,
+            "system",
+            "检测到 dsh 安装已损坏：命令入口存在但无法读取版本（可能全局目录被清理或路径失效），请点击「安装」重新全局安装 @deepseek-ai/dsh",
+        );
+        return Err(
+            "dsh 安装已损坏（无法读取版本），请点击「安装」重新全局安装 @deepseek-ai/dsh".into(),
+        );
+    }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".into());
@@ -1483,8 +1500,10 @@ pub fn run_plugin_op(
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    // dsh 插件操作内部同样会调用 pnpm，一并注入全局目录环境
+    // dsh 插件操作内部同样会调用 pnpm，一并注入全局目录环境；
+    // 并关闭“清除模块目录”确认提示（无 TTY 时直接失败），经环境变量传递给 dsh 内部的 pnpm
     apply_pnpm_env(&app, PLUGIN_OP_LOG_EVENT, &mut cmd);
+    cmd.env("npm_config_confirm_modules_purge", "false");
 
     match hide_window(&mut cmd).spawn() {
         Ok(child) => {
@@ -1929,6 +1948,10 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
     let child = hide_window(
         Command::new(&pnpm)
             .arg("install")
+            // 切换 pnpm 大版本（如 11→10）后旧 node_modules 布局不兼容需清除重建，
+            // 无 TTY 时会因确认提示直接失败（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY），
+            // 显式关闭清除确认，让 pnpm 直接重建
+            .arg("--config.confirm-modules-purge=false")
             .current_dir(&dir)
             .args(npm_mirror_args())
             .stdout(Stdio::piped())

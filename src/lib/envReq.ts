@@ -21,3 +21,10 @@ export function meetsNodeRequirement(version: string | null): boolean {
     (parsed.major === MIN_NODE_MAJOR && parsed.minor >= MIN_NODE_MINOR)
   );
 }
+
+/** pnpm 主版本号；无法解析时返回 0（视为未知，不触发 pnpm 11 处理） */
+export function pnpmMajorOf(version: string | null | undefined): number {
+  if (!version) return 0;
+  const m = /^(\d+)/.exec(version.trim());
+  return m ? Number(m[1]) : 0;
+}

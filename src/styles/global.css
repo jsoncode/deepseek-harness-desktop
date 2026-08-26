@@ -375,6 +375,10 @@ body {
   overflow-wrap: anywhere;
 }
 
+.env-warn-text {
+  color: var(--warn);
+}
+
 .env-hint {
   padding-top: 8px;
   border-top: 1px dashed var(--border-strong);
