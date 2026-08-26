@@ -40,16 +40,23 @@ function Avatar({ url, name }: { url: string | null; name: string }) {
   );
 }
 
+/** 小写化并去掉 -/_/. 与空白分隔符：dsh_jenkins / DshJenkins / dsh-jenkins 归一化后同形 */
+function normalizeFuzzy(s: string): string {
+  return s.toLowerCase().replace(/[-_.\s]/g, "");
+}
+
 /**
- * 插件名模糊匹配（忽略大小写）：除直接小写包含外，还归一化 -/_/. 与空白分隔符后比较，
+ * 插件名模糊匹配（忽略大小写）：除直接小写包含外，还按归一化分隔符后的形态比较，
  * 因此 dsh_jenkins、DshJenkins、dsh-jenkins 均可互相命中。
  */
 function nameMatches(name: string, rawQuery: string): boolean {
   const q = rawQuery.trim();
   if (!q) return true;
   if (name.toLowerCase().includes(q.toLowerCase())) return true;
-  const normalize = (s: string) => s.toLowerCase().replace(/[-_.\s]/g, "");
-  return normalize(name).includes(normalize(q));
+  const nq = normalizeFuzzy(q);
+  // 归一化后为空（查询仅含分隔符）时跳过归一化比较，避免空串命中所有行
+  if (!nq) return false;
+  return normalizeFuzzy(name).includes(nq);
 }
 
 /**
@@ -135,9 +142,10 @@ interface MkRow {
 
 /**
  * 插件管理：标题栏入口 + 大尺寸插件市场弹框。
- * 市场视图：GitHub/NPM 双源搜索、排序、分页（antd Table，固定操作列）、安装/更新/卸载；
+ * 市场视图：GitHub/NPM 服务端关键词分页搜索（默认词 dsh-plugin 全集；输入关键词后
+ *   防抖换词重搜并重置分页；antd Table 固定操作列）、安装/更新/卸载；
  * 终端视图：流式展示 `dsh plugin` 操作日志，支持终止与后台运行。
- * 视图/tab/翻页切换带方向感穿梭动画。
+ * 视图/tab 切换带方向感穿梭动画。
  */
 export default function PluginManager() {
   const { modal, message } = AntApp.useApp();
@@ -156,18 +164,21 @@ export default function PluginManager() {
   const [view, setView] = useState<"market" | "terminal">("market");
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
-  /** 「查看」小弹框当前展示的插件行 */
-  const [descRow, setDescRow] = useState<MkRow | null>(null);
+  /** 详情弹框当前展示的插件行 */
+  const [detailRow, setDetailRow] = useState<MkRow | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const prevRunningRef = useRef<boolean>(false);
 
   // ---- 市场状态 ----
   const [source, setSource] = useState<MarketSource>("npm");
   const [tabMode, setTabMode] = useState<"all" | "installed">("all");
-  /** 本地搜索词：只作用于前端名称过滤，不参与接口请求 */
+  /** 受控搜索输入：防抖后作为服务端搜索词 */
   const [query, setQuery] = useState("");
+  /** 实际参与请求的搜索词（防抖同步 / 回车直发）；变化即换词重搜 */
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [sort, setSort] = useState<MarketSort>("weekly");
   const [page, setPage] = useState(1);
+  /** 当前页市场数据（服务端分页返回） */
   const [market, setMarket] = useState<MarketPage | null>(null);
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState<string | null>(null);
@@ -179,12 +190,22 @@ export default function PluginManager() {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 本地搜索即时过滤（无网络请求），无需防抖
+  // 搜索防抖：停止输入约 450ms 后才以新关键词发起服务端搜索，并把分页重置到第 1 页，
+  // 避免每键一请求触发服务器限流，也避免旧页码在新结果集中越界导致"搜索不到"。
+  // setDebouncedQuery 与 setPage 同批提交，只会触发一次请求。
+  useEffect(() => {
+    if (query === debouncedQuery) return;
+    const t = window.setTimeout(() => {
+      setDebouncedQuery(query);
+      setPage(1);
+    }, 450);
+    return () => window.clearTimeout(t);
+  }, [query, debouncedQuery]);
 
-  // 市场数据拉取（仅市场视图 + 所有插件 tab）。
-  // 接口恒定使用 keywords:dsh-plugin / topic:dsh-plugin 全集，与搜索词完全解耦，
-  // 因此依赖里不含 query —— 输入搜索词不会触发任何网络请求。
-  // 加载态用 useApp 的 message 顶部提示（固定 key 避免叠加），完成即销毁。
+  // 市场数据拉取（仅市场视图 + 所有插件 tab）：服务端关键词分页搜索。
+  // 默认搜索词为 dsh-plugin 全集；输入关键词后整体换词重搜（由 debouncedQuery 驱动）。
+  // 加载态用 useApp 的 message 顶部提示（固定 key 避免叠加），完成即销毁；
+  // alive 标志丢弃过期响应，快速连续搜索时只有最后一次生效。
   useEffect(() => {
     if (!open || view !== "market" || tabMode !== "all") return;
     let alive = true;
@@ -193,10 +214,10 @@ export default function PluginManager() {
     message.open({
       key: "mk-market-loading",
       type: "loading",
-      content: "正在加载插件…",
+      content: "正在搜索插件…",
       duration: 0,
     });
-    fetchMarketPage(source, page, sort)
+    fetchMarketPage(source, debouncedQuery, page, sort)
       .then((p) => {
         if (alive) setMarket(p);
       })
@@ -212,7 +233,7 @@ export default function PluginManager() {
       message.destroy("mk-market-loading");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, view, tabMode, source, sort, page]);
+  }, [open, view, tabMode, source, sort, page, debouncedQuery]);
 
   // 终端自动滚动到底部
   useEffect(() => {
@@ -234,7 +255,6 @@ export default function PluginManager() {
   if (!tauri) return null;
 
   const running = pluginOp?.running ?? false;
-  const totalPages = Math.max(1, Math.ceil((market?.total ?? 0) / pageSizeOf(source)));
   const installedSet = new Set(plugins);
 
   const isOutdated = (n: string) => {
@@ -314,13 +334,6 @@ export default function PluginManager() {
   /** 行内操作按钮组（固定列渲染） */
   const renderActions = (_: unknown, r: MkRow) => (
     <div className="mk-actions">
-      <button
-        className="pm-btn pm-btn-sm"
-        type="button"
-        onClick={() => setDescRow(r)}
-      >
-        查看
-      </button>
       {!r.installedHere ? (
         <button
           className="pm-btn pm-btn-sm primary"
@@ -328,10 +341,14 @@ export default function PluginManager() {
           disabled={running}
           onClick={() => confirmOp("add", r.spec)}
         >
-          安装
+          {source === "github" ? "源码安装" : "一键安装"}
         </button>
       ) : null}
-      {r.installedHere && isOutdated(r.name) ? (
+      {/* 已安装状态下：所有插件 tab 显示"已安装"占位；已安装 tab 显示更新/卸载 */}
+      {r.installedHere && tabMode === "all" ? (
+        <span className="pm-btn pm-btn-sm mk-installed-tag">已安装</span>
+      ) : null}
+      {r.installedHere && tabMode === "installed" && isOutdated(r.name) ? (
         <button
           className="pm-btn pm-btn-sm"
           type="button"
@@ -341,7 +358,7 @@ export default function PluginManager() {
           更新
         </button>
       ) : null}
-      {r.installedHere ? (
+      {r.installedHere && tabMode === "installed" ? (
         <button
           className="pm-btn pm-btn-sm danger"
           type="button"
@@ -358,59 +375,62 @@ export default function PluginManager() {
     {
       title: "",
       key: "avatar",
-      width: 64,
+      width: 48,
       render: (_, r) => <Avatar url={r.avatarUrl} name={r.author} />,
     },
     {
+      // 主 cell：插件名称/作者/版本 + 描述（上下布局）
+      // 必须设固定 width：antd 在 scroll.x 下未设 width 的列会按内容撑宽，
+      // 长描述会把表格撑破；固定列宽后描述在列宽内单行省略
       title: "插件名称",
-      dataIndex: "name",
-      ellipsis: true,
+      key: "plugin",
+      width: 340,
       render: (_, r) => (
-        <span className="mk-name" title={r.name}>
-          {r.name}
-          {r.installedHere && r.current ? (
-            <span className="plugin-ver">(本机 v{r.current})</span>
-          ) : null}
-          {isOutdated(r.name) && pluginVers[r.name]?.latest ? (
-            <span className="plugin-ver new">→ {pluginVers[r.name]?.latest}</span>
-          ) : null}
-        </span>
+        <div className="mk-plugin-cell">
+          <div className="mk-plugin-head">
+            <span className="mk-name" title={r.name}>
+              {r.name}
+            </span>
+            {r.author && r.author !== "—" ? (
+              <span className="mk-author" title={r.author}>
+                @{r.author}
+              </span>
+            ) : null}
+            {r.installedHere && r.current ? (
+              <span className="plugin-ver">v{r.current}</span>
+            ) : r.latest ? (
+              <span className="plugin-ver">v{r.latest}</span>
+            ) : null}
+            {isOutdated(r.name) && pluginVers[r.name]?.latest ? (
+              <span className="plugin-ver new">→ v{pluginVers[r.name]?.latest}</span>
+            ) : null}
+          </div>
+          {/* 描述：单行省略 */}
+          <div className="mk-desc">
+            {r.description ? (
+              r.description
+            ) : (
+              <span className="mk-desc-empty">暂无描述</span>
+            )}
+          </div>
+        </div>
       ),
     },
     {
-      title: "作者",
-      dataIndex: "author",
-      width: 120,
-      ellipsis: true,
-      render: (v: string) => <span className="mk-author">{v}</span>,
-    },
-    {
-      title: "周/月下载",
-      key: "downloads",
-      width: 122,
-      render: (_, r) => (
-        <span className={`mk-num${r.weekly === null ? " muted" : ""}`}>
-          {r.weekly === null ? "—" : `${formatCount(r.weekly)} / ${formatCount(r.monthly)}`}
-        </span>
-      ),
-    },
-    {
-      title: "版本",
-      key: "ver",
-      width: 170,
-      render: (_, r) => (
-        <span className={`mk-num${r.latest === null ? " muted" : ""}`}>{r.latest ?? "—"}</span>
-      ),
-    },
-    {
-      title: "Stars",
-      key: "stars",
-      width: 84,
-      render: (_, r) => (
-        <span className={`mk-num${r.stars === null ? " muted" : ""}`}>
-          {r.stars === null ? "—" : `★ ${formatCount(r.stars)}`}
-        </span>
-      ),
+      // 指标列：NPM 源显示周下载，GitHub 源显示 Stars（标题随源切换）
+      title: source === "github" ? "Stars" : "周下载",
+      key: "metric",
+      width: 110,
+      render: (_, r) =>
+        source === "github" ? (
+          <span className={`mk-num${r.stars === null ? " muted" : ""}`}>
+            {r.stars === null ? "—" : `★ ${formatCount(r.stars)}`}
+          </span>
+        ) : (
+          <span className={`mk-num${r.weekly === null ? " muted" : ""}`}>
+            {r.weekly === null ? "—" : formatCount(r.weekly)}
+          </span>
+        ),
     },
     {
       title: "发布日期",
@@ -423,13 +443,15 @@ export default function PluginManager() {
     {
       title: "操作",
       key: "actions",
-      fixed: "right",
-      width: 200,
+      width: 156,
       render: renderActions,
     },
   ];
 
-  // ---- 数据源组装 ----
+  // ---- 数据源组装（服务端分页结果直接渲染；已安装 tab 保留本地模糊过滤）----
+  const totalPages = Math.max(1, Math.ceil((market?.total ?? 0) / pageSizeOf(source)));
+  const safePage = Math.min(page, totalPages);
+
   const allRows: MkRow[] = (market?.items ?? []).map((it) => ({
     key: it.key,
     name: it.name,
@@ -464,18 +486,12 @@ export default function PluginManager() {
     current: pluginVers[p]?.current ?? null,
   }));
 
-  // 所有插件 tab：对当前页结果再做一次名称模糊兜底（所见即名称命中）
-  const rows =
-    tabMode === "all"
-      ? query.trim()
-        ? allRows.filter((r) => nameMatches(r.name, query) || nameMatches(r.spec, query))
-        : allRows
-      : installedRows;
+  const rows = tabMode === "all" ? allRows : installedRows;
 
   const marketBody = (
     <div className="mk-wrap">
-      {/* 顶部固定区：进行中横幅 + 搜索工具栏 + 加载/错误提示，不随表格滚动 */}
-      <div className="mk-sticky">
+      {/* 工具栏区域（固定）：进行中横幅 + 搜索工具栏 + 加载/错误提示，不随表格滚动 */}
+      <div className="mk-toolbar-area">
         {running && pluginOp ? (
           <div className="mk-op-banner">
             <span className="mk-op-spinner" />
@@ -492,11 +508,16 @@ export default function PluginManager() {
           <div className="mk-row">
             <Input
               className="mk-search"
-              placeholder="按插件名称模糊搜索（忽略大小写）"
+              placeholder="精准搜索：NPM 匹配关键字 / GitHub 匹配仓库名；支持 keywords:/topic:/in: 语法"
               allowClear
               prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onPressEnter={() => {
+                // 回车立即换词重搜：跳过防抖等待，并重置到第 1 页
+                setDebouncedQuery(query);
+                setPage(1);
+              }}
             />
           </div>
           <div className="mk-row">
@@ -505,7 +526,7 @@ export default function PluginManager() {
               options={[
                 {
                   key: "all",
-                  label: "所有插件(" + formatCount(tabMode === "all" ? market?.total : visibleInstalled.length) + ")",
+                  label: "所有插件(" + formatCount(market?.total) + ")",
                 },
                 { key: "installed", label: "已安装(" + visibleInstalled.length + ")" },
               ]}
@@ -556,16 +577,22 @@ export default function PluginManager() {
           columns={columns}
           dataSource={rows}
           pagination={false}
-          scroll={{ x: 1010 }}
+          scroll={{ x: 752 }}
+          onRow={(r) => ({
+            onClick: () => setDetailRow(r),
+            title: "查看插件详情",
+          })}
           locale={{
             emptyText:
               tabMode === "installed"
                 ? query.trim()
                   ? "没有匹配的已安装插件"
                   : "本机尚未安装任何插件"
-                : query.trim()
-                  ? "当前页无名称匹配的插件，可尝试翻页或更换关键词"
-                  : "无匹配插件",
+                : marketLoading
+                  ? "正在搜索…"
+                  : debouncedQuery.trim()
+                    ? "没有匹配的插件，可更换关键词重试"
+                    : "无匹配插件",
           }}
         />
       </div>
@@ -674,7 +701,7 @@ export default function PluginManager() {
                   <button
                     className="pm-btn pm-btn-sm"
                     type="button"
-                    disabled={page <= 1 || marketLoading}
+                    disabled={safePage <= 1 || marketLoading}
                     onClick={() => {
                       setPage((p) => p - 1);
                       bumpPane("mk-from-left");
@@ -683,12 +710,12 @@ export default function PluginManager() {
                     ◀ 上一页
                   </button>
                   <span className="mk-pager-info">
-                    第 {page} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
+                    第 {safePage} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
                   </span>
                   <button
                     className="pm-btn pm-btn-sm"
                     type="button"
-                    disabled={page >= totalPages || marketLoading}
+                    disabled={safePage >= totalPages || marketLoading}
                     onClick={() => {
                       setPage((p) => p + 1);
                       bumpPane("mk-from-right");
@@ -711,30 +738,135 @@ export default function PluginManager() {
         <div key={view} className="mk-view-enter">{view === "market" ? marketBody : terminalBody}</div>
       </AppModal>
 
-      {/* 插件介绍小弹框 */}
+      {/* 插件详情弹框：点击插件行打开 */}
       <AppModal
-        open={descRow !== null}
-        className="pm-desc-modal"
-        title={descRow ? `插件介绍 · ${descRow.name}` : "插件介绍"}
-        footer={null}
+        open={detailRow !== null}
+        className="pm-detail-modal"
+        title={detailRow ? detailRow.name : "插件详情"}
         width={560}
-        onCancel={() => setDescRow(null)}
+        onCancel={() => setDetailRow(null)}
+        footer={
+          detailRow ? (
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              {!detailRow.installedHere ? (
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  disabled={running}
+                  onClick={() => {
+                    const row = detailRow;
+                    setDetailRow(null);
+                    confirmOp("add", row.spec);
+                  }}
+                >
+                  {source === "github" ? "源码安装" : "一键安装"}
+                </button>
+              ) : null}
+              {detailRow.installedHere && isOutdated(detailRow.name) ? (
+                <button
+                  className="pm-btn"
+                  type="button"
+                  disabled={running}
+                  onClick={() => {
+                    const row = detailRow;
+                    setDetailRow(null);
+                    confirmOp("update", row.name);
+                  }}
+                >
+                  更新
+                </button>
+              ) : null}
+              {detailRow.installedHere ? (
+                <button
+                  className="pm-btn danger"
+                  type="button"
+                  disabled={running}
+                  onClick={() => {
+                    const row = detailRow;
+                    setDetailRow(null);
+                    confirmOp("remove", row.name);
+                  }}
+                >
+                  卸载
+                </button>
+              ) : null}
+              <button className="pm-btn" type="button" onClick={() => setDetailRow(null)}>
+                关闭
+              </button>
+            </div>
+          ) : null
+        }
       >
-        {descRow ? (
-          <div className="pm-desc-body">
-            <div className="pm-desc-meta">
-              <Avatar url={descRow.avatarUrl} name={descRow.author} />
-              <span className="mk-name">{descRow.name}</span>
-              {descRow.latest ? <span className="plugin-ver">v{descRow.latest}</span> : null}
-              {descRow.installedHere && descRow.current ? (
-                <span className="plugin-ver">(本机 v{descRow.current})</span>
+        {detailRow ? (
+          <div className="pm-detail-body">
+            <div className="pm-detail-head">
+              <Avatar url={detailRow.avatarUrl} name={detailRow.author} />
+              <div className="pm-detail-title">
+                <div className="pm-detail-name">
+                  <span className="mk-name">{detailRow.name}</span>
+                  {/* 安装状态徽标 */}
+                  {detailRow.installedHere ? (
+                    <span className="pm-detail-badge installed">已安装</span>
+                  ) : (
+                    <span className="pm-detail-badge">未安装</span>
+                  )}
+                  {/* 更新可用提示 */}
+                  {detailRow.installedHere && isOutdated(detailRow.name) && pluginVers[detailRow.name]?.latest ? (
+                    <span className="pm-detail-badge update">
+                      可更新 → v{pluginVers[detailRow.name]?.latest}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="pm-detail-meta">
+                  {detailRow.author && detailRow.author !== "—" ? (
+                    <span className="mk-author">作者：@{detailRow.author}</span>
+                  ) : null}
+                  <span className="pm-detail-spec">{detailRow.spec}</span>
+                </div>
+                <div className="pm-detail-versions">
+                  {detailRow.installedHere && detailRow.current ? (
+                    <span className="pm-detail-version">
+                      本机版本 <b>v{detailRow.current}</b>
+                    </span>
+                  ) : null}
+                  {detailRow.latest ? (
+                    <span className="pm-detail-version">
+                      最新版本 <b>v{detailRow.latest}</b>
+                    </span>
+                  ) : null}
+                  {!detailRow.installedHere && !detailRow.latest ? (
+                    <span className="pm-detail-version muted">版本信息暂不可用</span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <div className="pm-detail-stats">
+              {detailRow.weekly !== null ? (
+                <span className="pm-detail-stat">
+                  周下载 <b>{formatCount(detailRow.weekly)}</b>
+                </span>
+              ) : null}
+              {detailRow.monthly !== null ? (
+                <span className="pm-detail-stat">
+                  月下载 <b>{formatCount(detailRow.monthly)}</b>
+                </span>
+              ) : null}
+              {detailRow.stars !== null ? (
+                <span className="pm-detail-stat">
+                  Stars <b>★ {formatCount(detailRow.stars)}</b>
+                </span>
+              ) : null}
+              {detailRow.releasedAt ? (
+                <span className="pm-detail-stat">
+                  更新于 <b>{formatDate(detailRow.releasedAt)}</b>
+                </span>
               ) : null}
             </div>
-            <div className="pm-desc-text">
-              {descRow.description ? (
-                descRow.description
+            <div className="pm-detail-desc">
+              {detailRow.description ? (
+                detailRow.description
               ) : (
-                <span className="mk-desc-empty">暂无介绍</span>
+                <span className="mk-desc-empty">暂无描述</span>
               )}
             </div>
           </div>

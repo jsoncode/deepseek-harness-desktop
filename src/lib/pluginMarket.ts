@@ -1,7 +1,14 @@
 /**
- * 插件市场数据源：GitHub 主题仓库搜索 + npm 关键字搜索。
+ * 插件市场数据源：GitHub 仓库搜索 + npm 包搜索。
  * 打包版 WebView 的 CSP connect-src 不含外网域名，前端直连会被拦截，
  * 因此桌面端经 Rust 命令 http_get_json 代理请求；浏览器预览模式保留原生 fetch。
+ *
+ * 搜索策略：服务端关键词分页搜索 —— 保持 page/pageSize 参数，由调用方负责防抖与分页重置。
+ * 全部采用字段级精准匹配，规避平台全文分词造成的模糊结果（实测裸词 dsh-jenkins
+ * 会被 npm 按 "-" 分词全文匹配命中 1 万+ 条）：
+ * - NPM：keywords:<词> 关键字字段精确匹配；多词短语以引号整体匹配 keywords:"a b"；
+ * - GitHub：<词> in:name 仅匹配仓库名；
+ * - 未输入关键词时使用默认全集词（dsh-plugin）；自带限定语法（keywords:/topic:/in: 等）原样透传。
  */
 import { api, tauri } from "./tauri";
 
@@ -35,6 +42,43 @@ export function pageSizeOf(source: MarketSource): number {
   return source === "github" ? GH_PAGE_SIZE : NPM_PAGE_SIZE;
 }
 
+/** 默认搜索词：未输入关键词时展示 dsh-plugin 插件全集 */
+const DEFAULT_TERMS: Record<MarketSource, string> = {
+  github: "topic:dsh-plugin",
+  npm: "keywords:dsh-plugin",
+};
+
+/** 判断查询是否自带平台搜索限定符（keywords:/topic:/in:/author: 等），带则原样透传 */
+function hasSearchQualifier(q: string): boolean {
+  return /^[a-z][a-z0-9_-]*:/i.test(q.trim());
+}
+
+/**
+ * 组装 NPM 精准搜索词：
+ * - 单个无限定符的词 → keywords:<词>，关键字字段精确匹配（如 dsh-jenkins 仅命中同名插件）；
+ * - 多词短语 → keywords:"a b"，去掉内部引号后作为整体关键字短语匹配；
+ * - 自带限定语法原样透传；空词回退 dsh-plugin 默认全集词。
+ */
+function buildNpmText(query: string): string {
+  const term = query.trim();
+  if (!term) return DEFAULT_TERMS.npm;
+  if (hasSearchQualifier(term)) return term;
+  if (/\s/.test(term)) return `keywords:"${term.replace(/"/g, "")}"`;
+  return `keywords:${term}`;
+}
+
+/**
+ * 组装 GitHub 精准搜索词：
+ * - 无限定符的词 → <词> in:name，仅匹配仓库名（避免描述/README 带来的模糊命中）；
+ * - 自带限定语法原样透传；空词回退 dsh-plugin 默认全集词。
+ */
+function buildGithubQ(query: string): string {
+  const term = query.trim();
+  if (!term) return DEFAULT_TERMS.github;
+  if (hasSearchQualifier(term)) return term;
+  return `${term} in:name`;
+}
+
 /** GitHub 未认证搜索限流（约 10 次/分钟）时抛出，UI 显示友好提示 */
 export class RateLimitedError extends Error {}
 
@@ -66,70 +110,38 @@ interface GhItem {
   owner?: { login?: string; avatar_url?: string };
 }
 
-/** 拉取一页市场列表。请求恒定使用 dsh-plugin 关键字/topic 全集（搜索为调用方本地过滤）。
- *  GitHub 的 stars/date 走服务端排序；NPM 接口不支持全量排序，在客户端排当前页 */
-export async function fetchMarketPage(
-  source: MarketSource,
-  page: number,
-  sort: MarketSort,
-): Promise<MarketPage> {
-  if (source === "github") {
-    const q = "topic:dsh-plugin";
-    const sortParam =
-      sort === "stars"
-        ? "&sort=stars&order=desc"
-        : sort === "date"
-          ? "&sort=updated&order=desc"
-          : "";
-    const url =
-      `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}` +
-      `${sortParam}&per_page=${GH_PAGE_SIZE}&page=${page}`;
-    let g: { total_count?: number; items?: GhItem[] };
-    try {
-      g = await fetchJson(url);
-    } catch (e) {
-      if (String(e).includes("403")) throw new RateLimitedError("GitHub 搜索速率受限，请稍后再试");
-      throw e;
-    }
-    return {
-      total: g.total_count ?? 0,
-      items: (g.items ?? []).map((it) => ({
-        key: it.full_name ?? it.name ?? Math.random().toString(36).slice(2),
-        name: it.name ?? it.full_name ?? "—",
-        spec: `github:${it.full_name ?? it.name ?? ""}`,
-        author: it.owner?.login ?? "—",
-        avatarUrl: it.owner?.avatar_url ?? null,
-        description: it.description?.trim() ? it.description : null,
-        // GitHub 不提供仓库级下载数
-        weekly: null,
-        monthly: null,
-        stars: it.stargazers_count ?? null,
-        version: null,
-        releasedAt: it.pushed_at ?? it.created_at ?? null,
-      })),
-    };
-  }
+type GhSearchResponse = { total_count?: number; items?: GhItem[] };
 
-  const text = "keywords:dsh-plugin";
-  const from = (page - 1) * NPM_PAGE_SIZE;
-  const url =
-    `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +
-    `&size=${NPM_PAGE_SIZE}&from=${from}`;
-  const n = await fetchJson<{
-    total?: number;
-    objects?: Array<{
-      downloads?: { weekly?: number; monthly?: number };
-      package?: {
-        name?: string;
-        version?: string;
-        date?: string;
-        description?: string | null;
-        publisher?: { username?: string };
-      };
-    }>;
-  }>(url);
+function mapGhItem(it: GhItem): MarketPlugin {
+  return {
+    key: it.full_name ?? it.name ?? Math.random().toString(36).slice(2),
+    name: it.name ?? it.full_name ?? "—",
+    spec: `github:${it.full_name ?? it.name ?? ""}`,
+    author: it.owner?.login ?? "—",
+    avatarUrl: it.owner?.avatar_url ?? null,
+    description: it.description?.trim() ? it.description : null,
+    // GitHub 不提供仓库级下载数
+    weekly: null,
+    monthly: null,
+    stars: it.stargazers_count ?? null,
+    version: null,
+    releasedAt: it.pushed_at ?? it.created_at ?? null,
+  };
+}
 
-  const items: MarketPlugin[] = (n.objects ?? []).map((o) => ({
+interface NpmObject {
+  downloads?: { weekly?: number; monthly?: number };
+  package?: {
+    name?: string;
+    version?: string;
+    date?: string;
+    description?: string | null;
+    publisher?: { username?: string };
+  };
+}
+
+function mapNpmObject(o: NpmObject): MarketPlugin {
+  return {
     key: o.package?.name ?? Math.random().toString(36).slice(2),
     name: o.package?.name ?? "—",
     spec: o.package?.name ?? "",
@@ -143,7 +155,53 @@ export async function fetchMarketPage(
     stars: null,
     version: o.package?.version ?? null,
     releasedAt: o.package?.date ?? null,
-  }));
+  };
+}
+
+/**
+ * 按关键词拉取一页市场列表：
+ * - 搜索词组装规则见 buildNpmText / buildGithubQ 与文件头注释（全部精准匹配）；
+ *   GitHub stars/date 走服务端排序，NPM 接口不支持全量排序，在客户端排当前页；
+ * - 调用方保证翻页/换词时重置 page，避免请求越界页导致搜不到结果。
+ */
+export async function fetchMarketPage(
+  source: MarketSource,
+  query: string,
+  page: number,
+  sort: MarketSort,
+): Promise<MarketPage> {
+  if (source === "github") {
+    const ghQ = buildGithubQ(query);
+    const sortParam =
+      sort === "stars"
+        ? "&sort=stars&order=desc"
+        : sort === "date"
+          ? "&sort=updated&order=desc"
+          : "";
+    const url =
+      `https://api.github.com/search/repositories?q=${encodeURIComponent(ghQ)}` +
+      `${sortParam}&per_page=${GH_PAGE_SIZE}&page=${page}`;
+    let g: GhSearchResponse;
+    try {
+      g = await fetchJson(url);
+    } catch (e) {
+      if (String(e).includes("403")) throw new RateLimitedError("GitHub 搜索速率受限，请稍后再试");
+      throw e;
+    }
+    return {
+      total: g.total_count ?? 0,
+      items: (g.items ?? []).map(mapGhItem),
+    };
+  }
+
+  const text = buildNpmText(query);
+  const from = (page - 1) * NPM_PAGE_SIZE;
+  const url =
+    `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +
+    `&size=${NPM_PAGE_SIZE}&from=${from}`;
+  const n = await fetchJson<{ total?: number; objects?: NpmObject[] }>(url);
+
+  const items: MarketPlugin[] = (n.objects ?? []).map(mapNpmObject);
   if (sort === "weekly") items.sort((a, b) => (b.weekly ?? -1) - (a.weekly ?? -1));
   else if (sort === "date")
     items.sort(
