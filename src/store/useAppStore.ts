@@ -273,13 +273,41 @@ export const useAppStore = create<AppStore>((set, get) => {
     onEvent<ExitPayload>(EVENTS.webExit, (p) => {
       set({ childRunning: false });
       if (get().phase === "stopped") return;
-      if (get().phase === "running") {
-        get().appendLog("error", `dsh web 进程已退出（退出码 ${p.code}）`);
-        set({ phase: "stopped", serviceRunning: false });
-        return;
-      }
-      get().appendLog("error", `❌ dsh web 启动失败（退出码 ${p.code}）`);
-      set({ phase: "error", error: `dsh web 启动失败，退出码 ${p.code}` });
+      // 双保险复核：dsh web 的服务进程可能独立于壳进程存活（派生脱离父链），
+      // 后端已在可用时接管并不发本事件；此处再按实际可达性裁决一次，
+      // 绝不因进程退出码而误杀仍在正常服务的实例。
+      void (async () => {
+        try {
+          const st: StatusPayload = await withTimeout(api.appStatus(), 8000, "服务状态复核");
+          if (st.service_running && st.url) {
+            get().appendLog(
+              "system",
+              `dsh web 进程已退出（退出码 ${p.code}），但服务仍可访问（${st.url}），已自动接管，无需重启`,
+            );
+            set({
+              url: st.url,
+              serviceRunning: true,
+              serviceAlive: true,
+              childRunning: st.child_running,
+              phase: "running",
+            });
+            return;
+          }
+        } catch {
+          /* 复核失败：按服务不可用处理 */
+        }
+        // 复核等待期间用户可能已停止/重新发起启动：陈旧事件直接忽略
+        const cur = get();
+        if (cur.phase === "stopped" || cur.phase === "installing" || cur.phase === "starting")
+          return;
+        if (cur.phase === "running") {
+          get().appendLog("error", `dsh web 进程已退出（退出码 ${p.code}）`);
+          set({ phase: "stopped", serviceRunning: false });
+          return;
+        }
+        get().appendLog("error", `❌ dsh web 启动失败（退出码 ${p.code}）`);
+        set({ phase: "error", error: `dsh web 启动失败，退出码 ${p.code}` });
+      })();
     });
 
     onEvent<UrlPayload>(EVENTS.url, (p) => {

@@ -955,13 +955,11 @@ fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
     );
 }
 
-/// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件。
-fn pump_process(
-    app: &AppHandle,
-    mut child: Child,
-    log_event: &'static str,
-    exit_event: &'static str,
-) {
+/// 泵送子进程 stdout/stderr 直到进程退出，返回退出码；不负责发出 exit 事件。
+///
+/// web 日志事件下同时尝试从输出行识别服务 URL（try_detect_url），与原
+/// pump_process 行为一致；是否发出 exit 事件由调用方裁决。
+fn pump_streams_until_exit(app: &AppHandle, mut child: Child, log_event: &'static str) -> i32 {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -993,7 +991,12 @@ fn pump_process(
     let status = child.wait();
     let _ = h_out.join();
     let _ = h_err.join();
-    let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)
+}
+
+/// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件。
+fn pump_process(app: &AppHandle, child: Child, log_event: &'static str, exit_event: &'static str) {
+    let code = pump_streams_until_exit(app, child, log_event);
     let _ = app.emit(exit_event, ExitPayload { code });
 }
 
@@ -1400,12 +1403,58 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     let pid = child.id();
     *state.child_pid.lock().unwrap() = Some(pid);
 
-    // 泵输出 + 退出后清理 pid
+    // 泵输出 + 退出后的存活性裁决：dsh web 会派生脱离父链的服务进程，
+    // 壳进程先行退出并不代表服务不可用（真实案例：dsh 内部在非 git 目录打印
+    // "fatal: not a git repository" 等非致命告警后以码 1 退出，而服务端口依旧
+    // 健在）。此时绝不拦截访问——复探端口可达即收养监听进程继续托管，并重新
+    // 广播 URL 让前端保持在运行态；只有确认服务不可达才上报失败。
     let app2 = app.clone();
     std::thread::spawn(move || {
-        pump_process(&app2, child, WEB_LOG_EVENT, WEB_EXIT_EVENT);
+        let code = pump_streams_until_exit(&app2, child, WEB_LOG_EVENT);
+        // 先摘除自家 pid（也为随后的收养清位）
         if let Some(s) = app2.try_state::<AppState>() {
             *s.child_pid.lock().unwrap() = None;
+        }
+        // 短暂重试几次，避开重启窗口期的瞬时探测落空
+        let mut alive_url: Option<String> = None;
+        for _ in 0..3 {
+            if let Some(s) = app2.try_state::<AppState>() {
+                if s.child_pid.lock().unwrap().is_some() {
+                    return; // 已有新一轮子进程接管（用户点了重试），本退出按旧进程忽略
+                }
+            }
+            let pending: Vec<String> = app2
+                .try_state::<AppState>()
+                .map(|s| s.pending_urls.lock().unwrap().clone())
+                .unwrap_or_default();
+            let candidates = child_candidates(&pending);
+            if let Some(url) = probe_parallel(&candidates, 600) {
+                alive_url = Some(url);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        match alive_url {
+            Some(url) => {
+                if let Some(s) = app2.try_state::<AppState>() {
+                    // 收养脱离父链的监听进程为新的管理对象，保证"停止服务"仍然有效
+                    adopt_orphan_service(&s);
+                    *s.detected_url.lock().unwrap() = Some(url.clone());
+                }
+                emit_log(
+                    &app2,
+                    WEB_LOG_EVENT,
+                    "system",
+                    &format!(
+                        "dsh web 进程已退出（退出码 {code}），但服务仍正常运行，已自动接管继续提供访问"
+                    ),
+                );
+                let _ = app2.emit(URL_EVENT, UrlPayload { url });
+                // 服务可用即不算失败：不发出 WEB_EXIT_EVENT
+            }
+            None => {
+                let _ = app2.emit(WEB_EXIT_EVENT, ExitPayload { code });
+            }
         }
     });
 
