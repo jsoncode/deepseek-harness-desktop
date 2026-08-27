@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
@@ -40,9 +40,10 @@ export default function Launch() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 点击「启动/安装」后直接进入终端页：过程日志全程可见；
-  // 服务就绪（running）后由终端页自动转入预览页
   const busy = phase === "checking" || phase === "installing" || phase === "starting";
+  // 本页发起的启动流程：等待期间留在启动页（状态行实时显示进度），
+  // 结束时按结果分流——成功（running）→ 直接进入服务页；失败（error/stopped）→ 跳终端页查日志
+  const startedHere = useRef(false);
 
   // ---- 环境判定 ----
   const nodeOk = meetsNodeRequirement(nodeVersion);
@@ -168,14 +169,23 @@ export default function Launch() {
       navigate("/terminal");
       return;
     }
-    // 立即切换到终端页，再触发安装/启动链路（顺序保证用户第一时间看到日志）
-    navigate("/terminal");
+    // 留在启动页等待：不跳终端页；结束后由下方 effect 按结果自动分流
+    startedHere.current = true;
     if (needsInstall) {
       void installEnvAndStart();
     } else {
       void startFlow();
     }
   };
+
+  // 启动结束自动分流：成功 → 服务预览页；失败/报错 → 终端页（日志全程保存在 store，晚进也能看全）
+  useEffect(() => {
+    if (!startedHere.current) return;
+    if (phase === "installing" || phase === "starting") return; // 仍在进行中
+    startedHere.current = false;
+    if (phase === "running") navigate("/preview");
+    else if (phase === "error" || phase === "stopped") navigate("/terminal");
+  }, [phase, navigate]);
 
   let btnText = pnpm11 ? "降级 pnpm 10" : needsInstall ? "安装" : "启动应用";
   if (phase === "checking") btnText = "检测中…";
@@ -239,6 +249,11 @@ export default function Launch() {
       ) : null}
 
       <div className="launch-actions">
+        {busy && phase !== "checking" ? (
+          <button className="btn-secondary" type="button" onClick={() => navigate("/terminal")}>
+            查看日志
+          </button>
+        ) : null}
         <button
           className="btn-primary"
           disabled={busy}
