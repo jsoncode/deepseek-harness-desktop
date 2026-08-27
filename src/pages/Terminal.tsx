@@ -1,4 +1,6 @@
-import { CaretRightFilled, HomeOutlined, StopOutlined } from "@ant-design/icons";
+import { CaretRightFilled, CopyOutlined, HomeOutlined, StopOutlined } from "@ant-design/icons";
+import { Tooltip } from "antd";
+import { App as AntApp } from "antd";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
 import { tauri } from "../lib/tauri";
@@ -17,7 +19,7 @@ const STATUS_TEXT: Record<string, string> = {
   checking: "检测中",
   idle: "就绪",
   installing: "安装依赖",
-  starting: "启动服务",
+  starting: "启动中",
   running: "运行中",
   error: "启动失败",
   stopped: "已停止",
@@ -25,6 +27,7 @@ const STATUS_TEXT: Record<string, string> = {
 
 export default function Terminal() {
   const navigate = useNavigate();
+  const { message } = AntApp.useApp();
   const bodyRef = useRef<HTMLDivElement>(null);
   const { phase, logs, initialized, init, startFlow, stop, reset } = useAppStore();
 
@@ -51,6 +54,26 @@ export default function Terminal() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [logs.at(-1)?.id]);
 
+  // 一键复制纯净日志：只含各条正文文本，不带时间戳与前缀符号
+  const copyLogs = async () => {
+    const text = useAppStore
+      .getState()
+      .logs.filter((l) => l.text !== "（历史日志过长，已截断早期内容）")
+      .map((l) => l.text)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success("日志已复制到剪贴板");
+    } catch {
+      message.error("复制失败");
+    }
+  };
+
+  const retry = () => {
+    reset();
+    void startFlow();
+  };
+
   const busy = phase === "installing" || phase === "starting";
   const statusClass =
     phase === "running"
@@ -71,6 +94,59 @@ export default function Terminal() {
           harness — terminal
           <small>dsh web · 模拟终端</small>
         </div>
+
+        {/* 操作区：位于状态胶囊左侧，沿用既有按钮样式（紧凑尺寸适配标题栏） */}
+        <div className="term-head-actions">
+          {phase === "running" ? (
+            <>
+              <button className="btn-secondary" type="button" onClick={() => navigate("/preview")}>
+                <CaretRightFilled style={{ fontSize: 13 }} /> 打开应用
+              </button>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => {
+                  void stop();
+                  navigate("/");
+                }}
+                style={{ color: "var(--danger)", borderColor: "rgba(248,113,113,.35)" }}
+              >
+                <StopOutlined style={{ fontSize: 13 }} /> 停止服务
+              </button>
+            </>
+          ) : null}
+          {phase === "error" ? (
+            <button className="btn-primary" type="button" onClick={retry}>
+              重试
+            </button>
+          ) : null}
+          {phase === "stopped" ? (
+            <button className="btn-primary" type="button" onClick={retry}>
+              重新启动
+            </button>
+          ) : null}
+          <Tooltip title="复制日志" placement="bottom">
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="复制日志"
+              onClick={() => void copyLogs()}
+            >
+              <CopyOutlined />
+            </button>
+          </Tooltip>
+          <Tooltip title="返回启动页" placement="bottom">
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="返回启动页"
+              onClick={() => navigate("/")}
+            >
+              <HomeOutlined />
+            </button>
+          </Tooltip>
+        </div>
+
         <div className={statusClass}>
           <span className="dot" />
           {STATUS_TEXT[phase] ?? "未知"}
@@ -104,53 +180,6 @@ export default function Terminal() {
             </div>
           ) : null}
         </div>
-      </div>
-
-      <div className="term-actions">
-        {phase === "running" ? (
-          <>
-            <button className="btn-secondary" onClick={() => navigate("/preview")}>
-              <CaretRightFilled style={{ fontSize: 14 }} /> 打开应用
-            </button>
-            <button
-              className="btn-secondary"
-              onClick={() => {
-                void stop();
-                navigate("/");
-              }}
-              style={{ color: "var(--danger)", borderColor: "rgba(248,113,113,.35)" }}
-            >
-              <StopOutlined style={{ fontSize: 14 }} /> 停止服务
-            </button>
-          </>
-        ) : null}
-        {phase === "error" ? (
-          <button
-            className="btn-primary"
-            onClick={() => {
-              reset();
-              void startFlow();
-            }}
-            style={{ minWidth: 180 }}
-          >
-            <CaretRightFilled style={{ fontSize: 15 }} /> 重试
-          </button>
-        ) : null}
-        {phase === "stopped" ? (
-          <button
-            className="btn-primary"
-            onClick={() => {
-              reset();
-              void startFlow();
-            }}
-            style={{ minWidth: 180 }}
-          >
-            <CaretRightFilled style={{ fontSize: 15 }} /> 重新启动
-          </button>
-        ) : null}
-        <button className="btn-secondary" onClick={() => navigate("/")}>
-          <HomeOutlined style={{ fontSize: 14 }} /> 返回启动页
-        </button>
       </div>
     </div>
   );
