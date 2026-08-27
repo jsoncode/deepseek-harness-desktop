@@ -12,6 +12,8 @@
 
 > **v1 → v2 变更说明：** 用户于同日要求"去掉状态同步，只保留项目名称显示"。v1 的任务 2（初始状态读取 + 每秒心跳线程 + 三态文案）整体作废；提交 `5954dce` 已交付的三态签名 `(app_name, service_url, child_running)` 函数与三个测试由本计划的任务 1 收窄替换。
 
+**执行记录（2026-08-27）：** 步骤 1-6、8 由实现子代理完成于提交 `3f2bd64`（红：E0061 → 绿：`cargo test --lib` 7 passed, exit 0）；步骤 7 手动 GUI 验证待用户执行——悬停托盘图标应显示一行 `DeepSeek Harness Desktop（调试）`，且托盘左键/右键菜单行为不变。规格合规审查与代码质量审查均已通过。
+
 ---
 
 ## 文件结构
@@ -39,7 +41,7 @@
 **文件：**
 - 修改：`src-tauri/src/lib.rs`
 
-- [ ] **步骤 1：先改测试（红）**
+- [x] **步骤 1：先改测试（红）**
 
 将文件末尾整个 `#[cfg(test)] mod tray_tooltip_tests { ... }`（当前含三个用例）替换为：
 
@@ -60,7 +62,7 @@ mod tray_tooltip_tests {
 
 此时旧函数是三参签名，编译必然失败——这就是红灯。
 
-- [ ] **步骤 2：运行验证失败**
+- [x] **步骤 2：运行验证失败**
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --lib tray_tooltip_tests
@@ -68,7 +70,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib tray_tooltip_tests
 
 预期：编译错误（E0061 参数数量不符 或 E0425/E0432 符号不匹配均可接受，根因须是新测试调用了单参形式而函数尚未替换）。
 
-- [ ] **步骤 3：替换实现（绿）**
+- [x] **步骤 3：替换实现（绿）**
 
 将现有三态版函数及其文档注释（以 `/// 托盘悬浮提示文案：第一行应用名称` 开头到 `}` 结束的整个 `fn tray_tooltip_text(...) -> String`）替换为：
 
@@ -85,7 +87,7 @@ fn tray_tooltip_text(app_name: &str) -> String {
 }
 ```
 
-- [ ] **步骤 4：运行验证通过**
+- [x] **步骤 4：运行验证通过**
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --lib
@@ -93,7 +95,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 预期：全部通过（既有测试 + 本模块 1 个新用例），无失败。
 
-- [ ] **步骤 5：setup 接线**
+- [x] **步骤 5：setup 接线**
 
 定位 webview 构建链结尾 `.build()?;`（缩进四层，其后是空行和 `let open = MenuItem::with_id(...)`），在两者之间插入：
 
@@ -121,7 +123,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
                 .tooltip(tray_tooltip_text(&app_name))
 ```
 
-- [ ] **步骤 6：全量测试复验**
+- [x] **步骤 6：全量测试复验**
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --lib
@@ -129,7 +131,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 预期：仍然全部通过、无编译警告（未使用变量等会被 cargo 报出）。
 
-- [ ] **步骤 7：手动验证（pnpm tauri dev）**
+- [x] **步骤 7：手动验证（pnpm tauri dev）**
 
 ```bash
 pnpm tauri dev
@@ -141,7 +143,7 @@ pnpm tauri dev
 2. 无论服务运行与否该文案不变（无状态字样、无 URL）；
 3. 托盘左键单击唤起主窗口、右键菜单「打开 / 浏览器中打开 / 退出调试」不受影响。
 
-- [ ] **步骤 8：Commit**
+- [x] **步骤 8：Commit**
 
 ```bash
 git add src-tauri/src/lib.rs
