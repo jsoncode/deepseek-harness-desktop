@@ -1,4 +1,3 @@
-import { HomeOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
@@ -37,7 +36,6 @@ export default function Preview() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
-  const phase = useAppStore((s) => s.phase);
   const initialized = useAppStore((s) => s.initialized);
   const init = useAppStore((s) => s.init);
   const reportPluginLoadError = useAppStore((s) => s.reportPluginLoadError);
@@ -45,10 +43,15 @@ export default function Preview() {
   const reloadKey = useUiStore((s) => s.reloadKey);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  // 刷新/直接进入本页时同步应用状态（否则 url 一直为空，误报"未检测到服务"）
+  // 刷新/直接进入本页时同步应用状态
   useEffect(() => {
     if (!initialized) void init();
   }, [initialized, init]);
+
+  // 无 URL（未检测到服务）时不再展示空态页，直接回启动页处理启动/重试
+  useEffect(() => {
+    if (!url && initialized) navigate("/", { replace: true });
+  }, [url, initialized, navigate]);
 
   // 服务健康监测已上移至全局 store（useAppStore），断连只反映在标题栏指示灯，
   // 本页不再做任何拦截，避免服务繁忙时的单次探测超时误报遮挡内容。
@@ -97,21 +100,8 @@ export default function Preview() {
     return () => window.removeEventListener("message", onMessage);
   }, [message, reportPluginLoadError, setHostTheme]);
 
-  // 无 URL → 空态（状态同步中显示"正在检测"，避免刷新后误报未检测到服务）
-  if (!url) {
-    const syncing = !initialized || phase === "checking";
-    return (
-      <div className="page preview">
-        <div className="empty-box">
-          <div className="big">{syncing ? <span className="spinner-ring" /> : "🛰"}</div>
-          <div>{syncing ? "正在检测本地服务…" : "未检测到本地服务地址"}</div>
-          <button className="btn-secondary" onClick={() => navigate("/")}>
-            <HomeOutlined style={{ fontSize: 14 }} /> 返回启动页
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // 无 URL（状态同步中或跳转前的一瞬）时不渲染任何内容，由上方 effect 负责回启动页
+  if (!url) return null;
 
   return (
     <div className="page preview">

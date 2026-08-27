@@ -1581,6 +1581,18 @@ html[data-theme="light"] .mk-op-banner {
   white-space: nowrap;
 }
 
+/* 应用名后的版本号徽标（编译期由 vite define 注入） */
+.titlebar-version {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
 .titlebar-center {
   flex: 1;
   min-width: 0;
