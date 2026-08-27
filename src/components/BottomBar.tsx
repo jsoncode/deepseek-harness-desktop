@@ -21,7 +21,8 @@ export default function BottomBar() {
   const [restarting, setRestarting] = useState(false);
 
   // 重启：立即切入重启过渡页（全屏 loading + 阶段文案），
-  // 停止旧服务 → 重新启动；就绪跳转预览 / 失败展示重试，均由重启页监听 phase 完成。
+  // 先 stop()（杀正在启动的进程树并释放端口，防止新旧进程端口重叠）再重新启动；
+  // 就绪跳转预览 / 失败展示重试，均由重启页监听 phase 完成。
   const handleRestart = () => {
     if (restarting) return;
     setRestarting(true);
@@ -43,8 +44,10 @@ export default function BottomBar() {
     navigate("/");
   };
 
-  // 安装/启动过程中禁用重启按钮，避免重复触发
-  const busy = phase === "installing" || phase === "starting";
+  // 「安装中」禁用重启（避免打断安装链路）；「启动中」保留重启/停止能力——
+  // 重启会先 stop()（杀正在启动的进程树 + 释放端口）再重新拉起，防止端口重叠
+  const installing = phase === "installing";
+  const starting = phase === "starting";
 
   return (
     <footer className="bottombar">
@@ -58,17 +61,17 @@ export default function BottomBar() {
           cancelText="取消"
           okButtonProps={{ danger: true }}
           placement="topLeft"
-          disabled={!serviceRunning || restarting}
+          disabled={(!serviceRunning && !starting) || restarting}
           onConfirm={handleStop}
         >
-          <Tooltip title={!serviceRunning ? "服务未运行" : "停止服务"}>
+          <Tooltip title={starting ? "启动中，点击可中断并停止" : !serviceRunning ? "服务未运行" : "停止服务"}>
             {/* 停止键外包 span：保证 disabled 时外层气泡仍能触发 */}
             <span className="tip-wrap">
               <button
                 className="icon-btn stop-btn"
                 type="button"
                 aria-label="停止服务"
-                disabled={!serviceRunning || restarting}
+                disabled={(!serviceRunning && !starting) || restarting}
               >
                 <LogoutOutlined />
               </button>
@@ -83,25 +86,27 @@ export default function BottomBar() {
           cancelText="取消"
           okButtonProps={{ danger: true }}
           placement="topLeft"
-          disabled={restarting || busy || !tauri}
+          disabled={restarting || installing || !tauri}
           onConfirm={handleRestart}
         >
           <Tooltip
             title={
               !tauri
                 ? "浏览器预览模式不可用"
-                : busy
-                  ? "安装/启动进行中"
-                  : restarting
-                    ? "正在重启…"
-                    : "重启服务"
+                : installing
+                  ? "安装进行中，请稍候"
+                  : starting
+                    ? "启动中，点击将中断当前启动并重新启动"
+                    : restarting
+                      ? "正在重启…"
+                      : "重启服务"
             }
           >
             <button
               className="icon-btn"
               type="button"
               aria-label="重启服务"
-              disabled={restarting || busy || !tauri}
+              disabled={restarting || installing || !tauri}
             >
               {/* 重启中不旋转方向性图标（避免怪异动效），进度由重启过渡页展示 */}
               <ReloadOutlined />

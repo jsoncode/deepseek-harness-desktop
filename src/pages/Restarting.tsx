@@ -18,6 +18,10 @@ export default function Restarting() {
   // 重启链路会先短暂经过 stopped（停止旧服务），不能据此判定失败
   const seenBusy = useRef(false);
   const done = useRef(false);
+  // 重启的第一步必然是 stop()，其带来的第一个 stopped 不算失败：
+  // 从「启动中」直接点重启时页面会带着 starting 挂载，随后先经过 stopped，
+  // 若按 stopped 一律判定失败会闪一下「重启失败」
+  const stopSeen = useRef(false);
 
   // 服务就绪 → 立即进入预览页（只执行一次）
   useEffect(() => {
@@ -29,7 +33,9 @@ export default function Restarting() {
     }
   }, [phase, navigate, message]);
 
-  const failed = phase === "error" || (seenBusy.current && phase === "stopped");
+  const firstStop = phase === "stopped" && !stopSeen.current;
+  if (phase === "stopped") stopSeen.current = true;
+  const failed = phase === "error" || (seenBusy.current && phase === "stopped" && !firstStop);
   if (phase === "installing" || phase === "starting") seenBusy.current = true;
 
   const retry = () => {

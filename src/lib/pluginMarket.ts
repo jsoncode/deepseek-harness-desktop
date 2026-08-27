@@ -6,8 +6,11 @@
  * 搜索策略：服务端关键词分页搜索 —— 保持 page/pageSize 参数，由调用方负责提交时机与分页重置。
  * 全部采用字段级精准匹配，规避平台全文分词造成的模糊结果（实测裸词 dsh-jenkins
  * 会被 npm 按 "-" 分词全文匹配命中 1 万+ 条）：
- * - NPM：不整体替换关键词，而是在基础词 keywords:dsh-plugin 上叠加三路字段匹配
- *   （name/author/maintainer），并发请求后客户端并集去重、排序再截断为一页条数；
+ * - NPM：普通关键词走三路并集（并发）：①author: ②maintainer: 由服务端硬过滤，
+ *   命中的包整体排在最前；③name: 不做硬过滤（实测 total 不变）但参与相关度加权、
+ *   会把名称命中浮到本路最前，取 250 条大窗口后由客户端按包名/发布者/维护者
+ *   归一化包含严格校验兜底。并集去重后整体排序、客户端切片分页，同一关键词复用
+ *   缓存结果（total 为过滤后精确总数）；空词/自带限定语法仍为单路服务端分页；
  * - GitHub：在基础词 topic:dsh-plugin 上先查仓库名（in:name），当页不足一整页时
  *   才补发 author:<词> 一路（节省未认证约 10 次/分钟 的限流配额），同样并集去重截断；
  * - 未输入关键词时使用默认全集词（dsh-plugin）；自带限定语法（keywords:/topic:/in: 等）原样透传。
@@ -55,23 +58,44 @@ function hasSearchQualifier(q: string): boolean {
   return /^[a-z][a-z0-9_-]*:/i.test(q.trim());
 }
 
-/** NPM 联合搜索的字段路：普通关键词在三路中任一命中即展示（客户端并集去重） */
-const NPM_UNION_FIELDS = ["name", "author", "maintainer"] as const;
+/** npm 搜索单次返回的候选窗口上限（接口允许的最大 size，用于候选路一次拉足） */
+const NPM_CANDIDATE_SIZE = 250;
+
+/** 归一化：小写并去掉 -/_/. 与空白 —— dsh_jenkins / DshJenkins / dsh-jenkins 同形 */
+function normalizeTerm(s: string): string {
+  return s.toLowerCase().replace(/[-_.\s]/g, "");
+}
+
+/** NPM 并集搜索的字段路：author/maintainer 命中置前，name 路兜底候选 */
+type NpmRouteField = "author" | "maintainer" | "name";
+interface NpmRoute {
+  field: NpmRouteField;
+  text: string;
+}
 
 /**
- * 组装 NPM 多路搜索词（结果取并集）：
- * - 空词 → 单路返回默认全集词 keywords:dsh-plugin；
- * - 自带限定语法原样透传（单路）；
- * - 普通词 → 在基础词 keywords:dsh-plugin 上分别叠加 name/author/maintainer 三路，
- *   如「jenkins」产生 keywords:dsh-plugin name:jenkins / author:jenkins / maintainer:jenkins，
- *   多词短语以引号整体匹配（如 name:"a b"）；三路由 fetchNpmPage 并发请求后合并去重。
+ * 组装 NPM 搜索计划：
+ * - 空词 / 自带限定语法 → 单路服务端分页（plain）；
+ * - 普通词 → 三路并集（exact，并发请求后客户端合并）：
+ *   ①author: ②maintainer: 两路由服务端硬过滤，命中的包整体排在最前；
+ *   ③name: 不做硬过滤（实测 total 不变）但参与相关度加权、名称命中会浮到本路最前，
+ *   取大窗口后由客户端按包名/发布者/维护者归一化包含严格校验兜底。
+ *   多词短语以引号整体匹配。
  */
-function buildNpmTexts(query: string): string[] {
+function buildNpmRoutes(query: string): { exact: false; plain: string } | { exact: true; routes: NpmRoute[] } {
   const term = query.trim();
-  if (!term) return [DEFAULT_TERMS.npm];
-  if (hasSearchQualifier(term)) return [term];
+  if (!term) return { exact: false, plain: DEFAULT_TERMS.npm };
+  if (hasSearchQualifier(term)) return { exact: false, plain: term };
   const word = /\s/.test(term) ? `"${term.replace(/"/g, "")}"` : term;
-  return NPM_UNION_FIELDS.map((field) => `${DEFAULT_TERMS.npm} ${field}:${word}`);
+  const base = DEFAULT_TERMS.npm;
+  return {
+    exact: true,
+    routes: [
+      { field: "author", text: `${base} author:${word}` },
+      { field: "maintainer", text: `${base} maintainer:${word}` },
+      { field: "name", text: `${base} name:${word}` },
+    ],
+  };
 }
 
 /**
@@ -154,6 +178,7 @@ interface NpmObject {
     date?: string;
     description?: string | null;
     publisher?: { username?: string };
+    maintainers?: Array<{ username?: string }>;
   };
 }
 
@@ -177,10 +202,9 @@ function mapNpmObject(o: NpmObject): MarketPlugin {
 
 /**
  * 按关键词拉取一页市场列表：
- * - 搜索词组装规则见 buildNpmTexts / buildGithubPrimaryQ 与文件头注释（全部精准匹配）；
- * - NPM：name/author/maintainer 三路并发请求，按包名并集去重后客户端排序再截断一页；
- *   个别路失败自动降级为其余路的结果，只有全部失败才抛错（total 取各路最大值，见
- *   fetchNpmPage 内注释——npm 接口对限定符做加权匹配而非硬过滤）；
+ * - 搜索词组装规则见 buildNpmRouteTexts / buildGithubPrimaryQ 与文件头注释（全部精准匹配）；
+ * - NPM：双路并发（维护者路服务端硬过滤 + 候选路客户端包名校验），并集去重后整体
+ *   排序、按页切片，total 为过滤后精确总数；个别路失败自动降级为另一路的结果；
  * - GitHub：先走 in:name 主路，仅当主路当页不足一整页且存在 author 补充路时补发，
  *   并集去重后截断；stars/date 仍由服务端排序，total 为各已发路 total 之和（近似值）；
  * - 调用方保证翻页/换词时重置 page，避免请求越界页导致搜不到结果。
@@ -253,52 +277,114 @@ async function fetchGithubPage(query: string, page: number, sort: MarketSort): P
   return { total, items };
 }
 
-function buildNpmUrl(text: string, from: number): string {
+function buildNpmUrl(text: string, size: number, from: number): string {
   return (
     `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +
-    `&size=${NPM_PAGE_SIZE}&from=${from}`
+    `&size=${size}&from=${from}`
   );
 }
 
-async function fetchNpmPage(query: string, page: number, sort: MarketSort): Promise<MarketPage> {
-  const texts = buildNpmTexts(query);
-  const from = (page - 1) * NPM_PAGE_SIZE;
-  // 三路并发请求；个别路失败静默降级（npm 接口偶发抖动时不至于整页空白）
+/** NPM 客户端严格校验：包名归一化包含，或发布者/维护者用户名命中（归一化包含） */
+function npmObjectMatches(o: NpmObject, term: string): boolean {
+  const t = normalizeTerm(term);
+  if (!t) return true;
+  const name = o.package?.name;
+  if (name && normalizeTerm(name).includes(t)) return true;
+  const users = [
+    o.package?.publisher?.username ?? "",
+    ...(o.package?.maintainers ?? []).map((m) => m.username ?? ""),
+  ];
+  return users.some((u) => u && normalizeTerm(u).includes(t));
+}
+
+/** 排序副本：weekly/date 在客户端排；默认（相关度）不动 */
+function sortNpmItems(items: MarketPlugin[], sort: MarketSort): MarketPlugin[] {
+  const list = [...items];
+  if (sort === "weekly") list.sort((a, b) => (b.weekly ?? -1) - (a.weekly ?? -1));
+  else if (sort === "date")
+    list.sort(
+      (a, b) => new Date(b.releasedAt ?? 0).getTime() - new Date(a.releasedAt ?? 0).getTime(),
+    );
+  return list;
+}
+
+interface NpmQueryCache {
+  key: string;
+  /** 过滤后的完整结果集：排序随每次调用重做，切片分页直接取窗口 */
+  list: MarketPlugin[];
+}
+
+/**
+ * 普通关键词的过滤结果缓存：客户端过滤使服务端 from 分页失真（跨页有洞），
+ * 因此一次拉足候选窗口并缓存过滤后的全集，翻页/改排序直接复用不重发请求；
+ * 换关键词即整条替换。
+ */
+let npmCache: NpmQueryCache | null = null;
+
+async function fetchJsonNpm(text: string, size: number, from: number) {
+  return fetchJson<{ total?: number; objects?: NpmObject[] }>(buildNpmUrl(text, size, from));
+}
+
+async function loadNpmExactList(query: string): Promise<MarketPlugin[]> {
+  const plan = buildNpmRoutes(query);
+  if (!plan.exact) return [];
+  // 三路并发：author/maintainer 路由服务端硬过滤，name 路只提供相关度排序，
+  // 拉满窗口后交给客户端校验。个别路失败静默降级，全部失败才抛错。
   const settled = await Promise.allSettled(
-    texts.map((text) => fetchJson<{ total?: number; objects?: NpmObject[] }>(buildNpmUrl(text, from))),
+    plan.routes.map((r) => fetchJsonNpm(r.text, NPM_CANDIDATE_SIZE, 0)),
   );
 
   let okCount = 0;
   let lastError: unknown;
-  // 实测：npm 接口对限定符做加权匹配而非硬过滤，各字段路的 total 均为同一模糊基数，
-  // 求和会虚高约 N 倍，故取最大值近似并集总量；子项仍按三路并集去重。
-  let total = -1;
-  // 并集去重：按包名保留首次出现（name 路 → author 路 → maintainer 路）
   const seen = new Set<string>();
-  const merged: MarketPlugin[] = [];
-  for (const r of settled) {
+  // 两桶合并（去重后 author/maintainer 桶整体置前）：
+  // - 属主桶：author:/maintainer: 服务端已过滤出「属主与关键词匹配」的包，无需再校验；
+  // - 名称桶：接口忽略 name: 过滤会混入无关包，按包名/发布者/维护者归一化包含严格校验。
+  const ownerItems: MarketPlugin[] = [];
+  const nameItems: MarketPlugin[] = [];
+  settled.forEach((r, i) => {
     if (r.status !== "fulfilled") {
       lastError = r.reason;
-      continue;
+      return;
     }
     okCount++;
-    total = Math.max(total, r.value.total ?? 0);
+    const field = plan.routes[i].field;
     for (const o of r.value.objects ?? []) {
       const m = mapNpmObject(o);
       if (seen.has(m.key)) continue;
+      if (field === "name") {
+        if (!npmObjectMatches(o, query.trim())) continue;
+        nameItems.push(m);
+      } else {
+        ownerItems.push(m);
+      }
       seen.add(m.key);
-      merged.push(m);
     }
-  }
+  });
   if (okCount === 0) throw lastError;
+  return [...ownerItems, ...nameItems];
+}
 
-  // NPM 不支持全量排序：对合并后的并集排序，再截断为一页条数
-  if (sort === "weekly") merged.sort((a, b) => (b.weekly ?? -1) - (a.weekly ?? -1));
-  else if (sort === "date")
-    merged.sort(
-      (a, b) => new Date(b.releasedAt ?? 0).getTime() - new Date(a.releasedAt ?? 0).getTime(),
-    );
-  return { total, items: merged.slice(0, NPM_PAGE_SIZE) };
+async function fetchNpmPage(query: string, page: number, sort: MarketSort): Promise<MarketPage> {
+  const plan = buildNpmRoutes(query);
+
+  // 空词 / 自带限定语法：单路、结果即全集，保持原来的服务端分页语义
+  if (!plan.exact) {
+    const n = await fetchJsonNpm(plan.plain, NPM_PAGE_SIZE, (page - 1) * NPM_PAGE_SIZE);
+    const items = (n.objects ?? []).map(mapNpmObject);
+    return { total: n.total ?? 0, items: sortNpmItems(items, sort).slice(0, NPM_PAGE_SIZE) };
+  }
+
+  // 普通关键词：取合并全集（缓存），total 精确；翻页/改排序不再发请求
+  const key = query.trim().toLowerCase();
+  if (!npmCache || npmCache.key !== key) {
+    npmCache = { key, list: await loadNpmExactList(query) };
+  }
+  const sorted = sortNpmItems(npmCache.list, sort);
+  return {
+    total: npmCache.list.length,
+    items: sorted.slice((page - 1) * NPM_PAGE_SIZE, page * NPM_PAGE_SIZE),
+  };
 }
 
 /** 数字格式化：1.2K / 3.4M；空值显示 — */

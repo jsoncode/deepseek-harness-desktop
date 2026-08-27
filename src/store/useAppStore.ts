@@ -57,6 +57,9 @@ interface AppStore {
   pluginLoadError: PluginLoadError | null;
   error: string | null;
   initialized: boolean;
+  /** 新一轮启动流程的序号：每次进入 installing/starting 时递增，
+   *  供 web-exit 事件区分「当前流程退出」与「复核期间用户重新发起的陈旧退出」 */
+  startSeq: number;
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
@@ -271,6 +274,11 @@ export const useAppStore = create<AppStore>((set, get) => {
     });
 
     onEvent<ExitPayload>(EVENTS.webExit, (p) => {
+      // 记录事件到达时的启动序号：复核期间若用户停止/重新发起启动，序号会变化，
+      // 据此把「当前流程的退出」与「复核期间新流程的陈旧退出」区分开——
+      // 旧实现按 phase 判断（installing/starting 一律吞掉），会把当前启动流程
+      // 的失败也吞掉，导致服务意外停止后永远卡在「启动中」且重启/停止都不可操作。
+      const seqAtExit = get().startSeq;
       set({ childRunning: false });
       if (get().phase === "stopped") return;
       // 双保险复核：dsh web 的服务进程可能独立于壳进程存活（派生脱离父链），
@@ -296,15 +304,17 @@ export const useAppStore = create<AppStore>((set, get) => {
         } catch {
           /* 复核失败：按服务不可用处理 */
         }
-        // 复核等待期间用户可能已停止/重新发起启动：陈旧事件直接忽略
         const cur = get();
-        if (cur.phase === "stopped" || cur.phase === "installing" || cur.phase === "starting")
-          return;
+        if (cur.phase === "stopped") return;
+        // 复核期间用户已停止/重新发起启动：启动序号变化即陈旧事件，直接忽略
+        if (cur.startSeq !== seqAtExit) return;
         if (cur.phase === "running") {
           get().appendLog("error", `dsh web 进程已退出（退出码 ${p.code}）`);
           set({ phase: "stopped", serviceRunning: false });
           return;
         }
+        // 当前启动流程（installing/starting）的退出：如实上报失败，
+        // 由启动页/重启页给出重试入口，而不是永远停留在「启动中」
         get().appendLog("error", `❌ dsh web 启动失败（退出码 ${p.code}）`);
         set({ phase: "error", error: `dsh web 启动失败，退出码 ${p.code}` });
       })();
@@ -362,6 +372,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     error: null,
     initialized: false,
     envInstallTool: null,
+    startSeq: 0,
 
     appendLog: (stream, text) => {
       const entry: LogEntry = {
@@ -729,8 +740,12 @@ export const useAppStore = create<AppStore>((set, get) => {
   };
 });
 
-// url/phase 变化时启停健康轮询（模块加载完成后再挂订阅，避免 TDZ）
+// url/phase 变化时启停健康轮询；进入 installing/starting 时递增启动序号
+// （模块加载完成后再挂订阅，避免 TDZ）
 useAppStore.subscribe((s, prev) => {
   if (s.url !== prev.url || s.phase !== prev.phase) syncHealthPolling();
+  if (s.phase !== prev.phase && (s.phase === "installing" || s.phase === "starting")) {
+    useAppStore.setState({ startSeq: prev.startSeq + 1 });
+  }
 });
 syncHealthPolling(); // HMR/热启动兜底
