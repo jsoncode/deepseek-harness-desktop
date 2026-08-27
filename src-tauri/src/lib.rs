@@ -203,6 +203,14 @@ pub fn run() {
                 .initialization_script_for_all_frames(THEME_SYNC_BRIDGE)
                 .build()?;
 
+            // 托盘悬浮提示应用名：优先 tauri.conf.json 的 productName，
+            // 回退包名。运行期不变，取一次即可。
+            let app_name = app
+                .config()
+                .product_name
+                .clone()
+                .unwrap_or_else(|| app.package_info().name.clone());
+
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
             let browser = MenuItem::with_id(app, "browser", "浏览器中打开", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", quit_label(), true, None::<&str>)?;
@@ -211,6 +219,7 @@ pub fn run() {
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
+                .tooltip(tray_tooltip_text(&app_name))
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main_window(app),
                     "browser" => open_service_in_browser(app),
@@ -301,24 +310,15 @@ fn open_service_in_browser(app: &tauri::AppHandle) {
     }
 }
 
-/// 托盘悬浮提示文案：第一行应用名称（调试构建追加「（调试）」，与托盘菜单
+/// 托盘悬浮提示文案：应用名称；调试构建追加「（调试）」，与托盘菜单
 /// 「退出调试」同理——调试/正式实例经 6088/3080 端口隔离可能同时驻留托盘，
-/// 见 quit_label）；第二行服务运行状态。
-///
-/// 参数取原始标量而非 &AppState：纯数据输入便于单测，也让本函数不依赖
-/// managed state 的生命周期。
-fn tray_tooltip_text(app_name: &str, service_url: Option<&str>, child_running: bool) -> String {
-    let name = if cfg!(debug_assertions) {
+/// 见 quit_label。
+fn tray_tooltip_text(app_name: &str) -> String {
+    if cfg!(debug_assertions) {
         format!("{app_name}（调试）")
     } else {
         app_name.to_string()
-    };
-    let status = match service_url {
-        Some(url) => format!("服务运行中 · {url}"),
-        None if child_running => "服务启动中…".to_string(),
-        None => "服务未运行".to_string(),
-    };
-    format!("{name}\n{status}")
+    }
 }
 
 #[cfg(test)]
@@ -327,28 +327,9 @@ mod tray_tooltip_tests {
 
     const NAME: &str = "DeepSeek Harness Desktop";
 
-    // cargo test 默认 debug 构建，cfg!(debug_assertions) 恒真，故第一行均带「（调试）」。
+    // cargo test 默认 debug 构建，cfg!(debug_assertions) 恒真，故断言带「（调试）」。
     #[test]
-    fn 运行中_显示服务地址() {
-        assert_eq!(
-            tray_tooltip_text(NAME, Some("http://127.0.0.1:3080"), true),
-            format!("{NAME}（调试）\n服务运行中 · http://127.0.0.1:3080")
-        );
-    }
-
-    #[test]
-    fn 子进程已起但url未探测到_显示启动中() {
-        assert_eq!(
-            tray_tooltip_text(NAME, None, true),
-            format!("{NAME}（调试）\n服务启动中…")
-        );
-    }
-
-    #[test]
-    fn 全部停止_显示未运行() {
-        assert_eq!(
-            tray_tooltip_text(NAME, None, false),
-            format!("{NAME}（调试）\n服务未运行")
-        );
+    fn 调试构建返回名称加后缀() {
+        assert_eq!(tray_tooltip_text(NAME), format!("{NAME}（调试）"));
     }
 }
