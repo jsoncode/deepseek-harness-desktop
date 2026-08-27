@@ -692,10 +692,15 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   min-width: 0;
 }
 
-/* 搜索框占满第一行（上限 560px） */
+/* 第一行：搜索框占满（上限 560px）+ 右侧搜索按钮 */
 .plugin-manager-modal .mk-search {
   width: 100%;
   max-width: 560px;
+}
+
+/* 搜索按钮：紧跟搜索框右侧，固定尺寸不被压缩 */
+.plugin-manager-modal .mk-search-btn {
+  flex: none;
 }
 
 /* 第二行右侧分组：排序 + 手动安装 靠右排列 */

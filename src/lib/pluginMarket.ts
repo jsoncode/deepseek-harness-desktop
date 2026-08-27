@@ -3,11 +3,13 @@
  * 打包版 WebView 的 CSP connect-src 不含外网域名，前端直连会被拦截，
  * 因此桌面端经 Rust 命令 http_get_json 代理请求；浏览器预览模式保留原生 fetch。
  *
- * 搜索策略：服务端关键词分页搜索 —— 保持 page/pageSize 参数，由调用方负责防抖与分页重置。
+ * 搜索策略：服务端关键词分页搜索 —— 保持 page/pageSize 参数，由调用方负责提交时机与分页重置。
  * 全部采用字段级精准匹配，规避平台全文分词造成的模糊结果（实测裸词 dsh-jenkins
  * 会被 npm 按 "-" 分词全文匹配命中 1 万+ 条）：
- * - NPM：keywords:<词> 关键字字段精确匹配；多词短语以引号整体匹配 keywords:"a b"；
- * - GitHub：<词> in:name 仅匹配仓库名；
+ * - NPM：不整体替换关键词，而是在基础词 keywords:dsh-plugin 上叠加三路字段匹配
+ *   （name/author/maintainer），并发请求后客户端并集去重、排序再截断为一页条数；
+ * - GitHub：在基础词 topic:dsh-plugin 上先查仓库名（in:name），当页不足一整页时
+ *   才补发 author:<词> 一路（节省未认证约 10 次/分钟 的限流配额），同样并集去重截断；
  * - 未输入关键词时使用默认全集词（dsh-plugin）；自带限定语法（keywords:/topic:/in: 等）原样透传。
  */
 import { api, tauri } from "./tauri";
@@ -53,30 +55,45 @@ function hasSearchQualifier(q: string): boolean {
   return /^[a-z][a-z0-9_-]*:/i.test(q.trim());
 }
 
+/** NPM 联合搜索的字段路：普通关键词在三路中任一命中即展示（客户端并集去重） */
+const NPM_UNION_FIELDS = ["name", "author", "maintainer"] as const;
+
 /**
- * 组装 NPM 精准搜索词：
- * - 单个无限定符的词 → keywords:<词>，关键字字段精确匹配（如 dsh-jenkins 仅命中同名插件）；
- * - 多词短语 → keywords:"a b"，去掉内部引号后作为整体关键字短语匹配；
- * - 自带限定语法原样透传；空词回退 dsh-plugin 默认全集词。
+ * 组装 NPM 多路搜索词（结果取并集）：
+ * - 空词 → 单路返回默认全集词 keywords:dsh-plugin；
+ * - 自带限定语法原样透传（单路）；
+ * - 普通词 → 在基础词 keywords:dsh-plugin 上分别叠加 name/author/maintainer 三路，
+ *   如「jenkins」产生 keywords:dsh-plugin name:jenkins / author:jenkins / maintainer:jenkins，
+ *   多词短语以引号整体匹配（如 name:"a b"）；三路由 fetchNpmPage 并发请求后合并去重。
  */
-function buildNpmText(query: string): string {
+function buildNpmTexts(query: string): string[] {
   const term = query.trim();
-  if (!term) return DEFAULT_TERMS.npm;
-  if (hasSearchQualifier(term)) return term;
-  if (/\s/.test(term)) return `keywords:"${term.replace(/"/g, "")}"`;
-  return `keywords:${term}`;
+  if (!term) return [DEFAULT_TERMS.npm];
+  if (hasSearchQualifier(term)) return [term];
+  const word = /\s/.test(term) ? `"${term.replace(/"/g, "")}"` : term;
+  return NPM_UNION_FIELDS.map((field) => `${DEFAULT_TERMS.npm} ${field}:${word}`);
 }
 
 /**
- * 组装 GitHub 精准搜索词：
- * - 无限定符的词 → <词> in:name，仅匹配仓库名（避免描述/README 带来的模糊命中）；
+ * 组装 GitHub 主路查询词：
+ * - 无限定符的词 → topic:dsh-plugin <词> in:name，仅匹配仓库名；
  * - 自带限定语法原样透传；空词回退 dsh-plugin 默认全集词。
  */
-function buildGithubQ(query: string): string {
+function buildGithubPrimaryQ(query: string): string {
   const term = query.trim();
   if (!term) return DEFAULT_TERMS.github;
   if (hasSearchQualifier(term)) return term;
-  return `${term} in:name`;
+  return `${DEFAULT_TERMS.github} ${term} in:name`;
+}
+
+/**
+ * GitHub 补充路查询词 author:<词>（匹配仓库属主/组织）：
+ * 仅普通关键词需要补充；空词或自带限定语法时返回 null（不补发，节省未认证限流配额）。
+ */
+function buildGithubAuthorQ(query: string): string | null {
+  const term = query.trim();
+  if (!term || hasSearchQualifier(term)) return null;
+  return `${DEFAULT_TERMS.github} author:${term}`;
 }
 
 /** GitHub 未认证搜索限流（约 10 次/分钟）时抛出，UI 显示友好提示 */
@@ -160,8 +177,12 @@ function mapNpmObject(o: NpmObject): MarketPlugin {
 
 /**
  * 按关键词拉取一页市场列表：
- * - 搜索词组装规则见 buildNpmText / buildGithubQ 与文件头注释（全部精准匹配）；
- *   GitHub stars/date 走服务端排序，NPM 接口不支持全量排序，在客户端排当前页；
+ * - 搜索词组装规则见 buildNpmTexts / buildGithubPrimaryQ 与文件头注释（全部精准匹配）；
+ * - NPM：name/author/maintainer 三路并发请求，按包名并集去重后客户端排序再截断一页；
+ *   个别路失败自动降级为其余路的结果，只有全部失败才抛错（total 取各路最大值，见
+ *   fetchNpmPage 内注释——npm 接口对限定符做加权匹配而非硬过滤）；
+ * - GitHub：先走 in:name 主路，仅当主路当页不足一整页且存在 author 补充路时补发，
+ *   并集去重后截断；stars/date 仍由服务端排序，total 为各已发路 total 之和（近似值）；
  * - 调用方保证翻页/换词时重置 page，避免请求越界页导致搜不到结果。
  */
 export async function fetchMarketPage(
@@ -170,44 +191,114 @@ export async function fetchMarketPage(
   page: number,
   sort: MarketSort,
 ): Promise<MarketPage> {
-  if (source === "github") {
-    const ghQ = buildGithubQ(query);
-    const sortParam =
-      sort === "stars"
-        ? "&sort=stars&order=desc"
-        : sort === "date"
-          ? "&sort=updated&order=desc"
-          : "";
-    const url =
-      `https://api.github.com/search/repositories?q=${encodeURIComponent(ghQ)}` +
-      `${sortParam}&per_page=${GH_PAGE_SIZE}&page=${page}`;
-    let g: GhSearchResponse;
+  if (source === "github") return fetchGithubPage(query, page, sort);
+  return fetchNpmPage(query, page, sort);
+}
+
+function buildGithubUrl(q: string, sortParam: string, page: number): string {
+  return (
+    `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}` +
+    `${sortParam}&per_page=${GH_PAGE_SIZE}&page=${page}`
+  );
+}
+
+/** 单次 GitHub 搜索：403 → 转为友好的限流提示错误 */
+async function fetchGithubSearch(
+  q: string,
+  sortParam: string,
+  page: number,
+): Promise<GhSearchResponse> {
+  try {
+    return await fetchJson<GhSearchResponse>(buildGithubUrl(q, sortParam, page));
+  } catch (e) {
+    if (String(e).includes("403")) throw new RateLimitedError("GitHub 搜索速率受限，请稍后再试");
+    throw e;
+  }
+}
+
+async function fetchGithubPage(query: string, page: number, sort: MarketSort): Promise<MarketPage> {
+  const sortParam =
+    sort === "stars"
+      ? "&sort=stars&order=desc"
+      : sort === "date"
+        ? "&sort=updated&order=desc"
+        : "";
+  // 主路先行；未认证限流配额宝贵（~10 次/分钟），仅当主路当页不足一整页时才补发 author 路
+  const primary = await fetchGithubSearch(buildGithubPrimaryQ(query), sortParam, page);
+  const authorQ = buildGithubAuthorQ(query);
+  const responses: GhSearchResponse[] = [primary];
+  if (authorQ && (primary.items?.length ?? 0) < GH_PAGE_SIZE) {
     try {
-      g = await fetchJson(url);
-    } catch (e) {
-      if (String(e).includes("403")) throw new RateLimitedError("GitHub 搜索速率受限，请稍后再试");
-      throw e;
+      responses.push(await fetchGithubSearch(authorQ, sortParam, page));
+    } catch {
+      // 补充路失败可忽略：主路结果照常展示
     }
-    return {
-      total: g.total_count ?? 0,
-      items: (g.items ?? []).map(mapGhItem),
-    };
   }
 
-  const text = buildNpmText(query);
-  const from = (page - 1) * NPM_PAGE_SIZE;
-  const url =
-    `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +
-    `&size=${NPM_PAGE_SIZE}&from=${from}`;
-  const n = await fetchJson<{ total?: number; objects?: NpmObject[] }>(url);
+  // 并集去重：按仓库 full_name 保留首次出现（in:name 路 → author 路），截断为一页条数
+  const seen = new Set<string>();
+  const items: MarketPlugin[] = [];
+  let total = 0;
+  for (const r of responses) {
+    total += r.total_count ?? 0;
+    for (const it of r.items ?? []) {
+      if (items.length >= GH_PAGE_SIZE) break;
+      const m = mapGhItem(it);
+      if (seen.has(m.key)) continue;
+      seen.add(m.key);
+      items.push(m);
+    }
+    if (items.length >= GH_PAGE_SIZE) break;
+  }
+  return { total, items };
+}
 
-  const items: MarketPlugin[] = (n.objects ?? []).map(mapNpmObject);
-  if (sort === "weekly") items.sort((a, b) => (b.weekly ?? -1) - (a.weekly ?? -1));
+function buildNpmUrl(text: string, from: number): string {
+  return (
+    `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}` +
+    `&size=${NPM_PAGE_SIZE}&from=${from}`
+  );
+}
+
+async function fetchNpmPage(query: string, page: number, sort: MarketSort): Promise<MarketPage> {
+  const texts = buildNpmTexts(query);
+  const from = (page - 1) * NPM_PAGE_SIZE;
+  // 三路并发请求；个别路失败静默降级（npm 接口偶发抖动时不至于整页空白）
+  const settled = await Promise.allSettled(
+    texts.map((text) => fetchJson<{ total?: number; objects?: NpmObject[] }>(buildNpmUrl(text, from))),
+  );
+
+  let okCount = 0;
+  let lastError: unknown;
+  // 实测：npm 接口对限定符做加权匹配而非硬过滤，各字段路的 total 均为同一模糊基数，
+  // 求和会虚高约 N 倍，故取最大值近似并集总量；子项仍按三路并集去重。
+  let total = -1;
+  // 并集去重：按包名保留首次出现（name 路 → author 路 → maintainer 路）
+  const seen = new Set<string>();
+  const merged: MarketPlugin[] = [];
+  for (const r of settled) {
+    if (r.status !== "fulfilled") {
+      lastError = r.reason;
+      continue;
+    }
+    okCount++;
+    total = Math.max(total, r.value.total ?? 0);
+    for (const o of r.value.objects ?? []) {
+      const m = mapNpmObject(o);
+      if (seen.has(m.key)) continue;
+      seen.add(m.key);
+      merged.push(m);
+    }
+  }
+  if (okCount === 0) throw lastError;
+
+  // NPM 不支持全量排序：对合并后的并集排序，再截断为一页条数
+  if (sort === "weekly") merged.sort((a, b) => (b.weekly ?? -1) - (a.weekly ?? -1));
   else if (sort === "date")
-    items.sort(
+    merged.sort(
       (a, b) => new Date(b.releasedAt ?? 0).getTime() - new Date(a.releasedAt ?? 0).getTime(),
     );
-  return { total: n.total ?? 0, items };
+  return { total, items: merged.slice(0, NPM_PAGE_SIZE) };
 }
 
 /** 数字格式化：1.2K / 3.4M；空值显示 — */

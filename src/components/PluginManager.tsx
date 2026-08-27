@@ -153,8 +153,8 @@ interface MkRow {
 
 /**
  * 插件管理：标题栏入口 + 大尺寸插件市场弹框。
- * 市场视图：GitHub/NPM 服务端关键词分页搜索（默认词 dsh-plugin 全集；输入关键词后
- *   防抖换词重搜并重置分页；antd Table 固定操作列）、安装/更新/卸载；
+ * 市场视图：GitHub/NPM 服务端关键词分页搜索（默认词 dsh-plugin 全集；点击搜索按钮
+ *   或回车提交关键词后重搜并重置分页；antd Table 固定操作列）、安装/更新/卸载；
  * 终端视图：流式展示 `dsh plugin` 操作日志，支持终止与后台运行。
  * 视图/tab 切换带方向感穿梭动画。
  */
@@ -187,8 +187,10 @@ export default function PluginManager() {
     all: "",
     installed: "",
   });
-  /** 【所有插件】tab 实际参与请求的搜索词（防抖同步 / 回车直发）；变化即换词重搜 */
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  /** 【所有插件】tab 实际参与请求的搜索词（点击搜索按钮或回车提交）；变化即换词重搜 */
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  /** 搜索序号：每次提交自增——相同关键词的重复提交也能强制重搜（如限流/失败后重试） */
+  const [searchSeq, setSearchSeq] = useState(0);
   /** 当前 tab 生效的搜索关键词 */
   const query = queries[tabMode];
   const [sort, setSort] = useState<MarketSort>("weekly");
@@ -205,21 +207,20 @@ export default function PluginManager() {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 搜索防抖（仅【所有插件】tab 的服务端搜索）：停止输入约 450ms 后才以新关键词发起请求，
-  // 并把分页重置到第 1 页——避免每键一请求触发限流、旧页码越界导致搜索不到。
-  // setDebouncedQuery 与 setPage 同批提交，只会触发一次请求；
-  // 【已安装】tab 使用自己的关键词做本地即时过滤，不走防抖。
-  useEffect(() => {
-    if (queries.all === debouncedQuery) return;
-    const t = window.setTimeout(() => {
-      setDebouncedQuery(queries.all);
-      setPage(1);
-    }, 450);
-    return () => window.clearTimeout(t);
-  }, [queries.all, debouncedQuery]);
+  // 提交搜索（仅【所有插件】tab 的服务端搜索）：只有点击搜索按钮或输入框回车才触发，
+  // 同批把分页重置到第 1 页——避免逐字输入即发请求触发限流、旧页码越界搜不到。
+  // searchSeq 自增让相同关键词的重复提交也能强制重搜（例如限流/失败后的重试）；
+  // setSubmittedQuery/setPage/setSearchSeq 同批提交，只会触发一次请求。
+  // 【已安装】tab 使用自己的关键词做本地即时过滤，不走此流程。
+  const submitSearch = () => {
+    if (tabMode !== "all") return;
+    setSubmittedQuery(queries.all);
+    setPage(1);
+    setSearchSeq((n) => n + 1);
+  };
 
   // 市场数据拉取（仅市场视图 + 所有插件 tab）：服务端关键词分页搜索。
-  // 默认搜索词为 dsh-plugin 全集；输入关键词后整体换词重搜（由 debouncedQuery 驱动）。
+  // 默认搜索词为 dsh-plugin 全集；仅提交搜索后换词重搜（由 submittedQuery / searchSeq 驱动）。
   // 加载态用 useApp 的 message 顶部提示（固定 key 避免叠加），完成即销毁；
   // alive 标志丢弃过期响应，快速连续搜索时只有最后一次生效。
   useEffect(() => {
@@ -233,7 +234,7 @@ export default function PluginManager() {
       content: "正在搜索插件…",
       duration: 0,
     });
-    fetchMarketPage(source, debouncedQuery, page, sort)
+    fetchMarketPage(source, submittedQuery, page, sort)
       .then((p) => {
         if (alive) setMarket(p);
       })
@@ -249,7 +250,7 @@ export default function PluginManager() {
       message.destroy("mk-market-loading");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, view, tabMode, source, sort, page, debouncedQuery]);
+  }, [open, view, tabMode, source, sort, page, submittedQuery, searchSeq]);
 
   // 终端自动滚动到底部
   useEffect(() => {
@@ -530,7 +531,7 @@ export default function PluginManager() {
           <div className="mk-row">
             <Input
               className="mk-search"
-              placeholder="精准搜索：NPM 匹配关键字 / GitHub 匹配仓库名；支持 keywords:/topic:/in: 语法"
+              placeholder="精准搜索：NPM 匹配名称/作者/维护者 · GitHub 匹配仓库名/作者；支持 keywords:/topic:/in: 语法"
               allowClear
               prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
               value={query}
@@ -538,13 +539,17 @@ export default function PluginManager() {
                 const v = e.target.value;
                 setQueries((prev) => ({ ...prev, [tabMode]: v }));
               }}
-              onPressEnter={() => {
-                // 仅【所有插件】tab 需要回车立即重搜（跳过防抖）；【已安装】为本地即时过滤
-                if (tabMode !== "all") return;
-                setDebouncedQuery(queries.all);
-                setPage(1);
-              }}
+              onPressEnter={submitSearch}
             />
+            {/* 搜索按钮：与回车等价的唯一显式提交入口；输入过程不自动触发请求 */}
+            <button
+              className="pm-btn pm-btn-sm mk-search-btn"
+              type="button"
+              disabled={marketLoading}
+              onClick={submitSearch}
+            >
+              搜索
+            </button>
           </div>
           <div className="mk-row">
             <SlidingSeg
@@ -609,7 +614,7 @@ export default function PluginManager() {
                   : "本机尚未安装任何插件"
                 : marketLoading
                   ? "正在搜索…"
-                  : debouncedQuery.trim()
+                  : submittedQuery.trim()
                     ? "没有匹配的插件，可更换关键词重试"
                     : "无匹配插件",
           }}
