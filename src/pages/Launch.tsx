@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
@@ -41,9 +41,6 @@ export default function Launch() {
   }, []);
 
   const busy = phase === "checking" || phase === "installing" || phase === "starting";
-  // 本页发起的启动流程：等待期间留在启动页（状态行实时显示进度），
-  // 结束时按结果分流——成功（running）→ 直接进入服务页；失败（error/stopped）→ 跳终端页查日志
-  const startedHere = useRef(false);
 
   // ---- 环境判定 ----
   const nodeOk = meetsNodeRequirement(nodeVersion);
@@ -169,8 +166,9 @@ export default function Launch() {
       navigate("/terminal");
       return;
     }
-    // 留在启动页等待：不跳终端页；结束后由下方 effect 按结果自动分流
-    startedHere.current = true;
+    // 统一切入启动过渡页：所有启动操作（含安装/降级）都在 loading 页等待，
+    // 不再停留在检查页，避免启动页与服务状态两处渲染造成的状态不同步
+    navigate("/loading");
     if (needsInstall) {
       void installEnvAndStart();
     } else {
@@ -178,13 +176,13 @@ export default function Launch() {
     }
   };
 
-  // 启动结束自动分流：成功 → 服务预览页；失败/报错 → 终端页（日志全程保存在 store，晚进也能看全）
+  // 启动/安装进行中不允许停留在检查页（如重开应用时服务仍在启动、
+  // 插件失败弹框触发的重启）：统一切到启动过渡页，由它监听 phase 完成跳转，
+  // 保证「启动中」的展示只有 loading 页一处来源
   useEffect(() => {
-    if (!startedHere.current) return;
-    if (phase === "installing" || phase === "starting") return; // 仍在进行中
-    startedHere.current = false;
-    if (phase === "running") navigate("/preview");
-    else if (phase === "error" || phase === "stopped") navigate("/terminal");
+    if (phase === "installing" || phase === "starting") {
+      navigate("/loading", { replace: true });
+    }
   }, [phase, navigate]);
 
   let btnText = pnpm11 ? "降级 pnpm 10" : needsInstall ? "安装" : "启动应用";

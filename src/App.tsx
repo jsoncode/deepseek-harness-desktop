@@ -6,8 +6,8 @@ import BottomBar from "./components/BottomBar";
 import PluginFailureModal from "./components/PluginFailureModal";
 import TitleBar from "./components/TitleBar";
 import Launch from "./pages/Launch";
+import Loading from "./pages/Loading";
 import Preview from "./pages/Preview";
-import Restarting from "./pages/Restarting";
 import Terminal from "./pages/Terminal";
 import { useThemeStore } from "./store/useThemeStore";
 import { startNotifyListener } from "./lib/notify";
@@ -76,7 +76,7 @@ export default function App() {
             <div className="app-content" key={reloadKey}>
               <Routes>
                 <Route path="/" element={<Launch />} />
-                <Route path="/restarting" element={<Restarting />} />
+                <Route path="/loading" element={<Loading />} />
                 <Route path="/terminal" element={<Terminal />} />
                 <Route path="/preview" element={<Preview />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

@@ -1722,23 +1722,24 @@ html[data-theme="light"] .mk-op-banner {
 }
 
 /* --------------------------------------------------------------------------
-   重启过渡页（Restarting）：全屏居中 loading + 阶段文案 + 失败重试
+   启动过渡页（Loading）：全屏居中 loading + 阶段文案 + 失败重试
+   （启动/重启共用，文案不区分两者）
    -------------------------------------------------------------------------- */
 
-.restarting {
+.page.loading {
   align-items: center;
   justify-content: center;
   gap: 16px;
 }
 
-/* 复用 .spinner-ring 基类，放大一号突出重启动作 */
-.restarting-spinner {
+/* 复用 .spinner-ring 基类，放大一号突出启动动作 */
+.loading-spinner {
   width: 56px;
   height: 56px;
   border-width: 4px;
 }
 
-.restarting-title {
+.loading-title {
   margin: 0;
   font-size: 22px;
   font-weight: 700;
@@ -1747,21 +1748,21 @@ html[data-theme="light"] .mk-op-banner {
   animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.restarting-sub {
+.loading-sub {
   font-size: 13px;
   color: var(--text-3);
   font-family: var(--mono);
   animation: fadeUp 0.5s 0.06s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.restarting-fail {
+.loading-fail {
   font-size: 44px;
   line-height: 1;
   color: var(--danger);
   animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.restarting-actions {
+.loading-actions {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1769,7 +1770,7 @@ html[data-theme="light"] .mk-op-banner {
 }
 
 /* 失败态操作按钮比启动页次按钮小一号 */
-.restarting-btn {
+.loading-btn {
   padding: 9px 22px;
   font-size: 13.5px;
   border-radius: 999px;

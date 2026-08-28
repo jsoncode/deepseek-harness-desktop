@@ -1,7 +1,6 @@
 import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
-import { CopyOutlined, ExportOutlined, HomeOutlined, SyncOutlined } from "@ant-design/icons";
-import { useNavigate } from "react-router";
+import { CopyOutlined, ExportOutlined, SyncOutlined } from "@ant-design/icons";
 import logo from "../assets/logo.svg";
 import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
@@ -10,10 +9,10 @@ import { useUiStore } from "../store/useUiStore";
 
 /**
  * 顶部标题栏：品牌区 + 服务地址/刷新/浏览器打开 + 窗口控制。
- * 停止/重启服务、查看日志、插件、主题切换已迁移到底部导航条（BottomBar）。
+ * 停止/重启服务、查看日志、插件、主题切换已迁移到底部导航条（BottomBar）；
+ * 不设「返回启动页」入口——回到启动页的唯一路径是停止服务。
  */
 export default function TitleBar() {
-  const navigate = useNavigate();
   const { message } = AntApp.useApp();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
@@ -46,11 +45,6 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        <Tooltip title="返回启动页">
-          <button className="icon-btn" type="button" aria-label="返回启动页" onClick={() => navigate("/")}>
-            <HomeOutlined />
-          </button>
-        </Tooltip>
         <div className="url-pill">
           <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
           <span className="url-value">{url ?? "未检测到服务"}</span>

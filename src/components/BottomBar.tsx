@@ -21,13 +21,14 @@ export default function BottomBar() {
   const startFlow = useAppStore((s) => s.startFlow);
   const [restarting, setRestarting] = useState(false);
 
-  // 重启：立即切入重启过渡页（全屏 loading + 阶段文案），
+  // 重启：立即切入启动过渡页（全屏 loading + 阶段文案，与启动共用，故文案不含「重启」），
   // 先 stop()（杀正在启动的进程树并释放端口，防止新旧进程端口重叠）再重新启动；
-  // 就绪跳转预览 / 失败展示重试，均由重启页监听 phase 完成。
+  // 就绪跳转预览 / 失败展示重试，均由过渡页监听 phase 完成。
   const handleRestart = () => {
     if (restarting) return;
     setRestarting(true);
-    navigate("/restarting");
+    // 携带 restart 标记：过渡页据此把 stopped 阶段文案显示为「正在停止当前服务实例」
+    navigate("/loading", { state: { restart: true } });
     void (async () => {
       try {
         await stop();

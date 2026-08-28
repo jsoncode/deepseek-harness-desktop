@@ -30,7 +30,7 @@
 **首次使用（两步完成）**：
 
 1. 安装 [Node.js](https://nodejs.org/) ≥ 22.19 与 [pnpm](https://pnpm.io/zh-CN/installation)——应用会自动执行 `pnpm add -g @deepseek-ai/dsh@latest` 安装 DSH 并启动本地服务；
-2. 打开应用，点击「启动应用」手动启动服务（启动页展示 dsh CLI 版本与安装/启动进度），服务就绪后自动打开服务页面。
+2. 打开应用，点击「启动应用」手动启动服务（统一进入启动过渡页展示检测/安装/启动进度），服务就绪后自动打开服务页面。
 
 > - Windows 若提示 SmartScreen，请选择「更多信息 → 仍要运行」。
 > - macOS 应用未签名，首次打开需在「系统设置 → 隐私与安全性」中点击「仍要打开」，或右键应用选择「打开」。
@@ -121,7 +121,8 @@ pnpm release:tag-only      # 仅给当前版本打标签推送（不 bump）
 
 | 页面 | 说明 |
 | --- | --- |
-| `/` 启动页 | 居中 logo + 环境预检卡片（Node.js / pnpm / dsh CLI 版本）+ 主按钮。已有服务运行时显示 **打开应用**，否则显示 **启动应用**（手动点击后才启动，不在进入页面时自动启动）。 |
+| `/` 启动页 | 居中 logo + 环境预检卡片（Node.js / pnpm / dsh CLI 版本）+ 主按钮。已有服务运行时显示 **打开应用**，否则显示 **启动应用**（手动点击后才启动，不在进入页面时自动启动）；停止服务后回到本页。 |
+| `/loading` 启动过渡页 | 所有启动/重启操作统一进入：全屏 loading 按阶段展示检测环境 → 安装依赖 → 启动服务，就绪自动进入预览页；失败给出重试 / 查看日志 / 返回启动页。 |
 | `/terminal` 终端页 | 流式输出全局安装（`pnpm add -g @deepseek-ai/dsh@latest`）与 `dsh web` 启动日志；进入页面不会自动启动服务，仅查看日志。 |
 | `/preview` 预览页 | iframe 内嵌本地服务，支持刷新 / 复制地址 / 浏览器打开；服务断连时标题栏指示灯变红。 |
 
@@ -135,7 +136,7 @@ Tauri 2 · Rust · Vite 8 · React 19 · Ant Design 6 · React Router · Zustand
 
 ```
 src/                前端（React + Zustand + React Router）
-  pages/            Launch / Terminal / Preview
+  pages/            Launch / Loading / Terminal / Preview
   store/            应用状态机与事件接线
   lib/tauri.ts      Tauri invoke/event 桥接
 src-tauri/          Rust 后端
