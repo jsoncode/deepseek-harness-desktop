@@ -793,11 +793,20 @@ export default function PluginManagerPanel() {
                   className="pm-btn danger"
                   type="button"
                   disabled={running}
-                  onClick={() => {
+                  onClick={async () => {
                     const row = detailRow;
                     setDetailRow(null);
-                    // 详情页已明确展示插件信息与安装状态，点击即卸载（后台执行），不再二次确认
-                    void startPluginOp("remove", row.name);
+                    // 卸载只移除 bundles 并登记待清理依赖；dependencies 与
+                    // node_modules 保持不动（服务运行中卸载不会崩溃），残留
+                    // 依赖在下次启动 pnpm install 时统一清理
+                    try {
+                      await api.removePlugin(row.name);
+                      message.success(`已移除插件 ${row.name}，残留依赖将在下次启动时清理`);
+                      void refreshStatus();
+                      void refreshPluginVersions();
+                    } catch (e) {
+                      message.error(`移除插件失败：${e instanceof Error ? e.message : String(e)}`);
+                    }
                   }}
                 >
                   卸载

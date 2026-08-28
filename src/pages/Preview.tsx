@@ -14,6 +14,10 @@ const PLUGIN_FAILED_MSG = "dsh-desktop:plugin-failed";
 const THEME_CHANGE_MSG = "dsh-desktop:theme-change";
 /** 打开指定会话对话框的下发标记（与 src-tauri/src/lib.rs 的 SESSION_OPEN_BRIDGE 对应） */
 const OPEN_SESSION_MSG = "dsh-desktop:open-session";
+/** 桥已在 iframe 内点开目标会话的回执标记（SESSION_OPEN_BRIDGE 回传，用于清空待打开状态） */
+const SESSION_OPEN_ACK_MSG = "dsh-desktop:session-open-acked";
+/** 待打开会话的有效期：超过则视为陈旧丢弃（桥找不到目标或页面未恢复的兜底） */
+const PENDING_OPEN_TTL_MS = 60_000;
 
 /**
  * 从插件加载失败的错误项中提取插件名：
@@ -64,15 +68,21 @@ export default function Preview() {
   }, [initialized, init]);
 
   // 系统通知点击待打开的会话：iframe 就绪后 postMessage 给 SESSION_OPEN_BRIDGE，
-  // 由其在 dsh web 内定位该会话行并模拟点击（打开对应会话对话框）
+  // 由其在 dsh web 内定位该会话行并模拟点击（打开对应会话对话框）。
+  // 发送后**不立即清空**：等桥的 ACK（SESSION_OPEN_ACK_MSG）确认已点开，或超过
+  // 有效期丢弃。iframe 重载（onLoad 再次触发，如托盘隐藏期间 WebView2 丢弃页面）
+  // 时会重新下发同一会话——桥对重复消息幂等，多余点击无害。
   useEffect(() => {
     if (!iframeLoaded) return;
     const pending = useUiStore.getState().pendingOpenSession;
     if (!pending) return;
+    if (Date.now() - pending.sentAt > PENDING_OPEN_TTL_MS) {
+      clearPendingOpenSession();
+      return;
+    }
     const win = iframeRef.current?.contentWindow;
     if (!win) return;
     win.postMessage({ [OPEN_SESSION_MSG]: true, sessionId: pending.sessionId }, "*");
-    clearPendingOpenSession();
   }, [iframeLoaded, pendingOpenSession, url, reloadKey, clearPendingOpenSession]);
 
   // 无 URL（未检测到服务）时不再展示空态页，直接回启动页处理启动/重试
@@ -93,6 +103,12 @@ export default function Preview() {
       if (!data || typeof data !== "object") return;
       // 只信任预览 iframe 发来的消息，避免页面内其他来源伪造
       if (e.source !== iframeRef.current?.contentWindow) return;
+
+      // 桥已点开目标会话 → 清空待打开状态（此后 iframe 再重载也不会重复下发）
+      if (data[SESSION_OPEN_ACK_MSG] === true) {
+        clearPendingOpenSession();
+        return;
+      }
 
       // 宿主主题变化（iframe 内 body[data-ds-dark-theme] 变化）→ 壳主题跟随
       if (data[THEME_CHANGE_MSG] === true && typeof data.dark === "boolean") {
@@ -125,7 +141,7 @@ export default function Preview() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [message, reportPluginLoadError, setHostTheme]);
+  }, [message, reportPluginLoadError, setHostTheme, clearPendingOpenSession]);
 
   // 无 URL（状态同步中或跳转前的一瞬）时不渲染任何内容，由上方 effect 负责回启动页
   if (!url) return null;

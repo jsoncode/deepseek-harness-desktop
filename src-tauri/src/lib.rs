@@ -159,6 +159,14 @@ const THEME_SYNC_BRIDGE: &str = r##"
 /// dsh web 前端不暴露任何外部入口（无 URL 深链、无 window 控制钩子、会话行 DOM
 /// 不含会话 id，见 docs/superpowers/specs/2026-08-28-notify-click-open-design.md），
 /// 只能在 iframe 内部读 React fiber 拿行对应的 sessionId 再模拟点击。
+///
+/// 2026-08-29 实测修复（多工作区场景）：目标会话所在工作区分组**折叠**时，
+/// 该会话行不在 DOM 里（`deriveGroups` 对折叠组输出空 sessions），直接轮询找不到
+/// 行、点击无果，窗口恢复后停留在最后会话。修复：从任意行沿 fiber 链上溯到
+/// SessionTree 取 `workspaces`（会话 → 工作区映射），找到目标会话所在工作区，
+/// 点击其组头展开，再继续轮询定位行；已展开但目标在「展开其余 N 个会话」折叠
+/// 行之后时，点击该组的溢出展开按钮。另：超时提升到 20s（覆盖托盘隐藏期间
+/// WebView2 可能丢弃页面、恢复时 dsh 冷启动的耗时），成功后向壳回传 ACK。
 const SESSION_OPEN_BRIDGE: &str = r##"
 (() => {
   if (window.top === window) return;         // 只处理预览 iframe（子框架）
@@ -168,20 +176,48 @@ const SESSION_OPEN_BRIDGE: &str = r##"
     Object.defineProperty(window, "__dshSessionOpenBridgeInstalled", { value: true });
   } catch { /* 忽略 */ }
   const MSG = "dsh-desktop:open-session";
-  const MAX_WAIT_MS = 8000;  // 行渲染异步（会话列表就绪 + React 提交），轮询等待
+  const ACK = "dsh-desktop:session-open-acked";
+  const MAX_WAIT_MS = 20000; // 行渲染异步（会话列表就绪 + React 提交，可能含冷启动）
   const TICK_MS = 200;
   const MAX_FIBER_DEPTH = 12;
+  const MAX_PARENT_DEPTH = 40;
+  let revealed = false; // 组展开/溢出按钮只尝试一次（幂等）
+
+  const fiberOf = (el) => {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber"));
+    return key ? el[key] : undefined;
+  };
 
   // 从行元素沿 React fiber 向上找携带 sessionId 的 props：dsh 会话行
   // （SessionNodeItem）的 props.node.id 即会话 id，但 DOM 上并未暴露它。
   // 工作区行 / 搜索结果行的 props 里没有 node.id，会自然跳过。
   const sessionIdOf = (el) => {
-    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber"));
-    if (!key) return undefined;
-    let fiber = el[key];
+    let fiber = fiberOf(el);
     for (let depth = 0; fiber !== null && depth < MAX_FIBER_DEPTH; depth++, fiber = fiber.return) {
       const node = fiber.memoizedProps && fiber.memoizedProps.node;
       if (node !== null && node !== undefined && typeof node.id === "string") return node.id;
+    }
+    return undefined;
+  };
+
+  // 行元素 → 所在工作区分组（ProjectRowItem 的 props.group；未分组桶无 workspaceId，返回 undefined）
+  const groupOf = (el) => {
+    let fiber = fiberOf(el);
+    for (let depth = 0; fiber !== null && depth < MAX_FIBER_DEPTH; depth++, fiber = fiber.return) {
+      const g = fiber.memoizedProps && fiber.memoizedProps.group;
+      if (g !== null && g !== undefined && g.workspaceId && typeof g.label === "string") return g;
+    }
+    return undefined;
+  };
+
+  // 从任意行/组头沿 fiber 链上溯，取 SessionTree 的 workspaces（会话 → 工作区映射）
+  const workspacesOf = (el) => {
+    let fiber = fiberOf(el);
+    for (let depth = 0; fiber !== null && depth < MAX_PARENT_DEPTH; depth++, fiber = fiber.return) {
+      const p = fiber.memoizedProps;
+      if (p !== null && p !== undefined && Array.isArray(p.workspaces) && p.workspaces.length > 0) {
+        return p.workspaces;
+      }
     }
     return undefined;
   };
@@ -192,26 +228,60 @@ const SESSION_OPEN_BRIDGE: &str = r##"
     return t ? (t.textContent || "").trim() : (el.textContent || "").trim();
   };
 
+  const rows = () => Array.from(document.querySelectorAll('[role="treeitem"]'));
+
+  // 目标会话行不在 DOM（其工作区分组折叠，或组已展开但目标在
+  // 「展开其余 N 个会话」折叠行之后）：先把它所在的组展开/溢出按钮点开。
+  const attemptReveal = (sessionId) => {
+    if (revealed) return;
+    revealed = true;
+    const any = rows()[0];
+    if (!any) return;
+    const workspaces = workspacesOf(any);
+    if (!workspaces) return;
+    const ws = workspaces.find((w) => w.sessionIds.includes(sessionId));
+    if (!ws) return;
+    const header = rows().find((el) => {
+      const g = groupOf(el);
+      return g !== undefined && g.workspaceId === ws.workspaceId;
+    });
+    if (!header) return;
+    const g = groupOf(header);
+    if (g && !g.expanded) {
+      header.click(); // 折叠 → 点组头展开（onToggle → setGroupExpanded）
+      return;
+    }
+    // 组已展开但目标仍不可见：点该组的「展开其余 N 个会话」按钮
+    // （section 的直接 button 子元素；组头自己的图标按钮在其内部、无文本）
+    let section = header.parentElement;
+    while (section !== null && section !== document.body) {
+      const overflow = Array.from(section.querySelectorAll(':scope > button'))
+        .find((b) => /展开|更多|show|more|expand/i.test((b.textContent || "").trim()));
+      if (overflow !== undefined) { overflow.click(); return; }
+      section = section.parentElement;
+    }
+  };
+
   const openSession = (sessionId, sessionTitle) => {
     const started = Date.now();
     const tick = () => {
-      const rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
       let target = null;
-      for (const el of rows) {
+      for (const el of rows()) {
         if (sessionIdOf(el) === sessionId) { target = el; break; }
       }
       if (target === null && sessionTitle) {
-        for (const el of rows) {
+        for (const el of rows()) {
           if (rowTitle(el) === sessionTitle) { target = el; break; }
         }
       }
       if (target !== null) {
         target.click(); // 命中行 → 触发 onOpen(id) → sessions.open → 打开该会话对话框
+        try { window.parent.postMessage({ [ACK]: true }, "*"); } catch { /* 忽略 */ }
         return;
       }
+      if (!revealed && Date.now() - started < 2000) attemptReveal(sessionId);
       if (Date.now() - started < MAX_WAIT_MS) setTimeout(tick, TICK_MS);
-      // 超时未找到（侧边栏折叠/rail 图标态、目标会话被隐藏）：优雅降级，
-      // 只保留窗口聚焦，不打扰用户
+      // 超时未找到（rail 图标态等极端场景）：优雅降级，只保留窗口聚焦，不打扰用户
     };
     tick();
   };

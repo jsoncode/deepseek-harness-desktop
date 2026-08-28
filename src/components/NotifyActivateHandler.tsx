@@ -28,7 +28,7 @@ export default function NotifyActivateHandler() {
       // HashRouter 下 window.location.pathname 不是 hash 路由，用 useLocation
       if (location.pathname !== "/preview") navigate("/preview");
       if (!payload.sessionId) return; // 点到 toast 正文：只回预览页
-      useUiStore.getState().requestOpenSession({ sessionId: payload.sessionId });
+      useUiStore.getState().requestOpenSession(payload.sessionId);
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;

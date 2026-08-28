@@ -9,6 +9,11 @@
 //!   按钮（激活参数 = 会话 id），点击后 `emit NOTIFY_ACTIVATE_EVENT` 给前端，
 //!   并把窗口恢复到前台。
 //!
+//! 两种实现都使用 Windows Reminder 场景（`scenario="reminder"`）：toast 预展开
+//! 并保持显示在屏幕右下角，直到用户点击/关闭，不会几秒后自动消失（见
+//! `legacy_toast` 的 `Urgency::Critical` 与 `clickable_toast` 的
+//! `Scenario::Reminder`）。
+//!
 //! **语音播放接入位**就在这里：新增一个实现 [`NotifyChannel`] 的结构体并加进
 //! [`channels`]，上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
 //! 的同名扩展点在 `src/lib/notify.ts`，两边通过 `dispatch` 里的一次 `emit` 对齐。
@@ -100,11 +105,16 @@ impl NotifyChannel for ToastChannel {
 
 /// 原实现：notify-rust → WinRT。summary → toast 标题、body → 第二行文本、
 /// image_path → toast 图片（`.icon()` 只在 XDG 后端生效，logo 必须走 image_path）。
+/// Critical 紧急度映射为 Windows Reminder 场景（见 notify-rust windows.rs 的
+/// urgency → scenario 映射）：toast 预展开并保持显示，直到用户点击/关闭，不自动消失。
 #[cfg(windows)]
 fn legacy_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
-    use notify_rust::Notification;
+    use notify_rust::{Notification, Urgency};
     let mut n = Notification::new();
-    n.app_id(APP_ID).summary(&msg.summary).body(&msg.body);
+    n.app_id(APP_ID)
+        .summary(&msg.summary)
+        .body(&msg.body)
+        .urgency(Urgency::Critical);
     if let Some(p) = logo_path(app) {
         n.image_path(&p.to_string_lossy());
     }
@@ -119,8 +129,13 @@ fn legacy_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
 /// `add_button` + `on_activated`。
 #[cfg(windows)]
 fn clickable_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
-    use tauri_winrt_notification::Toast;
-    let mut toast = Toast::new(APP_ID).title(&msg.summary).text2(&msg.body);
+    use tauri_winrt_notification::{Scenario, Toast};
+    let mut toast = Toast::new(APP_ID)
+        .title(&msg.summary)
+        .text2(&msg.body)
+        // Reminder 场景：toast 预展开并保持显示，直到用户点击/关闭，不自动消失
+        // （与 Legacy 样式的 urgency=Critical 映射一致，见 legacy_toast）
+        .scenario(Scenario::Reminder);
     if let Some(p) = logo_path(app) {
         toast = toast.image(&p, "");
     }

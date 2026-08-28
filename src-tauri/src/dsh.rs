@@ -3,7 +3,7 @@
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::Mutex;
@@ -1872,7 +1872,10 @@ fn read_profile_plugins() -> (bool, Vec<String>) {
     (true, plugins)
 }
 
-/// 从 profile package.json 移除插件：同时删除 bundles 数组项与 dependencies 键，
+/// 从 profile package.json 卸载插件：仅从 bundles 数组移除该名字，并把名字登记到
+/// dsh.profile.pendingRemovals；dependencies 键保留不动——真正的依赖移除推迟到
+/// 下次启动（install_plugins 在 pnpm install 前清理登记表，见
+/// prune_pending_plugin_deps），避免服务运行中直接卸载模块导致服务崩溃。
 /// 写回时保持键顺序（preserve_order）与两空格缩进
 #[tauri::command]
 pub fn remove_plugin(name: String) -> Result<(), String> {
@@ -1884,9 +1887,9 @@ pub fn remove_plugin(name: String) -> Result<(), String> {
         serde_json::from_str(&text).map_err(|e| format!("package.json 解析失败: {e}"))?;
 
     let in_deps = v
-        .get_mut("dependencies")
-        .and_then(|d| d.as_object_mut())
-        .map(|o| o.remove(&name).is_some())
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|o| o.contains_key(name.as_str()))
         .unwrap_or(false);
     let mut in_bundles = false;
     if let Some(arr) = v
@@ -1904,9 +1907,98 @@ pub fn remove_plugin(name: String) -> Result<(), String> {
         return Err(format!("插件 {name} 不在 package.json 中"));
     }
 
+    // 登记待清理依赖：下次启动 pnpm install 前从 dependencies 移除（见
+    // prune_pending_plugin_deps）；本次卸载不动 dependencies，服务不受影响
+    let dsh = v
+        .as_object_mut()
+        .ok_or("package.json 顶层不是对象")?
+        .entry("dsh")
+        .or_insert_with(|| serde_json::json!({}));
+    let profile = dsh
+        .as_object_mut()
+        .ok_or("dsh 字段格式异常")?
+        .entry("profile")
+        .or_insert_with(|| serde_json::json!({}));
+    let pending = profile
+        .as_object_mut()
+        .ok_or("dsh.profile 字段格式异常")?
+        .entry("pendingRemovals")
+        .or_insert_with(|| serde_json::json!([]));
+    let pending = pending
+        .as_array_mut()
+        .ok_or("dsh.profile.pendingRemovals 字段格式异常")?;
+    if !pending.iter().any(|x| x.as_str() == Some(name.as_str())) {
+        pending.push(serde_json::Value::String(name));
+    }
+
     let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
     std::fs::write(&path, out + "\n").map_err(|e| format!("写回 package.json 失败: {e}"))?;
     Ok(())
+}
+
+/// 启动前清理已卸载插件的残留依赖：把 dsh.profile.pendingRemovals 登记的插件名从
+/// dependencies 移除（名字仍存在于 bundles 的视为重新安装/重新激活，保留依赖），
+/// 随后清空登记表。仅编辑 package.json，不触碰 node_modules——随后的 pnpm install
+/// 会顺带卸载这些包。返回是否发生了写回。
+fn prune_pending_plugin_deps(path: &Path) -> Result<bool, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("package.json 解析失败: {e}"))?;
+
+    let pending: Vec<String> = v
+        .get("dsh")
+        .and_then(|d| d.get("profile"))
+        .and_then(|p| p.get("pendingRemovals"))
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if pending.is_empty() {
+        return Ok(false);
+    }
+
+    // 当前仍登记在 bundles 的名字（被重新安装/重新激活）不做依赖清理
+    let bundles: Vec<String> = v
+        .get("dsh")
+        .and_then(|d| d.get("profile"))
+        .and_then(|p| p.get("bundles"))
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut changed = false;
+    if let Some(deps) = v.get_mut("dependencies").and_then(|d| d.as_object_mut()) {
+        for name in &pending {
+            if bundles.iter().any(|b| b == name) {
+                continue; // 已装回 bundles，保留依赖
+            }
+            if deps.remove(name.as_str()).is_some() {
+                changed = true;
+            }
+        }
+    }
+
+    // 清空登记表（无论是否实际移除依赖，本次启动都视为处理完毕）
+    if let Some(profile) = v.get_mut("dsh").and_then(|d| d.get_mut("profile")) {
+        if let Some(obj) = profile.as_object_mut() {
+            if obj.remove("pendingRemovals").is_some() {
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        let out = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
+        std::fs::write(path, out + "\n").map_err(|e| format!("写回 package.json 失败: {e}"))?;
+    }
+    Ok(changed)
 }
 
 /// 插件版本基础信息（纯本地读取；latest 由前端直查 npm registry）
@@ -1997,8 +2089,31 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
     let Some(dir) = profile_dir() else {
         return Ok(());
     };
-    if !dir.join("package.json").is_file() {
+    let path = dir.join("package.json");
+    if !path.is_file() {
         return Ok(());
+    }
+    // 启动时清理卸载残留（见 remove_plugin）：卸载只移除 bundles 并登记
+    // pendingRemovals，此刻服务未运行，从 package.json 移除依赖是安全的，
+    // 随后的 pnpm install 会顺带卸载 node_modules 中的旧包
+    match prune_pending_plugin_deps(&path) {
+        Ok(true) => {
+            emit_log(
+                &app,
+                PLUGIN_INSTALL_LOG_EVENT,
+                "system",
+                "已清理卸载插件的残留依赖（pnpm install 将同步卸载对应模块）",
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            emit_log(
+                &app,
+                PLUGIN_INSTALL_LOG_EVENT,
+                "error",
+                &format!("清理卸载插件的残留依赖失败: {e}"),
+            );
+        }
     }
     let pnpm =
         resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
