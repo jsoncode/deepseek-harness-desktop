@@ -1,5 +1,5 @@
 import { App as AntApp } from "antd";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
@@ -12,6 +12,8 @@ const OPEN_URL_MSG = "dsh-desktop:open-url";
 const PLUGIN_FAILED_MSG = "dsh-desktop:plugin-failed";
 /** iframe 内主题变化上报标记（与 src-tauri/src/lib.rs 的 THEME_SYNC_BRIDGE 对应） */
 const THEME_CHANGE_MSG = "dsh-desktop:theme-change";
+/** 打开指定会话对话框的下发标记（与 src-tauri/src/lib.rs 的 SESSION_OPEN_BRIDGE 对应） */
+const OPEN_SESSION_MSG = "dsh-desktop:open-session";
 
 /**
  * 从插件加载失败的错误项中提取插件名：
@@ -41,12 +43,37 @@ export default function Preview() {
   const reportPluginLoadError = useAppStore((s) => s.reportPluginLoadError);
   const setHostTheme = useThemeStore((s) => s.setHostTheme);
   const reloadKey = useUiStore((s) => s.reloadKey);
+  const pendingOpenSession = useUiStore((s) => s.pendingOpenSession);
+  const clearPendingOpenSession = useUiStore((s) => s.clearPendingOpenSession);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  /** iframe 当前文档是否已加载（onLoad 置 true；url/reloadKey 变化时渲染期复位） */
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+  // iframe 以 `url|reloadKey` 为键重挂载：键变化时在渲染期同步复位就绪位。
+  // 不能放在 effect 里复位——onLoad 可能在 effect 之前触发，复位会覆盖已触发的
+  // onLoad，导致新文档加载完成后就绪位仍是 false、待打开会话永不发送。
+  const iframeSession = `${url}|${reloadKey}`;
+  const [loadedSession, setLoadedSession] = useState(iframeSession);
+  if (loadedSession !== iframeSession) {
+    setLoadedSession(iframeSession);
+    setIframeLoaded(false);
+  }
 
   // 刷新/直接进入本页时同步应用状态
   useEffect(() => {
     if (!initialized) void init();
   }, [initialized, init]);
+
+  // 系统通知点击待打开的会话：iframe 就绪后 postMessage 给 SESSION_OPEN_BRIDGE，
+  // 由其在 dsh web 内定位该会话行并模拟点击（打开对应会话对话框）
+  useEffect(() => {
+    if (!iframeLoaded) return;
+    const pending = useUiStore.getState().pendingOpenSession;
+    if (!pending) return;
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return;
+    win.postMessage({ [OPEN_SESSION_MSG]: true, sessionId: pending.sessionId }, "*");
+    clearPendingOpenSession();
+  }, [iframeLoaded, pendingOpenSession, url, reloadKey, clearPendingOpenSession]);
 
   // 无 URL（未检测到服务）时不再展示空态页，直接回启动页处理启动/重试
   useEffect(() => {
@@ -111,6 +138,7 @@ export default function Preview() {
           ref={iframeRef}
           src={url}
           title="Harness Preview"
+          onLoad={() => setIframeLoaded(true)}
           style={{
             position: "absolute",
             inset: 0,

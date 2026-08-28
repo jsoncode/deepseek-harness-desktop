@@ -27,8 +27,15 @@ ureq = "2"
 # （默认特性即含它），显式列出只为表达「刻意不要 TLS 相关默认项」——本机只连 loopback 明文 ws。
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
-# 系统推送：平台限定是刻意的——notify-rust 默认特性会拉进 Linux 专用的 zbus/dbus，
-# Windows 下既无用也可能编译失败；非 Windows 本期不弹系统通知（见 notify::push）。
-# 版本上界锁在 4.18：4.18 起要求 rustc 1.89，与本 crate 声明的 MSRV 1.77.2 冲突。
+# 系统推送（Windows）：两种 toast 实现并存，由 AppState::notify_style 切换
+# （见 notify.rs 的 ToastStyle；设置页「两种提示切换开关」后续接入）。
+# - notify-rust：原有实现，保留。default-features = false 是刻意的——默认特性会
+#   拉进 Linux 专用的 zbus/dbus；版本上界锁 4.18（4.18 起要求 rustc 1.89，与
+#   本 crate 的 MSRV 1.77.2 冲突）。
+# - tauri-winrt-notification：直连 tauri 维护的 winrt fork，支持 toast 激活回调
+#   （on_activated），实现「点击通知 → 打开对应会话对话框」。notify-rust 4.17 的
+#   Windows 后端不注册激活回调（actions/激活均为 XDG/Linux 专属），故点击感知
+#   必须用它。0.7.3 声明 rust-version 1.74，兼容本 crate 的 MSRV。
 [target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7"
 notify-rust = { version = ">=4.17, <4.18", default-features = false }

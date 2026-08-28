@@ -149,6 +149,82 @@ const THEME_SYNC_BRIDGE: &str = r##"
 })();
 "##;
 
+/// 注入到 webview 所有 frame 的「打开会话」监听脚本：
+/// 用户点击系统通知后，桌面壳把会话 id postMessage 给预览 iframe，本脚本在
+/// iframe 内定位该会话的行并模拟点击，触发 dsh web 前端的 `sessions.open(id)`
+/// ——工作区即切到该会话的对话框。
+///
+/// 为什么必须注入脚本：预览 iframe 是跨源页面（http://127.0.0.1:3080 vs
+/// tauri://localhost），前端受同源策略无法访问 iframe 内部 DOM；且调研结论是
+/// dsh web 前端不暴露任何外部入口（无 URL 深链、无 window 控制钩子、会话行 DOM
+/// 不含会话 id，见 docs/superpowers/specs/2026-08-28-notify-click-open-design.md），
+/// 只能在 iframe 内部读 React fiber 拿行对应的 sessionId 再模拟点击。
+const SESSION_OPEN_BRIDGE: &str = r##"
+(() => {
+  if (window.top === window) return;         // 只处理预览 iframe（子框架）
+  if (window.parent !== window.top) return;  // 只要直接子框架
+  if (window.__dshSessionOpenBridgeInstalled) return;
+  try {
+    Object.defineProperty(window, "__dshSessionOpenBridgeInstalled", { value: true });
+  } catch { /* 忽略 */ }
+  const MSG = "dsh-desktop:open-session";
+  const MAX_WAIT_MS = 8000;  // 行渲染异步（会话列表就绪 + React 提交），轮询等待
+  const TICK_MS = 200;
+  const MAX_FIBER_DEPTH = 12;
+
+  // 从行元素沿 React fiber 向上找携带 sessionId 的 props：dsh 会话行
+  // （SessionNodeItem）的 props.node.id 即会话 id，但 DOM 上并未暴露它。
+  // 工作区行 / 搜索结果行的 props 里没有 node.id，会自然跳过。
+  const sessionIdOf = (el) => {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber"));
+    if (!key) return undefined;
+    let fiber = el[key];
+    for (let depth = 0; fiber !== null && depth < MAX_FIBER_DEPTH; depth++, fiber = fiber.return) {
+      const node = fiber.memoizedProps && fiber.memoizedProps.node;
+      if (node !== null && node !== undefined && typeof node.id === "string") return node.id;
+    }
+    return undefined;
+  };
+
+  // 标题兜底：fiber 结构随 React 升级可能变化，读不到 id 时按标题文本匹配。
+  const rowTitle = (el) => {
+    const t = el.querySelector && el.querySelector('[class*="title"]');
+    return t ? (t.textContent || "").trim() : (el.textContent || "").trim();
+  };
+
+  const openSession = (sessionId, sessionTitle) => {
+    const started = Date.now();
+    const tick = () => {
+      const rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
+      let target = null;
+      for (const el of rows) {
+        if (sessionIdOf(el) === sessionId) { target = el; break; }
+      }
+      if (target === null && sessionTitle) {
+        for (const el of rows) {
+          if (rowTitle(el) === sessionTitle) { target = el; break; }
+        }
+      }
+      if (target !== null) {
+        target.click(); // 命中行 → 触发 onOpen(id) → sessions.open → 打开该会话对话框
+        return;
+      }
+      if (Date.now() - started < MAX_WAIT_MS) setTimeout(tick, TICK_MS);
+      // 超时未找到（侧边栏折叠/rail 图标态、目标会话被隐藏）：优雅降级，
+      // 只保留窗口聚焦，不打扰用户
+    };
+    tick();
+  };
+
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d || typeof d !== "object") return;
+    if (d[MSG] !== true || typeof d.sessionId !== "string" || d.sessionId === "") return;
+    openSession(d.sessionId, typeof d.sessionTitle === "string" ? d.sessionTitle : "");
+  });
+})();
+"##;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -179,6 +255,7 @@ pub fn run() {
             dsh::cancel_plugin_op,
             dsh::check_plugin_updates,
             dsh::set_notify_enabled,
+            dsh::set_notify_style,
             dsh::http_get_json,
             credentials::check_credentials_compat,
             credentials::fix_credentials,
@@ -207,6 +284,7 @@ pub fn run() {
                 .initialization_script_for_all_frames(EXTERNAL_LINK_BRIDGE)
                 .initialization_script_for_all_frames(PLUGIN_FAILURE_BRIDGE)
                 .initialization_script_for_all_frames(THEME_SYNC_BRIDGE)
+                .initialization_script_for_all_frames(SESSION_OPEN_BRIDGE)
                 .build()?;
 
             // 托盘悬浮提示应用名：优先 tauri.conf.json 的 productName，

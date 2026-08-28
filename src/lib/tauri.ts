@@ -72,7 +72,16 @@ export const EVENTS = {
   url: "dsh://url",
   /** 会话事件推送的渲染结果（Rust 侧投递系统通知后，同一条再 emit 给前端，见 lib/notify.ts） */
   notifyMessage: "dsh://notify-message",
+  /** 用户点击了系统通知（toast 激活，见 notify.rs 的 ActivatePayload）：
+   *  sessionId 为「打开对话」按钮携带的会话 id，null 表示点到 toast 正文 */
+  notifyActivate: "dsh://notify-activate",
 } as const;
+
+/** 系统通知点击（toast 激活）负载：与 Rust `notify::ActivatePayload` 同形（serde camelCase） */
+export interface NotifyActivatePayload {
+  /** 被点击「打开对话」按钮携带的会话 id；点到 toast 正文时为 null */
+  sessionId: string | null;
+}
 
 /** 浏览器预览模式下的统一提示 */
 const NOT_TAURI_MSG = "浏览器预览模式：该操作需在桌面应用内执行";
@@ -123,6 +132,10 @@ export const api = {
   /** 系统推送总开关：Rust 侧后台订阅线程按此决定是否投递通知 */
   setNotifyEnabled: (enabled: boolean) =>
     requireTauri(() => invoke<void>("set_notify_enabled", { enabled })),
+  /** 系统推送样式：1 = 可点击（带「打开对话」按钮，点击直达对应会话），
+   *  0 = 不可点击（原 notify-rust 样式，仅展示） */
+  setNotifyStyle: (style: 0 | 1) =>
+    requireTauri(() => invoke<void>("set_notify_style", { style })),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
   /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */

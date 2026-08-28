@@ -4,6 +4,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router";
 import { useUiStore } from "./store/useUiStore";
 import BottomBar from "./components/BottomBar";
 import CredentialsFixModal from "./components/CredentialsFixModal";
+import NotifyActivateHandler from "./components/NotifyActivateHandler";
 import PluginFailureModal from "./components/PluginFailureModal";
 import TitleBar from "./components/TitleBar";
 import Launch from "./pages/Launch";
@@ -74,6 +75,8 @@ export default function App() {
         <PluginFailureModal />
         <HashRouter>
           <CredentialsFixModal />
+          {/* 系统通知点击：切预览页 + 暂存待打开会话（见组件注释） */}
+          <NotifyActivateHandler />
           <div className="app-shell">
             <TitleBar />
             <div className="app-content" key={reloadKey}>

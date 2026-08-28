@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -26,6 +26,10 @@ pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
 pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
 /// 会话事件推送的多通道投递负载（见 `session_events::NotifyMessage`）
 pub const NOTIFY_MESSAGE_EVENT: &str = "dsh://notify-message";
+/// 用户点击了系统通知（toast 激活）：负载为 `notify::ActivatePayload`
+/// （sessionId 为空表示点到 toast 正文、未落到具体会话按钮上）。
+/// 前端据此切到预览页并让预览 iframe 打开对应会话对话框。
+pub const NOTIFY_ACTIVATE_EVENT: &str = "dsh://notify-activate";
 
 // ---------------------------------------------------------------------------
 // 状态与负载
@@ -51,6 +55,10 @@ pub struct AppState {
     pub pending_urls: Mutex<Vec<String>>,
     /// 系统推送总开关：关闭时后台线程仍消费帧维护标题/去重基线，但不投递
     pub notify_enabled: AtomicBool,
+    /// toast 投递方式：0 = legacy（notify-rust 原实现，无点击感知），
+    /// 1 = clickable（winrt 直连，带「打开对话」按钮与激活回调，默认）。
+    /// 「两种提示切换开关」后续在设置页接入，只需改这个值（见 notify.rs）。
+    pub notify_style: AtomicU8,
 }
 
 impl Default for AppState {
@@ -61,6 +69,7 @@ impl Default for AppState {
             detected_url: Mutex::new(None),
             pending_urls: Mutex::new(Vec::new()),
             notify_enabled: AtomicBool::new(true),
+            notify_style: AtomicU8::new(1),
         }
     }
 }
@@ -2043,6 +2052,26 @@ pub async fn set_notify_enabled(
         .notify_enabled
         .swap(enabled, std::sync::atomic::Ordering::SeqCst);
     if enabled && !prev {
+        crate::notify::push_sample(&app);
+    }
+    Ok(())
+}
+
+/// 设置 toast 投递方式：0 = legacy（不可点击，原 notify-rust 样式）、
+/// 1 = clickable（可点击，带「打开对话」按钮，点击直达对应会话对话框）。
+/// 切到可点击时补一条自检通知：自检消息带会话位，按钮会真实显示出来，
+/// 让用户立刻看到新样式长什么样（点击自检按钮只会恢复窗口，桥找不到
+/// 「sample」会话会静默降级）。异步定义原因同 `set_notify_enabled`。
+#[tauri::command]
+pub async fn set_notify_style(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    style: u8,
+) -> Result<(), String> {
+    let prev = state
+        .notify_style
+        .swap(style, std::sync::atomic::Ordering::SeqCst);
+    if style == 1 && prev != 1 {
         crate::notify::push_sample(&app);
     }
     Ok(())

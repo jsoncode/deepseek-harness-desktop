@@ -679,6 +679,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "tauri-plugin-snap-layout",
+ "tauri-winrt-notification",
  "tungstenite",
  "ureq",
 ]
