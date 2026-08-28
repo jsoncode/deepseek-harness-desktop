@@ -62,6 +62,8 @@ interface AppStore {
   startSeq: number;
   /** 凭据配置文件格式兼容问题（非空时由 CredentialsFixModal 弹框展示） */
   credentialsIssue: CredentialsCheck | null;
+  /** 当前活动日志会话 id（每次启动/重启流程开始时创建；null = 无会话） */
+  logSessionId: string | null;
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
@@ -69,6 +71,8 @@ interface AppStore {
   startFlow: () => Promise<void>;
   /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务 */
   installEnvAndStart: () => Promise<void>;
+  /** 开始新的日志会话（finalize 旧会话），成功后将 id 存入 logSessionId */
+  beginLogSession: (title: string) => Promise<void>;
   /** pnpm ≥11（dsh 不支持）时降级到 pnpm 10；返回是否执行了降级 */
   ensurePnpm10: () => Promise<boolean>;
   /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
@@ -92,6 +96,12 @@ interface AppStore {
 
 let logSeq = 0;
 let wired = false;
+
+/** 日志会话写入串行队列：保证 invoke 到达 Rust 的顺序与 store 日志顺序一致
+ *  （并发 IPC 可能乱序，会破坏会话文件的日志顺序） */
+let logFlush: Promise<void> = Promise.resolve();
+/** 待创建日志会话的标题（由重启等调用方预置，启动流程消费后清空） */
+let pendingSessionTitle: string | null = null;
 
 /** 会话内日志上限：超出后丢弃最旧日志 */
 const MAX_LOGS = 3000;
@@ -384,6 +394,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     envInstallTool: null,
     startSeq: 0,
     credentialsIssue: null,
+    logSessionId: null,
 
     appendLog: (stream, text) => {
       const entry: LogEntry = {
@@ -404,6 +415,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         };
         return { logs: [note, ...all.slice(all.length - (MAX_LOGS - 1))] };
       });
+      // 串行镜像到当前日志会话文件（跳过截断提示；预览模式 invoke 失败静默吞掉）
+      if (text !== TRUNCATED_NOTE) {
+        const { time, stream: st, text: tx } = entry;
+        logFlush = logFlush
+          .then(() => api.logAppend({ time, stream: st, text: tx }))
+          .catch(() => undefined);
+      }
     },
 
     appendPluginOpLog: (stream, text) => {
@@ -457,6 +475,16 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     setPhase: (phase) => set({ phase }),
+
+    beginLogSession: async (title) => {
+      if (!tauri) return;
+      try {
+        const id = await withTimeout(api.logStartSession(title), 8000, "创建日志会话");
+        set({ logSessionId: id });
+      } catch {
+        /* 会话创建失败不阻塞启动流程（日志仅保留在内存态） */
+      }
+    },
 
     clearPluginLoadError: () => set({ pluginLoadError: null }),
 
@@ -630,6 +658,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     startFlow: async () => {
       const { phase, dshInstalled } = get();
       if (phase === "installing" || phase === "starting" || phase === "running") return;
+      // 每次启动/重启/重试都是一条独立日志记录：先开新会话（重启链路预置标题）
+      const title = pendingSessionTitle ?? "启动服务";
+      pendingSessionTitle = null;
+      await get().beginLogSession(title);
       if (get().logs.length > 0) {
         get().appendLog("system", RESTART_SEPARATOR);
       }
@@ -688,6 +720,10 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (!tauri) return;
       const st = get();
       if (st.phase === "installing" || st.phase === "starting" || st.phase === "running") return;
+      // 独立日志记录：先开新会话（标题可被重启链路预置覆盖）
+      const title = pendingSessionTitle ?? "安装并启动";
+      pendingSessionTitle = null;
+      await get().beginLogSession(title);
       set({ error: null });
       if (get().logs.length > 0) {
         get().appendLog("system", RESTART_SEPARATOR);
@@ -773,6 +809,12 @@ export const useAppStore = create<AppStore>((set, get) => {
         /* 忽略停止失败 */
       }
       get().appendLog("system", "🛑 已停止 dsh web 服务");
+      // 结束当前日志会话：服务停止即会话结束（下次启动/重启会开新会话）
+      const sid = get().logSessionId;
+      if (sid) {
+        void api.logSetStatus(sid, "closed").catch(() => undefined);
+        set({ logSessionId: null });
+      }
     },
 
     reset: () => {
@@ -787,12 +829,20 @@ export const useAppStore = create<AppStore>((set, get) => {
   };
 });
 
-// url/phase 变化时启停健康轮询；进入 installing/starting 时递增启动序号
+// url/phase 变化时启停健康轮询；进入 installing/starting 时递增启动序号；
+// 日志会话随 phase 上报终态（running → success / error → error）
 // （模块加载完成后再挂订阅，避免 TDZ）
 useAppStore.subscribe((s, prev) => {
   if (s.url !== prev.url || s.phase !== prev.phase) syncHealthPolling();
   if (s.phase !== prev.phase && (s.phase === "installing" || s.phase === "starting")) {
     useAppStore.setState({ startSeq: prev.startSeq + 1 });
+  }
+  if (s.phase !== prev.phase && s.logSessionId) {
+    if (s.phase === "running") {
+      void api.logSetStatus(s.logSessionId, "success").catch(() => undefined);
+    } else if (s.phase === "error") {
+      void api.logSetStatus(s.logSessionId, "error").catch(() => undefined);
+    }
   }
 });
 syncHealthPolling(); // HMR/热启动兜底

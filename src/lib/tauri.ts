@@ -58,6 +58,26 @@ export interface CredentialsCheck {
   template: string | null;
 }
 
+/** 日志会话元信息（设置页日志管理列表） */
+export interface LogSessionMeta {
+  id: string;
+  title: string;
+  /** unix 秒 */
+  started_at: number;
+  /** unix 秒；null = 尚未结束 */
+  ended_at: number | null;
+  /** "active" | "success" | "error" | "closed" */
+  status: string;
+  lines: number;
+}
+
+/** 会话内单条日志（与 useAppStore 的 LogEntry 同构，无内存 id） */
+export interface SessionLogEntry {
+  time: string;
+  stream: string;
+  text: string;
+}
+
 export const EVENTS = {
   installLog: "dsh://install-log",
   installExit: "dsh://install-exit",
@@ -143,6 +163,22 @@ export const api = {
     requireTauri(() => invoke<CredentialsCheck>("check_credentials_compat")),
   /** 把凭据文件重写为最新规范格式（凭据值全部保留），返回修复摘要 */
   fixCredentials: () => requireTauri(() => invoke<string>("fix_credentials")),
+  /** 开始新日志会话（finalize 旧会话），返回会话 id */
+  logStartSession: (title: string) =>
+    requireTauri(() => invoke<string>("log_start_session", { title })),
+  /** 追加一条日志到当前活动会话（无活动会话时静默忽略） */
+  logAppend: (entry: SessionLogEntry) =>
+    requireTauri(() => invoke<void>("log_append", { entry })),
+  /** 更新会话状态（success / error / closed） */
+  logSetStatus: (id: string, status: string) =>
+    requireTauri(() => invoke<void>("log_set_status", { id, status })),
+  /** 日志会话列表（按开始时间倒序） */
+  logSessions: () => requireTauri(() => invoke<LogSessionMeta[]>("log_sessions")),
+  /** 读取指定会话的完整日志输出 */
+  logContent: (id: string) =>
+    requireTauri(() => invoke<SessionLogEntry[]>("log_content", { id })),
+  /** 清空全部日志会话 */
+  logClear: () => requireTauri(() => invoke<void>("log_clear")),
 };
 
 export async function onEvent<T>(
