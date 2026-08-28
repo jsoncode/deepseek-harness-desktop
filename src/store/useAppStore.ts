@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, EVENTS, onEvent, tauri, withTimeout, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, withTimeout, type CredentialsCheck, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,8 @@ interface AppStore {
   /** 新一轮启动流程的序号：每次进入 installing/starting 时递增，
    *  供 web-exit 事件区分「当前流程退出」与「复核期间用户重新发起的陈旧退出」 */
   startSeq: number;
+  /** 凭据配置文件格式兼容问题（非空时由 CredentialsFixModal 弹框展示） */
+  credentialsIssue: CredentialsCheck | null;
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
@@ -71,6 +73,11 @@ interface AppStore {
   ensurePnpm10: () => Promise<boolean>;
   /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
   envInstallTool: "node" | "pnpm" | null;
+  /** 启动前检查凭据配置文件格式：兼容返回 true；不兼容则弹框等用户确认，
+   *  确认修复后返回 true，取消返回 false（调用方中止启动） */
+  ensureCredentialsCompat: () => Promise<boolean>;
+  /** 凭据修复弹框的决策回调：true = 已修复并继续，false = 暂不处理 */
+  resolveCredentialsConfirm: (ok: boolean) => void;
   stop: () => Promise<void>;
   reset: () => void;
   appendLog: (stream: StreamKind, text: string) => void;
@@ -102,6 +109,9 @@ const ENV_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 // 因此用单槽 resolver 即可：waitEnvExit 挂槽，env-install-exit 事件触发。
 let envExitResolve: ((code: number) => void) | null = null;
 let envExitTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 凭据修复弹框的决策槽：ensureCredentialsCompat 挂槽，弹框按钮触发
+let credentialsConfirmResolve: ((ok: boolean) => void) | null = null;
 
 function waitEnvExit(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
@@ -373,6 +383,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialized: false,
     envInstallTool: null,
     startSeq: 0,
+    credentialsIssue: null,
 
     appendLog: (stream, text) => {
       const entry: LogEntry = {
@@ -529,7 +540,43 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
+    ensureCredentialsCompat: async () => {
+      if (!tauri) return true;
+      let res: CredentialsCheck;
+      try {
+        res = await withTimeout(api.checkCredentialsCompat(), 8000, "凭据配置检查");
+      } catch {
+        // 检查本身失败（环境异常等）：不阻断启动，交由 dsh 自行报错
+        return true;
+      }
+      if (res.compatible) return true;
+      // 不兼容：写入状态让弹框展示，等待用户确认是否更新为最新格式
+      get().appendLog(
+        "system",
+        "检测到凭据配置文件格式不兼容，等待用户确认是否更新为最新格式…",
+      );
+      return new Promise<boolean>((resolve) => {
+        credentialsConfirmResolve = resolve;
+        set({ credentialsIssue: res });
+      });
+    },
+
+    resolveCredentialsConfirm: (ok) => {
+      const r = credentialsConfirmResolve;
+      credentialsConfirmResolve = null;
+      set({ credentialsIssue: null });
+      r?.(ok);
+    },
+
     ensurePluginsThenStart: async () => {
+      // ① 凭据配置文件格式兼容性检查：不兼容时弹框，用户确认修复后才继续启动；
+      //    取消则中止本次启动（凭据文件不修好，dsh web 启动必然失败）
+      const compatOk = await get().ensureCredentialsCompat();
+      if (!compatOk) {
+        get().appendLog("system", "已取消启动：凭据配置文件格式需要更新（可稍后重新点击启动）");
+        set({ phase: "idle", error: null });
+        return;
+      }
       const s = get();
       // 浏览器预览或 profile 未生成（首次运行）：跳过插件安装直接启动
       if (!tauri || !s.profileReady) {

@@ -1,3 +1,4 @@
+mod credentials;
 mod dsh;
 mod notify;
 mod session_events;
@@ -179,6 +180,8 @@ pub fn run() {
             dsh::check_plugin_updates,
             dsh::set_notify_enabled,
             dsh::http_get_json,
+            credentials::check_credentials_compat,
+            credentials::fix_credentials,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：

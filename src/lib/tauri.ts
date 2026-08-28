@@ -44,6 +44,20 @@ export interface StatusPayload {
   profile_ready: boolean;
 }
 
+/** 凭据配置文件（$DSH_HOME/.credentials.yaml）格式兼容性检查结果 */
+export interface CredentialsCheck {
+  /** 是否与当前 dsh 兼容（兼容则无需任何处理） */
+  compatible: boolean;
+  /** 不兼容原因（面向用户的中文描述）；兼容时为 null */
+  reason: string | null;
+  /** 凭据文件绝对路径；定位失败时为 null */
+  path: string | null;
+  /** 当前文件内容（值已打码）；文件缺失/无法读取时为 null */
+  masked_content: string | null;
+  /** 最新格式模板（全部为占位值）；仅不兼容时提供 */
+  template: string | null;
+}
+
 export const EVENTS = {
   installLog: "dsh://install-log",
   installExit: "dsh://install-exit",
@@ -111,6 +125,11 @@ export const api = {
     requireTauri(() => invoke<void>("set_notify_enabled", { enabled })),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
+  /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */
+  checkCredentialsCompat: () =>
+    requireTauri(() => invoke<CredentialsCheck>("check_credentials_compat")),
+  /** 把凭据文件重写为最新规范格式（凭据值全部保留），返回修复摘要 */
+  fixCredentials: () => requireTauri(() => invoke<string>("fix_credentials")),
 };
 
 export async function onEvent<T>(

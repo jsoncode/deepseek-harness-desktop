@@ -1936,6 +1936,65 @@ html[data-theme="light"] .plugin-fail-msg {
 }
 
 /* ==========================================================================
+   凭据配置文件修复弹框（CredentialsFixModal）
+   ========================================================================== */
+
+.cred-fix-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cred-fix-ask {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text-1);
+}
+
+.cred-fix-path {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.cred-fix-section {
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.cred-fix-code {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre;
+  overflow-wrap: anywhere;
+}
+
+html[data-theme="light"] .cred-fix-code {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+.cred-fix-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: #f87171;
+}
+
+/* ==========================================================================
    插件详情弹框（点击插件行打开）
    ========================================================================== */
 

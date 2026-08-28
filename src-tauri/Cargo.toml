@@ -19,6 +19,9 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-snap-layout = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# 凭据配置文件（.credentials.yaml）格式校验与重写：与 dsh-credentials-local 的
+# 文档 schema（version 1：refs/records 区段）保持一致
+serde_yaml = "0.9"
 ureq = "2"
 # dsh 会话事件下行订阅（/api/events.mux）。`handshake` 是 client::connect 的必需特性
 # （默认特性即含它），显式列出只为表达「刻意不要 TLS 相关默认项」——本机只连 loopback 明文 ws。

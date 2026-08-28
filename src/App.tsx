@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router";
 import { useUiStore } from "./store/useUiStore";
 import BottomBar from "./components/BottomBar";
+import CredentialsFixModal from "./components/CredentialsFixModal";
 import PluginFailureModal from "./components/PluginFailureModal";
 import TitleBar from "./components/TitleBar";
 import Launch from "./pages/Launch";
@@ -72,6 +73,7 @@ export default function App() {
         <div className="app-bg" />
         <PluginFailureModal />
         <HashRouter>
+          <CredentialsFixModal />
           <div className="app-shell">
             <TitleBar />
             <div className="app-content" key={reloadKey}>
