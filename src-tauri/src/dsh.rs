@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::logs::ActiveLog;
+
 // ---------------------------------------------------------------------------
 // 事件名（前端通过 @tauri-apps/api/event 监听）
 // ---------------------------------------------------------------------------
@@ -59,6 +61,8 @@ pub struct AppState {
     /// 1 = clickable（winrt 直连，带「打开对话」按钮与激活回调，默认）。
     /// 「两种提示切换开关」后续在设置页接入，只需改这个值（见 notify.rs）。
     pub notify_style: AtomicU8,
+    /// 当前活动日志会话（无则 None；见 logs.rs）
+    pub active_log: Mutex<Option<ActiveLog>>,
 }
 
 impl Default for AppState {
@@ -70,6 +74,7 @@ impl Default for AppState {
             pending_urls: Mutex::new(Vec::new()),
             notify_enabled: AtomicBool::new(true),
             notify_style: AtomicU8::new(1),
+            active_log: Mutex::new(None),
         }
     }
 }

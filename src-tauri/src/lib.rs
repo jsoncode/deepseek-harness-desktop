@@ -1,5 +1,6 @@
 mod credentials;
 mod dsh;
+mod logs;
 mod notify;
 mod session_events;
 
@@ -329,6 +330,12 @@ pub fn run() {
             dsh::http_get_json,
             credentials::check_credentials_compat,
             credentials::fix_credentials,
+            logs::log_start_session,
+            logs::log_append,
+            logs::log_set_status,
+            logs::log_sessions,
+            logs::log_content,
+            logs::log_clear,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
@@ -410,6 +417,9 @@ pub fn run() {
             // 会话事件 → 系统推送：后台线程订阅服务的下行 WebSocket。
             // 服务未起时线程挂在探活循环里，故不依赖 start/stop 命令的时机。
             session_events::spawn(app.handle().clone());
+            // 恢复上次异常退出遗留的活动日志会话（崩溃/强杀）：补写结束时间，
+            // 避免历史记录永远显示「进行中」
+            logs::finalize_active(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -427,6 +437,8 @@ pub fn run() {
                     // 退出路径用同步版：async 命令无法在 RunEvent 钩子中 await
                     dsh::stop_dsh_web_sync(&state);
                 }
+                // 结束当前日志会话（补写 ended_at）
+                logs::finalize_active(app_handle);
             }
         });
 }
