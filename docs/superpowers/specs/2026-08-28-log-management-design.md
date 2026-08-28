@@ -95,6 +95,13 @@
 - `Launch.tsx` 浏览器预览模式的 fallback（原 `navigate("/terminal")`）→ `navigate("/settings?section=logs")`
 - `Loading.tsx` 失败页「查看日志」→ `navigate("/settings?section=logs")`
 
+### 8. 标题栏地址栏左侧新增 Home 入口
+
+- `TitleBar` 的 `titlebar-center` 中，在 `url-pill` 左侧新增 Home 图标按钮（`HomeOutlined`）：
+  - 服务已启动（`phase === "running"`）：点击跳转服务内（`navigate("/preview")`），Tooltip「进入应用」
+  - 服务未启动（其余 phase）：点击跳转预检页（`navigate("/")`），Tooltip「返回启动页」
+- 复用现有 `icon-btn` 样式，与刷新/复制/浏览器打开按钮并列
+
 ## 数据流
 
 ```
@@ -125,6 +132,7 @@ Rust 子进程输出 ──emit 事件──▶ useAppStore.appendLog（store.lo
    - 当前会话「进行中」徽标 + 详情实时滚动
    - 重启应用：历史记录仍在，最后一条被 finalize（不再「进行中」）
    - 版本号点击 → 设置-关于本应用选中
+   - 标题栏 Home 按钮：服务运行中点按进入预览页；停止后点按回到启动页
    - 底部导航无「查看日志」；启动页/加载失败页「查看日志」→ 设置-日志管理
    - 清空日志 → 列表清空、目录文件删除
    - 浏览器预览模式：日志管理显示当前会话伪记录
