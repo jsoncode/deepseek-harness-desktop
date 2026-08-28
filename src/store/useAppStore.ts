@@ -73,6 +73,8 @@ interface AppStore {
   installEnvAndStart: () => Promise<void>;
   /** 开始新的日志会话（finalize 旧会话），成功后将 id 存入 logSessionId */
   beginLogSession: (title: string) => Promise<void>;
+  /** 预置下一次启动流程的日志会话标题（如「重启服务」），由 startFlow/installEnvAndStart 消费 */
+  prepareLogSessionTitle: (title: string) => void;
   /** pnpm ≥11（dsh 不支持）时降级到 pnpm 10；返回是否执行了降级 */
   ensurePnpm10: () => Promise<boolean>;
   /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
@@ -484,6 +486,10 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch {
         /* 会话创建失败不阻塞启动流程（日志仅保留在内存态） */
       }
+    },
+
+    prepareLogSessionTitle: (title) => {
+      pendingSessionTitle = title;
     },
 
     clearPluginLoadError: () => set({ pluginLoadError: null }),

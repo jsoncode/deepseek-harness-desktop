@@ -18,6 +18,7 @@ export default function BottomBar() {
   const serviceRunning = useAppStore((s) => s.serviceRunning);
   const stop = useAppStore((s) => s.stop);
   const startFlow = useAppStore((s) => s.startFlow);
+  const prepareLogSessionTitle = useAppStore((s) => s.prepareLogSessionTitle);
   const [restarting, setRestarting] = useState(false);
 
   // 设置入口激活态：当前已在设置页
@@ -26,6 +27,7 @@ export default function BottomBar() {
   // 重启：立即切入启动过渡页（全屏 loading + 阶段文案，与启动共用，故文案不含「重启」），
   // 先 stop()（杀正在启动的进程树并释放端口，防止新旧进程端口重叠）再重新启动；
   // 就绪跳转预览 / 失败展示重试，均由过渡页监听 phase 完成。
+  // 日志：stop 结束旧会话后，预置「重启服务」标题，startFlow 会开一条独立日志会话
   const handleRestart = () => {
     if (restarting) return;
     setRestarting(true);
@@ -34,6 +36,7 @@ export default function BottomBar() {
     void (async () => {
       try {
         await stop();
+        prepareLogSessionTitle("重启服务");
         await startFlow();
       } finally {
         // 触发链路已交给 store 事件驱动；忙碌态由 phase 继续约束按钮

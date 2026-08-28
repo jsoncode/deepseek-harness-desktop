@@ -17,6 +17,7 @@ export default function PluginFailureModal() {
   const clearPluginLoadError = useAppStore((s) => s.clearPluginLoadError);
   const stop = useAppStore((s) => s.stop);
   const startFlow = useAppStore((s) => s.startFlow);
+  const prepareLogSessionTitle = useAppStore((s) => s.prepareLogSessionTitle);
   const bumpReload = useUiStore((s) => s.bumpReload);
   const shownFor = useRef<string | null>(null);
 
@@ -44,6 +45,7 @@ export default function PluginFailureModal() {
           message.success(`已移除插件 ${err.name}，正在重启服务…`);
           await stop();
           bumpReload();
+          prepareLogSessionTitle("重启服务");
           void startFlow();
         } catch (e) {
           message.error(`移除插件失败：${e instanceof Error ? e.message : String(e)}`);
