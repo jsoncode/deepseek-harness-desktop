@@ -3,6 +3,7 @@ import { CodeOutlined, LogoutOutlined, ReloadOutlined } from "@ant-design/icons"
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import PluginManager from "./PluginManager";
+import NotifyToggle from "./NotifyToggle";
 import ThemeSwitch from "./ThemeSwitch";
 import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
@@ -10,7 +11,7 @@ import { useAppStore } from "../store/useAppStore";
 /**
  * 底部导航条：作为 .app-shell（flex 纵向布局）的最后一个元素，
  * 占用页面布局空间并固定在窗口最底部。
- * 左侧集中服务级操作：停止服务 / 重启服务 / 查看日志 / 插件 / 主题切换。
+ * 左侧集中服务级操作：停止服务 / 重启服务 / 查看日志 / 插件 / 系统推送开关 / 主题切换。
  */
 export default function BottomBar() {
   const navigate = useNavigate();
@@ -120,6 +121,7 @@ export default function BottomBar() {
           </button>
         </Tooltip>
         <PluginManager />
+        <NotifyToggle />
         <ThemeSwitch />
       </div>
     </footer>

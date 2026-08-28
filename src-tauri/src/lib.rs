@@ -1,4 +1,6 @@
 mod dsh;
+mod notify;
+mod session_events;
 
 use dsh::AppState;
 use tauri::{
@@ -175,6 +177,7 @@ pub fn run() {
             dsh::run_plugin_op,
             dsh::cancel_plugin_op,
             dsh::check_plugin_updates,
+            dsh::set_notify_enabled,
             dsh::http_get_json,
         ])
         .setup(|app| {
@@ -253,6 +256,9 @@ pub fn run() {
                     }
                 }
             });
+            // 会话事件 → 系统推送：后台线程订阅服务的下行 WebSocket。
+            // 服务未起时线程挂在探活循环里，故不依赖 start/stop 命令的时机。
+            session_events::spawn(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

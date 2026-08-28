@@ -1436,6 +1436,11 @@ html[data-theme="light"] .mk-op-banner {
   border-color: var(--border);
 }
 
+/* 开关型按钮的关闭态（如系统推送铃铛）：只降不透明度，尺寸与悬停行为与其它按钮一致 */
+.icon-btn.off {
+  opacity: 0.45;
+}
+
 /* 标题栏红色"停止服务"按钮（位于重启键左侧）；重启改用中性色，红色语义只留给停止 */
 .stop-btn {
   color: var(--danger);

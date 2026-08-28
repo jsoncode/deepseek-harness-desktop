@@ -10,6 +10,7 @@ import Preview from "./pages/Preview";
 import Restarting from "./pages/Restarting";
 import Terminal from "./pages/Terminal";
 import { useThemeStore } from "./store/useThemeStore";
+import { startNotifyListener } from "./lib/notify";
 
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
@@ -42,6 +43,11 @@ export default function App() {
   useEffect(() => {
     initTheme();
   }, [initTheme]);
+
+  // 订阅 Rust 侧投递过的推送消息（供前端通道消费，目前是语音留桩）；幂等，整个 App 生命周期只挂一次
+  useEffect(() => {
+    startNotifyListener();
+  }, []);
 
   // 把实际主题同步到 <html> 的 data-theme 与 color-scheme（驱动 CSS 变量）
   // 用 useLayoutEffect：DOM 提交后、paint 前同步执行，避免首帧闪烁（浅色用户启动时先渲染深色）

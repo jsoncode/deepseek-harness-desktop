@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -23,6 +24,8 @@ pub const PLUGIN_INSTALL_LOG_EVENT: &str = "dsh://plugin-install-log";
 pub const PLUGIN_INSTALL_EXIT_EVENT: &str = "dsh://plugin-install-exit";
 pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
 pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
+/// 会话事件推送的多通道投递负载（见 `session_events::NotifyMessage`）
+pub const NOTIFY_MESSAGE_EVENT: &str = "dsh://notify-message";
 
 // ---------------------------------------------------------------------------
 // 状态与负载
@@ -46,6 +49,8 @@ pub struct AppState {
     pub detected_url: Mutex<Option<String>>,
     /// 子进程输出中出现的候选 URL（用于持续复探与停止时按端口兜底清理）
     pub pending_urls: Mutex<Vec<String>>,
+    /// 系统推送总开关：关闭时后台线程仍消费帧维护标题/去重基线，但不投递
+    pub notify_enabled: AtomicBool,
 }
 
 impl Default for AppState {
@@ -55,6 +60,7 @@ impl Default for AppState {
             plugin_op: Mutex::new(None),
             detected_url: Mutex::new(None),
             pending_urls: Mutex::new(Vec::new()),
+            notify_enabled: AtomicBool::new(true),
         }
     }
 }
@@ -812,7 +818,7 @@ fn probe_parallel(urls: &[String], timeout_ms: u64) -> Option<String> {
 /// 避免调试时误连/误杀正式版在 3080 上运行的服务，实现完全隔离：
 /// - dev：6088（固定，不做进程身份探测）
 /// - release：3080（dsh web 默认端口）
-fn service_port() -> u16 {
+pub(crate) fn service_port() -> u16 {
     if cfg!(debug_assertions) {
         6088
     } else {
@@ -2018,6 +2024,27 @@ pub fn install_plugins(app: AppHandle) -> Result<(), String> {
             PLUGIN_INSTALL_EXIT_EVENT,
         );
     });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 系统推送开关
+// ---------------------------------------------------------------------------
+
+/// 设置系统推送总开关；关→开时补一条自检通知，让用户立刻确认提醒通道可用。
+/// 异步定义（而非同步）以避开主线程：notify-rust 在 Windows 上要走 WinRT 调用。
+#[tauri::command]
+pub async fn set_notify_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let prev = state
+        .notify_enabled
+        .swap(enabled, std::sync::atomic::Ordering::SeqCst);
+    if enabled && !prev {
+        crate::notify::push_sample(&app);
+    }
     Ok(())
 }
 

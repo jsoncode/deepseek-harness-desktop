@@ -56,6 +56,8 @@ export const EVENTS = {
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
+  /** 会话事件推送的渲染结果（Rust 侧投递系统通知后，同一条再 emit 给前端，见 lib/notify.ts） */
+  notifyMessage: "dsh://notify-message",
 } as const;
 
 /** 浏览器预览模式下的统一提示 */
@@ -104,6 +106,9 @@ export const api = {
   cancelPluginOp: () => requireTauri(() => invoke<boolean>("cancel_plugin_op")),
   checkPluginUpdates: () =>
     requireTauri(() => invoke<PluginVersionInfo[]>("check_plugin_updates")),
+  /** 系统推送总开关：Rust 侧后台订阅线程按此决定是否投递通知 */
+  setNotifyEnabled: (enabled: boolean) =>
+    requireTauri(() => invoke<void>("set_notify_enabled", { enabled })),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
 };

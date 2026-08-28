@@ -20,3 +20,12 @@ tauri-plugin-snap-layout = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = "2"
+# dsh 会话事件下行订阅（/api/events.mux）。`handshake` 是 client::connect 的必需特性
+# （默认特性即含它），显式列出只为表达「刻意不要 TLS 相关默认项」——本机只连 loopback 明文 ws。
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+
+# 系统推送：平台限定是刻意的——notify-rust 默认特性会拉进 Linux 专用的 zbus/dbus，
+# Windows 下既无用也可能编译失败；非 Windows 本期不弹系统通知（见 notify::push）。
+# 版本上界锁在 4.18：4.18 起要求 rustc 1.89，与本 crate 声明的 MSRV 1.77.2 冲突。
+[target.'cfg(windows)'.dependencies]
+notify-rust = { version = ">=4.17, <4.18", default-features = false }
