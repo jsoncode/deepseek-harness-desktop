@@ -1,5 +1,5 @@
-import { ClusterOutlined, SearchOutlined } from "@ant-design/icons";
-import { App as AntApp, Badge, Input, Table, Tooltip } from "antd";
+import { SearchOutlined } from "@ant-design/icons";
+import { App as AntApp, Input, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import AppModal from "./AppModal";
@@ -152,13 +152,11 @@ interface MkRow {
 }
 
 /**
- * 插件管理：标题栏入口 + 大尺寸插件市场弹框。
- * 市场视图：GitHub/NPM 服务端关键词分页搜索（默认词 dsh-plugin 全集；点击搜索按钮
- *   或回车提交关键词后重搜并重置分页；antd Table 固定操作列）、安装/更新/卸载；
- * 终端视图：流式展示 `dsh plugin` 操作日志，支持终止与后台运行。
- * 视图/tab 切换带方向感穿梭动画。
+ * 插件管理面板（设置页内嵌）：原插件管理弹框去模态化，作为设置页的一个区块展示。
+ * 面板自带头部（来源切换）/ 工具栏 / 表格（或操作终端）/ 底部操作条；
+ * 插件详情与手动安装仍为弹框（覆盖层），插件操作后台执行、完成事件驱动列表刷新。
  */
-export default function PluginManager() {
+export default function PluginManagerPanel() {
   const { modal, message } = AntApp.useApp();
   const plugins = useAppStore((s) => s.plugins);
   const initialized = useAppStore((s) => s.initialized);
@@ -170,7 +168,6 @@ export default function PluginManager() {
   const pluginVers = useAppStore((s) => s.pluginVers);
   const refreshPluginVersions = useAppStore((s) => s.refreshPluginVersions);
 
-  const [open, setOpen] = useState(false);
   const [view, setView] = useState<"market" | "terminal">("market");
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
@@ -207,6 +204,11 @@ export default function PluginManager() {
     if (!initialized) void init();
   }, [initialized, init]);
 
+  // 面板挂载即拉取已安装插件的最新版本信息（弹框时代是打开时拉取）
+  useEffect(() => {
+    void refreshPluginVersions();
+  }, [refreshPluginVersions]);
+
   // 提交搜索（仅【所有插件】tab 的服务端搜索）：只有点击搜索按钮或输入框回车才触发，
   // 同批把分页重置到第 1 页——避免逐字输入即发请求触发限流、旧页码越界搜不到。
   // searchSeq 自增让相同关键词的重复提交也能强制重搜（例如限流/失败后的重试）；
@@ -224,7 +226,8 @@ export default function PluginManager() {
   // 加载态用 useApp 的 message 顶部提示（固定 key 避免叠加），完成即销毁；
   // alive 标志丢弃过期响应，快速连续搜索时只有最后一次生效。
   useEffect(() => {
-    if (!open || view !== "market" || tabMode !== "all") return;
+    // 浏览器预览模式不拉市场数据（面板只展示占位提示）
+    if (!tauri || view !== "market" || tabMode !== "all") return;
     let alive = true;
     setMarketLoading(true);
     setMarketError(null);
@@ -250,7 +253,7 @@ export default function PluginManager() {
       message.destroy("mk-market-loading");
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, view, tabMode, source, sort, page, submittedQuery, searchSeq]);
+  }, [view, tabMode, source, sort, page, submittedQuery, searchSeq]);
 
   // 终端自动滚动到底部
   useEffect(() => {
@@ -258,7 +261,7 @@ export default function PluginManager() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [pluginOpLogs.at(-1)?.id]);
 
-  // 完成监听：running → false 转变时提示并刷新列表与版本信息（无论弹框是否打开）
+  // 完成监听：running → false 转变时提示并刷新列表与版本信息（无论面板是否挂载）
   useEffect(() => {
     const running = pluginOp?.running ?? false;
     if (prevRunningRef.current && !running && pluginOp) {
@@ -269,7 +272,18 @@ export default function PluginManager() {
     prevRunningRef.current = running;
   }, [pluginOp?.running, pluginOp, message, refreshStatus, refreshPluginVersions]);
 
-  if (!tauri) return null;
+  if (!tauri) {
+    return (
+      <>
+        <div className="settings-nav">
+          <span className="settings-nav-title">插件管理</span>
+        </div>
+        <div className="settings-body">
+          <div className="mk-empty">浏览器预览模式：插件管理需在桌面应用内操作</div>
+        </div>
+      </>
+    );
+  }
 
   const running = pluginOp?.running ?? false;
   const installedSet = new Set(plugins);
@@ -278,14 +292,6 @@ export default function PluginManager() {
     const c = pluginVers[n]?.current;
     const l = pluginVers[n]?.latest;
     return !!c && !!l && c !== l;
-  };
-
-  const openManager = () => {
-    // 始终打开列表视图：后台任务进行中时，通过列表顶部的横幅入口进入后台终端，
-    // 插件入口不再被终端视图直接覆盖
-    setOpen(true);
-    setView("market");
-    void refreshPluginVersions();
   };
 
   /** 带方向感的穿梭切换 */
@@ -311,7 +317,7 @@ export default function PluginManager() {
       message.warning("请输入插件名称");
       return;
     }
-    // 仅关闭手动安装输入弹框；插件管理主弹框保持打开，操作在后台执行
+    // 仅关闭手动安装输入弹框；插件管理面板保持打开，操作在后台执行
     setAddOpen(false);
     setName("");
     void startPluginOp("add", trimmed);
@@ -664,125 +670,83 @@ export default function PluginManager() {
 
   return (
     <>
-      <Tooltip title="插件管理">
-        <button className="icon-btn" type="button" aria-label="插件管理" onClick={openManager}>
-          <Badge dot={running} color="red">
-            <ClusterOutlined />
-          </Badge>
-        </button>
-      </Tooltip>
+      <div className="settings-nav">
+        <span className="settings-nav-title">插件管理</span>
+      </div>
+      <div className="settings-body flush">
+        {/* 复用 plugin-manager-modal 命名空间：其下的 .mk-* 样式（工具栏/表格/终端）原样生效 */}
+        <div className="pm-panel plugin-manager-modal">
+          {/* 面板头部：来源切换（GitHub / NPM） */}
+          <div className="pm-panel-head">
+            <SlidingSeg
+              value={source}
+              options={[
+                { key: "github", label: "GitHub" },
+                { key: "npm", label: "NPM" },
+              ]}
+              onChange={(s) => switchSource(s)}
+            />
+          </div>
 
-      <AppModal
-        open={open}
-        className={`plugin-manager-modal${view === "market" ? " mk-market" : ""}`}
-        onCancel={() => setOpen(false)}
-        width="90vw"
-        styles={{
-          // 固定弹框高度 80vh：header/footer 固定，body 不滚动，内部面板自行滚动
-          container: { height: "80vh" },
-          body: { overflowY: "hidden", display: "flex", flexDirection: "column" },
-        }}
-        title={
-          view === "terminal" ? (
-            `正在${OP_VERB[pluginOp?.kind ?? "add"]} · ${pluginOp?.name ?? ""}`
-          ) : (
-            <div className="pm-title-row">
-              <span>插件管理</span>
-              <SlidingSeg
-                value={source}
-                options={[
-                  { key: "github", label: "GitHub" },
-                  { key: "npm", label: "NPM" },
-                ]}
-                onChange={(s) => switchSource(s)}
-              />
-            </div>
-          )
-        }
-        footer={
-          view === "terminal" ? (
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              {running ? (
-                <>
-                  <button
-                    className="pm-btn"
-                    type="button"
-                    onClick={() => {
-                      setView("market");
-                      bumpPane("mk-from-left");
-                    }}
-                  >
-                    返回列表
-                  </button>
+          {/* 视图主体：市场列表 / 操作终端（上浮缩放过渡） */}
+          <div key={view} className="mk-view-enter">
+            {view === "market" ? marketBody : terminalBody}
+          </div>
+
+          {/* 面板底部：市场视图显示分页；终端视图显示操作按钮 */}
+          <div className="pm-panel-foot">
+            {view === "terminal" ? (
+              <div className="pm-panel-foot-actions">
+                <button
+                  className="pm-btn"
+                  type="button"
+                  onClick={() => {
+                    setView("market");
+                    bumpPane("mk-from-left");
+                  }}
+                >
+                  返回列表
+                </button>
+                {running ? (
                   <button className="pm-btn danger" type="button" onClick={cancelOpConfirm}>
                     终止操作
                   </button>
-                  <button className="pm-btn" type="button" onClick={() => setOpen(false)}>
-                    后台运行
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    className="pm-btn"
-                    type="button"
-                    onClick={() => {
-                      setView("market");
-                      bumpPane("mk-from-left");
-                    }}
-                  >
-                    返回列表
-                  </button>
-                  <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
-                    关闭
-                  </button>
-                </>
-              )}
-            </div>
-          ) : (
-            <div className="mk-footer">
-              {/* 分页固定在 footer 左侧；已安装 tab 无分页 */}
-              {tabMode === "all" ? (
-                <div className="mk-pager">
-                  <button
-                    className="pm-btn pm-btn-sm"
-                    type="button"
-                    disabled={safePage <= 1 || marketLoading}
-                    onClick={() => {
-                      setPage((p) => p - 1);
-                      bumpPane("mk-from-left");
-                    }}
-                  >
-                    ◀ 上一页
-                  </button>
-                  <span className="mk-pager-info">
-                    第 {safePage} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
-                  </span>
-                  <button
-                    className="pm-btn pm-btn-sm"
-                    type="button"
-                    disabled={safePage >= totalPages || marketLoading}
-                    onClick={() => {
-                      setPage((p) => p + 1);
-                      bumpPane("mk-from-right");
-                    }}
-                  >
-                    下一页 ▶
-                  </button>
-                </div>
-              ) : (
-                <span />
-              )}
-              <button className="pm-btn primary" type="button" onClick={() => setOpen(false)}>
-                关闭
-              </button>
-            </div>
-          )
-        }
-      >
-        {/* 视图切换上浮缩放过渡 */}
-        <div key={view} className="mk-view-enter">{view === "market" ? marketBody : terminalBody}</div>
-      </AppModal>
+                ) : null}
+              </div>
+            ) : tabMode === "all" ? (
+              <div className="mk-pager">
+                <button
+                  className="pm-btn pm-btn-sm"
+                  type="button"
+                  disabled={safePage <= 1 || marketLoading}
+                  onClick={() => {
+                    setPage((p) => p - 1);
+                    bumpPane("mk-from-left");
+                  }}
+                >
+                  ◀ 上一页
+                </button>
+                <span className="mk-pager-info">
+                  第 {safePage} / {totalPages} 页 · 共 {formatCount(market?.total)} 个
+                </span>
+                <button
+                  className="pm-btn pm-btn-sm"
+                  type="button"
+                  disabled={safePage >= totalPages || marketLoading}
+                  onClick={() => {
+                    setPage((p) => p + 1);
+                    bumpPane("mk-from-right");
+                  }}
+                >
+                  下一页 ▶
+                </button>
+              </div>
+            ) : (
+              <span />
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* 插件详情弹框：点击插件行打开 */}
       <AppModal

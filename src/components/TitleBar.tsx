@@ -9,7 +9,8 @@ import { useUiStore } from "../store/useUiStore";
 
 /**
  * 顶部标题栏：品牌区 + 服务地址/刷新/浏览器打开 + 窗口控制。
- * 停止/重启服务、查看日志、插件、主题切换已迁移到底部导航条（BottomBar）；
+ * 停止/重启服务、查看日志已迁移到底部导航条（BottomBar）；
+ * 插件管理、通知管理、主题设置等已迁移到设置页（BottomBar 右侧入口进入）。
  * 不设「返回启动页」入口——回到启动页的唯一路径是停止服务。
  */
 export default function TitleBar() {

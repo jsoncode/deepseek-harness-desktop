@@ -1,25 +1,27 @@
 import { Popconfirm, Tooltip } from "antd";
-import { CodeOutlined, LogoutOutlined, ReloadOutlined } from "@ant-design/icons";
+import { CodeOutlined, LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
 import { useState } from "react";
-import { useNavigate } from "react-router";
-import PluginManager from "./PluginManager";
-import NotifyToggle from "./NotifyToggle";
-import ThemeSwitch from "./ThemeSwitch";
+import { useLocation, useNavigate } from "react-router";
 import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /**
  * 底部导航条：作为 .app-shell（flex 纵向布局）的最后一个元素，
  * 占用页面布局空间并固定在窗口最底部。
- * 左侧集中服务级操作：停止服务 / 重启服务 / 查看日志 / 插件 / 系统推送开关 / 主题切换。
+ * 左侧集中服务级操作：停止服务 / 重启服务 / 查看日志；
+ * 右侧为设置入口（插件管理、通知管理、主题设置等已迁入设置页）。
  */
 export default function BottomBar() {
   const navigate = useNavigate();
+  const location = useLocation();
   const phase = useAppStore((s) => s.phase);
   const serviceRunning = useAppStore((s) => s.serviceRunning);
   const stop = useAppStore((s) => s.stop);
   const startFlow = useAppStore((s) => s.startFlow);
   const [restarting, setRestarting] = useState(false);
+
+  // 设置入口激活态：当前已在设置页
+  const inSettings = location.pathname === "/settings";
 
   // 重启：立即切入启动过渡页（全屏 loading + 阶段文案，与启动共用，故文案不含「重启」），
   // 先 stop()（杀正在启动的进程树并释放端口，防止新旧进程端口重叠）再重新启动；
@@ -121,9 +123,24 @@ export default function BottomBar() {
             <CodeOutlined />
           </button>
         </Tooltip>
-        <PluginManager />
-        <NotifyToggle />
-        <ThemeSwitch />
+      </div>
+
+      <div className="bottombar-right">
+        {/* 设置入口：进入设置页（再点一次返回上一页） */}
+        <Tooltip title={inSettings ? "返回" : "设置"} placement="top">
+          <button
+            type="button"
+            className={"icon-btn" + (inSettings ? " active" : "")}
+            aria-label="设置"
+            aria-pressed={inSettings}
+            onClick={() => {
+              if (inSettings) navigate(-1);
+              else navigate("/settings");
+            }}
+          >
+            <SettingOutlined />
+          </button>
+        </Tooltip>
       </div>
     </footer>
   );
