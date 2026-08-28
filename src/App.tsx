@@ -11,7 +11,6 @@ import Launch from "./pages/Launch";
 import Loading from "./pages/Loading";
 import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
-import Terminal from "./pages/Terminal";
 import { useThemeStore } from "./store/useThemeStore";
 import { startNotifyListener } from "./lib/notify";
 
@@ -83,7 +82,6 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<Launch />} />
                 <Route path="/loading" element={<Loading />} />
-                <Route path="/terminal" element={<Terminal />} />
                 <Route path="/preview" element={<Preview />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

@@ -81,12 +81,12 @@ export default function Loading() {
         <>
           <div className="loading-fail">✗</div>
           <h1 className="loading-title">启动失败</h1>
-          <div className="loading-sub">请查看终端日志定位原因</div>
+          <div className="loading-sub">请查看日志管理定位原因</div>
           <div className="loading-actions">
             <button className="btn-secondary loading-btn" type="button" onClick={retry}>
               <ReloadOutlined style={{ fontSize: 14 }} /> 重试
             </button>
-            <button className="btn-secondary loading-btn" type="button" onClick={() => navigate("/terminal")}>
+            <button className="btn-secondary loading-btn" type="button" onClick={() => navigate("/settings?section=logs")}>
               查看日志
             </button>
             <button className="btn-secondary loading-btn" type="button" onClick={() => navigate("/")}>

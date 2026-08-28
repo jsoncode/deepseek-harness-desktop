@@ -1,5 +1,5 @@
 import { Popconfirm, Tooltip } from "antd";
-import { CodeOutlined, LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { tauri } from "../lib/tauri";
@@ -8,7 +8,7 @@ import { useAppStore } from "../store/useAppStore";
 /**
  * 底部导航条：作为 .app-shell（flex 纵向布局）的最后一个元素，
  * 占用页面布局空间并固定在窗口最底部。
- * 左侧集中服务级操作：停止服务 / 重启服务 / 查看日志；
+ * 左侧集中服务级操作：停止服务 / 重启服务；
  * 右侧为设置入口（插件管理、通知管理、主题设置等已迁入设置页）。
  */
 export default function BottomBar() {
@@ -117,12 +117,6 @@ export default function BottomBar() {
             </button>
           </Tooltip>
         </Popconfirm>
-
-        <Tooltip title="查看日志">
-          <button className="icon-btn" type="button" aria-label="查看日志" onClick={() => navigate("/terminal")}>
-            <CodeOutlined />
-          </button>
-        </Tooltip>
       </div>
 
       <div className="bottombar-right">

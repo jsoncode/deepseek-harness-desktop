@@ -14,7 +14,7 @@ import {
   type MarketSort,
   type MarketSource,
 } from "../lib/pluginMarket";
-import { MARK } from "../pages/Terminal";
+import { MARK } from "../lib/logFormat";
 
 const OP_VERB: Record<PluginOpKind, string> = {
   add: "安装",

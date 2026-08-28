@@ -1606,16 +1606,29 @@ html[data-theme="light"] .mk-op-banner {
   white-space: nowrap;
 }
 
-/* 应用名后的版本号徽标（编译期由 vite define 注入） */
+/* 应用名后的版本号徽标（编译期由 vite define 注入；可点击进设置-关于本应用） */
 .titlebar-version {
+  font-family: inherit;
   font-size: 11px;
   font-weight: 500;
   line-height: 16px;
   padding: 1px 7px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
+  background: transparent;
   color: var(--text-2);
   white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.titlebar-version:hover {
+  color: var(--text-1);
+  border-color: var(--accent-1);
+  background: rgba(99, 102, 241, 0.12);
 }
 
 .titlebar-center {
@@ -2450,6 +2463,158 @@ html[data-theme="light"] .about-app-logo {
   margin-left: auto;
   display: flex;
   align-items: center;
+  gap: 10px;
+}
+
+/* --------------------------------------------------------------------------
+   日志管理（设置页区块）
+   -------------------------------------------------------------------------- */
+
+/* 会话列表：纵向排列的行卡片 */
+.log-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-session-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.log-session-row:hover {
+  border-color: rgba(99, 102, 241, 0.55);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+/* 状态色点 */
+.log-status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.log-status-dot.active {
+  background: var(--accent-2);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.7);
+  animation: pulseDot 1.6s ease-in-out infinite;
+}
+
+.log-status-dot.success {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+.log-status-dot.error {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+}
+
+.log-session-title {
+  font-weight: 600;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.log-session-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.log-session-sep {
+  color: var(--border-strong);
+}
+
+.log-session-lines {
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 状态徽标 */
+.log-badge {
+  flex-shrink: 0;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  background: var(--panel);
+}
+
+.log-badge.active {
+  color: var(--accent-2);
+  border-color: rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+.log-badge.success {
+  color: var(--success);
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.log-badge.error {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+/* 空态 / 错误态 */
+.log-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  min-height: 200px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.log-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* 详情弹框：终端窗口撑满弹框 body（高度由 AppModal 的 80vh 约束） */
+.log-detail-window {
+  min-height: 46vh;
+  border: none;
+  border-radius: 0;
+}
+
+/* 详情弹框底部操作区 */
+.log-detail-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 10px;
 }
 

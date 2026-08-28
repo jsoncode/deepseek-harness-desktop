@@ -162,8 +162,8 @@ export default function Launch() {
       return;
     }
     if (!tauri) {
-      // 浏览器预览模式：无后端，跳转终端页展示说明
-      navigate("/terminal");
+      // 浏览器预览模式：无后端，跳转设置页日志管理查看当前会话日志
+      navigate("/settings?section=logs");
       return;
     }
     // 统一切入启动过渡页：所有启动操作（含安装/降级）都在 loading 页等待，
@@ -248,7 +248,7 @@ export default function Launch() {
 
       <div className="launch-actions">
         {busy && phase !== "checking" ? (
-          <button className="btn-secondary" type="button" onClick={() => navigate("/terminal")}>
+          <button className="btn-secondary" type="button" onClick={() => navigate("/settings?section=logs")}>
             查看日志
           </button>
         ) : null}
