@@ -1,5 +1,5 @@
 import { Popconfirm, Tooltip } from "antd";
-import { LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { HomeOutlined, LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { tauri } from "../lib/tauri";
@@ -8,7 +8,7 @@ import { useAppStore } from "../store/useAppStore";
 /**
  * 底部导航条：作为 .app-shell（flex 纵向布局）的最后一个元素，
  * 占用页面布局空间并固定在窗口最底部。
- * 左侧集中服务级操作：停止服务 / 重启服务；
+ * 左侧集中启动页入口与服务级操作：启动页（检查页）/ 停止服务 / 重启服务；
  * 右侧为设置入口（插件管理、通知管理、主题设置等已迁入设置页）。
  */
 export default function BottomBar() {
@@ -23,6 +23,8 @@ export default function BottomBar() {
 
   // 设置入口激活态：当前已在设置页
   const inSettings = location.pathname === "/settings";
+  // 启动页入口激活态：当前已在检查页（启动页）
+  const inLaunch = location.pathname === "/";
 
   // 重启：立即切入启动过渡页（全屏 loading + 阶段文案，与启动共用，故文案不含「重启」），
   // 先 stop()（杀正在启动的进程树并释放端口，防止新旧进程端口重叠）再重新启动；
@@ -59,6 +61,19 @@ export default function BottomBar() {
   return (
     <footer className="bottombar">
       <div className="bottombar-left">
+        {/* 启动页入口：左下角 home 图标，点击回到检查页（启动页） */}
+        <Tooltip title={inLaunch ? "启动页" : "返回启动页"} placement="top">
+          <button
+            type="button"
+            className={"icon-btn" + (inLaunch ? " active" : "")}
+            aria-label="启动页"
+            aria-pressed={inLaunch}
+            onClick={() => navigate("/")}
+          >
+            <HomeOutlined />
+          </button>
+        </Tooltip>
+
         {/* 危险操作改用 Popconfirm 轻确认（topLeft：气泡在按钮上方、左对齐）；
             置灰时不弹气泡，由内层 Tooltip 提示原因 */}
         <Popconfirm

@@ -3,11 +3,12 @@ import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 import { tauri } from "../lib/tauri";
+import { maskServiceUrl } from "../lib/urlMask";
 import { useAppStore } from "../store/useAppStore";
 
 interface EnvRow {
   name: string;
-  state: "ok" | "bad" | "warn";
+  state: "ok" | "bad" | "warn" | "loading";
   detail: ReactNode;
 }
 
@@ -30,6 +31,8 @@ export default function Launch() {
   const nodeVersion = useAppStore((s) => s.nodeVersion);
   const pnpmVersion = useAppStore((s) => s.pnpmVersion);
   const startFlow = useAppStore((s) => s.startFlow);
+  // 逐项检测完成标记：false = 该项仍在检测中（行内显示 loading）
+  const envCheckDone = useAppStore((s) => s.envCheckDone);
 
   useEffect(() => {
     if (!initialized) {
@@ -49,10 +52,11 @@ export default function Launch() {
   const pnpm11 = pnpmMajorOf(pnpmVersion) >= 11;
   // 任一依赖缺失（node / pnpm / dsh）或 pnpm ≥11 → 主按钮变为「安装/降级」：全自动处理后启动
   const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled && !pnpm11);
-  // 缺依赖时环境卡片黄框提醒（不再阻断按钮）；全部就绪为默认样式
-  const cardState = !tauri ? "" : needsInstall ? "warn" : "";
+  // 缺依赖时环境卡片黄框提醒（不再阻断按钮）；全部就绪为默认样式；
+  // 检测中不套黄框（此时值尚未落定，避免误报缺失）
+  const cardState = !tauri ? "" : phase === "checking" ? "" : needsInstall ? "warn" : "";
 
-  // ---- 环境检查行 ----
+  // ---- 环境检查行（逐项检测：未完成的行显示 loading，完成后点亮结果）----
   const envRows: EnvRow[] = [];
   if (!tauri) {
     envRows.push({
@@ -61,7 +65,9 @@ export default function Launch() {
       detail: "浏览器预览模式：环境检查需在桌面应用内进行",
     });
   } else {
-    if (nodeOk) {
+    if (!envCheckDone.node) {
+      envRows.push({ name: "Node.js", state: "loading", detail: <span>检测中…</span> });
+    } else if (nodeOk) {
       envRows.push({ name: "Node.js", state: "ok", detail: <>已安装 v{nodeVersion}</> });
     } else if (!nodePath) {
       envRows.push({
@@ -84,38 +90,42 @@ export default function Launch() {
     }
 
     envRows.push(
-      pnpmOk
-        ? {
-            name: "pnpm",
-            state: pnpm11 ? "warn" : "ok",
-            detail: pnpmVersion ? (
-              <span>
-                已安装 v{pnpmVersion}
-                {pnpm11 ? <span className="env-warn-text">（dsh不支持pnpm11）</span> : null}
-              </span>
-            ) : (
-              <span>已安装</span>
-            ),
-          }
-        : {
-            name: "pnpm",
-            state: "bad",
-            detail: <span>未检测到 · 点击「安装」将自动全局安装 pnpm@10（dsh 不支持 pnpm 11）</span>,
-          },
+      !envCheckDone.pnpm
+        ? { name: "pnpm", state: "loading", detail: <span>检测中…</span> }
+        : pnpmOk
+          ? {
+              name: "pnpm",
+              state: pnpm11 ? "warn" : "ok",
+              detail: pnpmVersion ? (
+                <span>
+                  已安装 v{pnpmVersion}
+                  {pnpm11 ? <span className="env-warn-text">（dsh不支持pnpm11）</span> : null}
+                </span>
+              ) : (
+                <span>已安装</span>
+              ),
+            }
+          : {
+              name: "pnpm",
+              state: "bad",
+              detail: <span>未检测到 · 点击「安装」将自动全局安装 pnpm@10（dsh 不支持 pnpm 11）</span>,
+            },
     );
 
     envRows.push(
-      dshInstalled
-        ? {
-            name: "dsh CLI",
-            state: "ok",
-            detail: dshVersion ? <span>已安装 v{dshVersion}</span> : <span>已安装</span>,
-          }
-        : {
-            name: "dsh CLI",
-            state: "warn",
-            detail: <span>未安装 · 点击「安装」将自动全局安装 @deepseek-ai/dsh</span>,
-          },
+      !envCheckDone.dsh
+        ? { name: "dsh CLI", state: "loading", detail: <span>检测中…</span> }
+        : dshInstalled
+          ? {
+              name: "dsh CLI",
+              state: "ok",
+              detail: dshVersion ? <span>已安装 v{dshVersion}</span> : <span>已安装</span>,
+            }
+          : {
+              name: "dsh CLI",
+              state: "warn",
+              detail: <span>未安装 · 点击「安装」将自动全局安装 @deepseek-ai/dsh</span>,
+            },
     );
   }
 
@@ -139,7 +149,8 @@ export default function Launch() {
     statusText = (
       <>
         服务运行中
-        {url ? <span className="url-text">{url}</span> : null}
+        {/* 地址展示对 token 打码；点击「打开应用」进入预览页时使用真实地址 */}
+        {url ? <span className="url-text">{maskServiceUrl(url)}</span> : null}
       </>
     );
     statusClass += " running";
@@ -213,18 +224,20 @@ export default function Launch() {
         <span>{statusText}</span>
       </div>
 
-      {initialized ? (
+      {/* 检测中即渲染环境卡片：逐行 loading 展示进度，结果逐项点亮；
+          app_status 收尾（initialized）后再展示插件列表 */}
+      {initialized || phase === "checking" ? (
         <div className={"env-card" + (cardState ? " " + cardState : "")}>
           {envRows.map((r) => (
             <div key={r.name} className="env-row">
               <span className={"env-mark " + r.state}>
-                {r.state === "ok" ? "✓" : r.state === "warn" ? "○" : "✗"}
+                {r.state === "ok" ? "✓" : r.state === "warn" ? "○" : r.state === "bad" ? "✗" : <span className="env-spinner" />}
               </span>
               <span className="env-name">{r.name}</span>
-              <span className="env-detail">{r.detail}</span>
+              <span className={"env-detail" + (r.state === "loading" ? " loading" : "")}>{r.detail}</span>
             </div>
           ))}
-          {tauri ? (
+          {tauri && initialized ? (
             <>
               <div className="env-section-title">Plugins</div>
               <div className="plugin-tags">

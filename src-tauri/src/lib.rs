@@ -2,6 +2,7 @@ mod credentials;
 mod dsh;
 mod logs;
 mod notify;
+mod preview;
 mod session_events;
 
 use dsh::AppState;
@@ -313,6 +314,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             dsh::app_status,
+            dsh::check_tool,
             dsh::probe_service,
             dsh::install_dsh,
             dsh::install_env_tool,
@@ -336,6 +338,10 @@ pub fn run() {
             logs::log_sessions,
             logs::log_content,
             logs::log_clear,
+            preview::preview_native_supported,
+            preview::preview_show,
+            preview::preview_resize,
+            preview::preview_hide,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：

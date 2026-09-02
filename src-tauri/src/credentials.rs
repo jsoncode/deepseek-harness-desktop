@@ -1,17 +1,15 @@
 //! 凭据配置文件（`$DSH_HOME/.credentials.yaml`）格式兼容性检查与修复。
 //!
 //! dsh 宿主升级（如 0.1.0-rc.x → 0.1.1-rc.x）后，凭据文档从「扁平 ref → 字符串」
-//! 布局升级为带版本的布局（`version: 1` + `refs:`/`records:` 区段，见
-//! @deepseek-ai/dsh-credentials-local 的 DOCUMENT_VERSION）。旧布局、手工编辑或
-//! 其他工具写出的不兼容文件会让 dsh web 在启动时直接报插件树加载失败——
-//! 典型报错：`credentials-local: the value for "version" in ... must be a string`，
-//! 且错误信息不直观、用户无从下手。
+//! 布局升级为带版本的布局（`version: 1` + `refs:` 区段，refs 用大括号包裹）。
+//! 旧布局、手工编辑或其他工具写出的不兼容文件会让 dsh web 在启动时直接报插件树
+//! 加载失败——典型报错：`credentials-local: the value for "version" in ... must be
+//! a string` / `invalid document`，且错误信息不直观、用户无从下手。
 //!
-//! 本模块在启动 dsh 服务前先按当前 dsh 的文档 schema 校验该文件：
-//! - 兼容 → 放行，正常启动；
-//! - 不兼容 → 返回打码后的文件内容与最新格式模板，由前端弹框征询用户；
-//! - 用户确认后调用 `fix_credentials` 把文件重写为最新规范格式（凭据值全部保留），
-//!   随后再启动服务。
+//! 本模块配合启动监听：dsh web 正常启动则保持原文件不动；只有启动日志出现
+//! `credentials-local:` 错误签名时，前端才弹框展示打码内容与最新格式模板，
+//! 用户确认后调用 `fix_credentials` 把文件重写为「大括号包裹」的最新格式
+//! （凭据值全部保留），随后自动重启服务。
 
 use serde::Serialize;
 use serde_yaml::{Mapping, Value};
@@ -371,25 +369,23 @@ pub struct CredentialsCheck {
     pub template: Option<String>,
 }
 
-/// 最新格式模板（展示给用户参考；占位值均为示例）
+/// 最新格式模板（展示给用户参考；占位值均为示例）。
+/// 注意：`{` 必须缩进（顶格的 `{` 是无效 YAML，dsh 会报 invalid document），
+/// 大括号内的条目用逗号分隔（严格合法的 flow mapping 语法）。
 const TEMPLATE: &str = r#"version: 1
-
 refs:
-  DEEPSEEK_API_KEY: sk-xxxxx
-  OPENAI_API_KEY: sk-xxxxx
-
-records:
-  llm-pi-ai/openai-codex:
-    kind: grant
-    payload:
-      type: oauth
-      access: eyJhbGciOi...
+  {
+    DEEPSEEK_API_KEY: sk-xxxxx,
+    OPENAI_API_KEY: sk-xxxxx
+  }
 "#;
 
-/// 启动 dsh 服务前的凭据文件格式检查。
+/// 凭据文件兼容性检查：无论兼容与否，只要文件可读都返回打码内容与最新格式模板
+/// （供启动失败后弹框展示使用）。
 ///
-/// 文件缺失 / 读取失败 / 与当前 dsh 兼容 → `compatible: true`（不阻断启动，
-/// 其余交由 dsh 自行处理）；不兼容 → `compatible: false` 并附带原因、打码内容与模板。
+/// 文件缺失 / 读取失败 / 与当前 dsh 兼容 → `compatible: true`；不兼容 →
+/// `compatible: false` 并附带中文原因。`compatible` 仅作参考，不阻断启动——
+/// 是否修复由「dsh web 启动失败且日志出现凭据格式错误」这一事实驱动。
 #[tauri::command]
 pub fn check_credentials_compat() -> Result<CredentialsCheck, String> {
     let Some(path) = credentials_path() else {
@@ -415,6 +411,7 @@ pub fn check_credentials_compat() -> Result<CredentialsCheck, String> {
             });
         }
     };
+    let masked = mask_content(&text);
     let problem = match serde_yaml::from_str::<Value>(&text) {
         Err(e) => Some(format!("文件不是有效的 YAML（可能格式损坏）：{e}")),
         Ok(root) => match validate_document(&root) {
@@ -422,25 +419,16 @@ pub fn check_credentials_compat() -> Result<CredentialsCheck, String> {
             Err(reason) => Some(reason),
         },
     };
-    let Some(problem) = problem else {
-        return Ok(CredentialsCheck {
-            compatible: true,
-            reason: None,
-            path: Some(path_str),
-            masked_content: None,
-            template: None,
-        });
-    };
     Ok(CredentialsCheck {
-        compatible: false,
-        reason: Some(problem),
+        compatible: problem.is_none(),
+        reason: problem,
         path: Some(path_str),
-        masked_content: Some(mask_content(&text)),
+        masked_content: Some(masked),
         template: Some(TEMPLATE.to_string()),
     })
 }
 
-/// 把凭据文件重写为最新规范格式（凭据值全部保留），返回修复摘要。
+/// 把凭据文件重写为最新格式（refs 用大括号包裹，凭据值全部保留），返回修复摘要。
 /// 无法识别内容布局时拒绝写回，避免覆盖用户文件。
 #[tauri::command]
 pub fn fix_credentials() -> Result<String, String> {
@@ -450,25 +438,72 @@ pub fn fix_credentials() -> Result<String, String> {
     if refs.is_empty() && records.is_empty() {
         return Err("无法从当前文件中识别出任何凭据条目，已中止修复（请手动检查该文件）".into());
     }
-    let mut root = Mapping::new();
-    root.insert(
-        Value::String("version".into()),
-        Value::Number(DOCUMENT_VERSION.into()),
-    );
-    if !refs.is_empty() {
-        root.insert(Value::String("refs".into()), Value::Mapping(refs));
-    }
-    if !records.is_empty() {
-        root.insert(Value::String("records".into()), Value::Mapping(records));
-    }
-    let out = serde_yaml::to_string(&Value::Mapping(root))
-        .map_err(|e| format!("生成最新格式内容失败: {e}"))?;
+    let out = render_brace_document(&refs, &records);
     std::fs::write(&path, &out).map_err(|e| format!("写回凭据文件失败: {e}"))?;
     let mut msg = format!("已更新为最新格式：{}", path.display());
     if dropped > 0 {
         msg.push_str(&format!("（移除了 {dropped} 个空值条目）"));
     }
     Ok(msg)
+}
+
+/// 渲染为「大括号包裹」的最新格式：`refs` 用缩进的 flow 映射 `{ ... }` 包裹
+/// （花括号必须缩进——顶格的 `{` 是无效 YAML，dsh 会报 invalid document；
+/// 条目间用逗号分隔，保证是严格合法的 flow mapping 语法），
+/// `records` 保持块式映射原样携带。凭据值全部保留。
+fn render_brace_document(refs: &Mapping, records: &Mapping) -> String {
+    let mut out = String::from("version: 1\nrefs:\n  {\n");
+    let entries: Vec<(String, String)> = refs
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().unwrap_or("<键>").to_string(),
+                v.as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let last = entries.len().saturating_sub(1);
+    for (i, (key, val)) in entries.iter().enumerate() {
+        let comma = if i < last { "," } else { "" };
+        out.push_str(&format!("    {key}: {}{}\n", yaml_quote_scalar(val), comma));
+    }
+    out.push_str("  }\n");
+    if !records.is_empty() {
+        out.push_str("records:\n");
+        if let Ok(text) = serde_yaml::to_string(&Value::Mapping(records.clone())) {
+            for line in text.lines() {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// YAML 标量输出：安全字符集内原样输出，否则双引号转义（避免 `: `、` #`、
+/// 首尾空白等破坏键值结构的写法）
+fn yaml_quote_scalar(s: &str) -> String {
+    let plain_safe = !s.is_empty()
+        && !s.contains(": ")
+        && !s.contains(" #")
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '_' | '-' | '.' | '/' | '+' | '=' | '@' | ':' | ';' | ',' | '(' | ')'
+                )
+        });
+    if plain_safe {
+        s.to_string()
+    } else {
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "");
+        format!("\"{escaped}\"")
+    }
 }
 
 #[cfg(test)]
@@ -588,6 +623,50 @@ mod tests {
     }
 
     #[test]
+    fn 修复输出为大括号包裹格式() {
+        let (refs, _, _) = extract_document(
+            "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n  OTHER: \"a: b\"\n",
+        )
+        .unwrap();
+        let out = render_brace_document(&refs, &Mapping::new());
+        assert!(out.starts_with("version: 1\nrefs:\n  {\n"), "实际: {out}");
+        // 条目间用逗号分隔（严格合法的 flow mapping），最后一条无逗号
+        assert!(
+            out.contains("    DEEPSEEK_API_KEY: sk-abc,\n"),
+            "实际: {out}"
+        );
+        // 含 ": " 的值必须被引号包裹，避免破坏键值结构
+        assert!(out.contains("    OTHER: \"a: b\"\n"), "实际: {out}");
+        assert!(out.ends_with("  }\n"), "实际: {out}");
+        // 渲染结果本身必须是合法 YAML 且能通过校验
+        let v = serde_yaml::from_str::<Value>(&out).expect("修复输出应为合法 YAML");
+        assert!(validate_document(&v).is_ok());
+    }
+
+    #[test]
+    fn 单条ref输出无逗号() {
+        let (refs, _, _) = extract_document("version: 1\nrefs:\n  KEY_A: sk-abc\n").unwrap();
+        let out = render_brace_document(&refs, &Mapping::new());
+        assert!(out.contains("    KEY_A: sk-abc\n"), "实际: {out}");
+        assert!(!out.contains("sk-abc,"), "单条 ref 不应有逗号: {out}");
+    }
+
+    #[test]
+    fn 修复输出可被dsh读取器识别() {
+        // 用与 dsh-credentials-local 相同的 yaml 解析语义验证修复输出
+        let (refs, records, _) = extract_document("version: 1\nrefs:\n  KEY_A: sk-abc\n").unwrap();
+        let out = render_brace_document(&refs, &records);
+        let v: Value = serde_yaml::from_str(&out).unwrap();
+        let m = v.as_mapping().unwrap();
+        assert_eq!(m.get("version").and_then(|x| x.as_i64()), Some(1));
+        let refs_out = m.get("refs").and_then(|x| x.as_mapping()).unwrap();
+        assert_eq!(
+            refs_out.get(Value::String("KEY_A".into())),
+            Some(&Value::String("sk-abc".into()))
+        );
+    }
+
+    #[test]
     fn 无法识别的内容返回错误() {
         assert!(extract_document("!!!\n").is_err());
         assert!(extract_document("just some text without colons\n").is_err());
@@ -613,7 +692,7 @@ mod tests {
         let c = check_credentials_compat().unwrap();
         assert!(c.compatible, "扁平格式应兼容: {:?}", c.reason);
 
-        // ③ 字符串版本号 → 不兼容：打码内容不泄露完整值；修复后为规范格式并再次通过
+        // ③ 字符串版本号 → 不兼容：打码内容不泄露完整值；修复后为大括号格式并再次通过
         std::fs::write(&path, "version: \"1\"\nrefs:\n  DEEPSEEK_API_KEY: sk-abcdef\n").unwrap();
         let c = check_credentials_compat().unwrap();
         assert!(!c.compatible);
@@ -624,8 +703,12 @@ mod tests {
         let summary = fix_credentials().unwrap();
         assert!(summary.contains("已更新为最新格式"));
         let fixed = std::fs::read_to_string(&path).unwrap();
-        assert!(fixed.starts_with("version: 1\n"), "修复后应为规范版本号: {fixed}");
-        assert!(fixed.contains("DEEPSEEK_API_KEY: sk-abcdef"), "凭据值应保留");
+        assert!(
+            fixed.starts_with("version: 1\nrefs:\n  {\n"),
+            "修复后应为大括号包裹格式: {fixed}"
+        );
+        assert!(fixed.contains("    DEEPSEEK_API_KEY: sk-abcdef"), "凭据值应保留");
+        assert!(fixed.ends_with("  }\n"), "修复后应以缩进右花括号结尾: {fixed}");
         assert!(check_credentials_compat().unwrap().compatible, "修复后应通过检查");
 
         // ④ 无法识别的内容 → 修复拒绝且不覆盖文件

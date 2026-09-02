@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, EVENTS, onEvent, tauri, withTimeout, type CredentialsCheck, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type UrlPayload } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, withTimeout, type CredentialsCheck, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type ToolCheck, type UrlPayload } from "../lib/tauri";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 
 // ---------------------------------------------------------------------------
@@ -8,6 +8,9 @@ import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 // ---------------------------------------------------------------------------
 
 export type Phase = "checking" | "idle" | "installing" | "starting" | "running" | "error" | "stopped";
+
+/** 环境逐项检测的工具（启动页每个检查行一个 loading 态） */
+export type EnvTool = "node" | "pnpm" | "dsh";
 
 export type StreamKind = "system" | "stdout" | "stderr" | "success" | "error";
 
@@ -57,6 +60,9 @@ interface AppStore {
   pluginLoadError: PluginLoadError | null;
   error: string | null;
   initialized: boolean;
+  /** 逐项环境检测完成标记：false = 该项仍在检测中（启动页对应行显示 loading）；
+   *  true = 已有该项结果（值可信）。app_status 收尾时统一落定为 true */
+  envCheckDone: Record<EnvTool, boolean>;
   /** 新一轮启动流程的序号：每次进入 installing/starting 时递增，
    *  供 web-exit 事件区分「当前流程退出」与「复核期间用户重新发起的陈旧退出」 */
   startSeq: number;
@@ -67,6 +73,8 @@ interface AppStore {
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  /** 单项环境检测结果写回：把启动页对应检查行从「检测中」点亮为结果 */
+  applyEnvToolCheck: (tool: EnvTool, result: ToolCheck) => void;
   ensurePluginsThenStart: () => Promise<void>;
   startFlow: () => Promise<void>;
   /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务 */
@@ -79,9 +87,10 @@ interface AppStore {
   ensurePnpm10: () => Promise<boolean>;
   /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
   envInstallTool: "node" | "pnpm" | null;
-  /** 启动前检查凭据配置文件格式：兼容返回 true；不兼容则弹框等用户确认，
-   *  确认修复后返回 true，取消返回 false（调用方中止启动） */
-  ensureCredentialsCompat: () => Promise<boolean>;
+  /** dsh web 因凭据配置文件格式问题启动失败时，弹框展示打码内容与最新格式模板，
+   *  等待用户确认；确认后（弹框内已调用 fixCredentials）返回 true 并自动重启服务，
+   *  取消返回 false（停留在错误页，可手动重试） */
+  promptCredentialsFix: (fallbackReason: string) => Promise<boolean>;
   /** 凭据修复弹框的决策回调：true = 已修复并继续，false = 暂不处理 */
   resolveCredentialsConfirm: (ok: boolean) => void;
   stop: () => Promise<void>;
@@ -122,8 +131,14 @@ const ENV_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 let envExitResolve: ((code: number) => void) | null = null;
 let envExitTimer: ReturnType<typeof setTimeout> | null = null;
 
-// 凭据修复弹框的决策槽：ensureCredentialsCompat 挂槽，弹框按钮触发
+// 凭据修复弹框的决策槽：promptCredentialsFix 挂槽，弹框按钮触发
 let credentialsConfirmResolve: ((ok: boolean) => void) | null = null;
+// 「dsh web 启动失败且日志含凭据格式错误」的监听标志：
+// web-log 事件命中错误签名时置位，web-exit 事件据此进入修复流程
+let credsFailPending = false;
+let credsFailLine: string | null = null;
+// 每次应用会话只自动弹一次修复框（修复后仍失败时避免弹框循环轰炸）
+let credsPromptShown = false;
 
 function waitEnvExit(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
@@ -293,6 +308,12 @@ export const useAppStore = create<AppStore>((set, get) => {
       const stream: StreamKind =
         p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
       get().appendLog(stream, p.line);
+      // 凭据配置文件格式错误签名（dsh-credentials-local 的报错前缀）：
+      // 命中即标记，web-exit 时若确认启动失败，进入「弹框 → 修复 → 重启」流程
+      if (p.line.includes("credentials-local:")) {
+        credsFailPending = true;
+        credsFailLine = p.line;
+      }
     });
 
     onEvent<ExitPayload>(EVENTS.webExit, (p) => {
@@ -337,6 +358,25 @@ export const useAppStore = create<AppStore>((set, get) => {
         }
         // 当前启动流程（installing/starting）的退出：如实上报失败，
         // 由启动页/重启页给出重试入口，而不是永远停留在「启动中」
+        const credsDetected =
+          credsFailPending || cur.logs.some((l) => l.text.includes("credentials-local:"));
+        if (credsDetected && !credsPromptShown) {
+          credsPromptShown = true;
+          credsFailPending = false;
+          const reasonLine = credsFailLine ?? `dsh web 启动失败，退出码 ${p.code}`;
+          get().appendLog(
+            "error",
+            `❌ dsh web 启动失败（退出码 ${p.code}）：凭据配置文件格式不兼容`,
+          );
+          set({ phase: "error", error: "dsh web 启动失败：凭据配置文件格式不兼容" });
+          // 弹框展示打码内容与最新格式模板；确认修复后自动重启服务
+          const ok = await get().promptCredentialsFix(reasonLine);
+          if (ok) {
+            get().appendLog("system", "凭据配置文件已更新为最新格式，正在重新启动服务…");
+            void get().startFlow();
+          }
+          return;
+        }
         get().appendLog("error", `❌ dsh web 启动失败（退出码 ${p.code}）`);
         set({ phase: "error", error: `dsh web 启动失败，退出码 ${p.code}` });
       })();
@@ -371,6 +411,60 @@ export const useAppStore = create<AppStore>((set, get) => {
     });
   }
 
+  /** 单项环境检测：逐项点亮启动页检查行；失败静默（app_status 收尾兜底） */
+  async function runToolCheck(tool: EnvTool): Promise<void> {
+    try {
+      const r = await withTimeout(api.checkTool(tool), 8000, "环境检测");
+      get().applyEnvToolCheck(tool, r);
+    } catch {
+      /* 单项失败（旧后端无此命令/超时）：由 app_status 收尾统一落值 */
+    }
+  }
+
+  /** 收尾检测：app_status 聚合权威值（服务/插件/phase）并最终落定全部检查行。
+   *  failToIdle = true（init 首检）：失败回就绪态让用户可手动重试；
+   *  false（refreshStatus 刷新）：失败静默忽略，保留现有展示 */
+  async function settleStatus(prevPhase: Phase, failToIdle: boolean): Promise<void> {
+    try {
+      const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
+      set({
+        dshInstalled: s.dsh_installed,
+        dshVersion: s.dsh_version,
+        serviceRunning: s.service_running,
+        childRunning: s.child_running,
+        url: s.url,
+        pnpmPath: s.pnpm_path,
+        dshPath: s.dsh_path,
+        nodePath: s.node_path,
+        nodeVersion: s.node_version,
+        pnpmVersion: s.pnpm_version,
+        plugins: s.plugins ?? [],
+        profileReady: s.profile_ready,
+        serviceAlive: s.service_running,
+        envCheckDone: { node: true, pnpm: true, dsh: true },
+        phase: s.service_running
+          ? "running"
+          : s.child_running
+            ? "starting"
+            : prevPhase === "stopped" || prevPhase === "error"
+              ? prevPhase
+              : "idle",
+        initialized: true,
+      });
+    } catch {
+      if (failToIdle) {
+        // 超时/失败：不误报"启动失败"，回到就绪态让用户可手动重试；
+        // 检查行以单项检测结果为准（单项也失败时显示未检测到）
+        set({
+          phase: "idle",
+          error: null,
+          initialized: true,
+          envCheckDone: { node: true, pnpm: true, dsh: true },
+        });
+      }
+    }
+  }
+
   return {
     phase: "checking",
     logs: [],
@@ -393,6 +487,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pluginLoadError: null,
     error: null,
     initialized: false,
+    envCheckDone: { node: false, pnpm: false, dsh: false },
     envInstallTool: null,
     startSeq: 0,
     credentialsIssue: null,
@@ -478,6 +573,22 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     setPhase: (phase) => set({ phase }),
 
+    applyEnvToolCheck: (tool, result) => {
+      const done = { ...get().envCheckDone, [tool]: true };
+      if (tool === "node") {
+        set({ envCheckDone: done, nodePath: result.path, nodeVersion: result.version });
+      } else if (tool === "pnpm") {
+        set({ envCheckDone: done, pnpmPath: result.path, pnpmVersion: result.version });
+      } else {
+        set({
+          envCheckDone: done,
+          dshPath: result.path,
+          dshInstalled: result.path !== null,
+          dshVersion: result.version,
+        });
+      }
+    },
+
     beginLogSession: async (title) => {
       if (!tauri) return;
       try {
@@ -503,95 +614,67 @@ export const useAppStore = create<AppStore>((set, get) => {
     init: async () => {
       wireEvents();
       if (get().initialized) return;
-      set({ phase: "checking" });
+      set({
+        phase: "checking",
+        initialized: false,
+        envCheckDone: { node: false, pnpm: false, dsh: false },
+      });
       if (!tauri) {
         // 浏览器预览模式：无 Rust 后端，保持空闲态，避免误报"启动失败"
         set({ phase: "idle", initialized: true });
         return;
       }
-      try {
-        // 环境检测有超时兜底：后端探测（where/--version/PowerShell）均已限时，
-        // 前端再加一层保护，避免任何意外挂起让启动页永远卡在"检测中"
-        const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
-        set({
-          dshInstalled: s.dsh_installed,
-          dshVersion: s.dsh_version,
-          serviceRunning: s.service_running,
-          childRunning: s.child_running,
-          url: s.url,
-          pnpmPath: s.pnpm_path,
-          dshPath: s.dsh_path,
-          nodePath: s.node_path,
-          nodeVersion: s.node_version,
-          pnpmVersion: s.pnpm_version,
-          plugins: s.plugins ?? [],
-          profileReady: s.profile_ready,
-          serviceAlive: s.service_running,
-          phase: s.service_running
-            ? "running"
-            : s.child_running
-              ? "starting"
-              : "idle",
-          initialized: true,
-        });
-      } catch (e) {
-        // 超时/失败：不误报"启动失败"，回到就绪态让用户可手动重试
-        set({ phase: "idle", error: null, initialized: true });
-      }
+      // 环境检测拆分为「逐项 + 收尾」并发执行：node/pnpm/dsh 各发一次 check_tool，
+      // 每项完成即写回 store，启动页对应行立即从「检测中」点亮为结果，
+      // 不再等全部检测结束才一次性渲染；app_status 收尾提供权威的
+      // 服务/插件/phase 值并最终落定全部检查行。
+      // 用 allSettled：任一项失败（如旧后端无 check_tool 命令）不影响其余链路。
+      await Promise.allSettled([
+        runToolCheck("node"),
+        runToolCheck("pnpm"),
+        runToolCheck("dsh"),
+        settleStatus(get().phase, true),
+      ]);
     },
 
     refreshStatus: async () => {
       // 启动中不打断
       const cur = get().phase;
       if (cur === "installing" || cur === "starting") return;
-      try {
-        const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
-        set({
-          dshInstalled: s.dsh_installed,
-          dshVersion: s.dsh_version,
-          serviceRunning: s.service_running,
-          childRunning: s.child_running,
-          url: s.url,
-          pnpmPath: s.pnpm_path,
-          dshPath: s.dsh_path,
-          nodePath: s.node_path,
-          nodeVersion: s.node_version,
-          pnpmVersion: s.pnpm_version,
-          plugins: s.plugins ?? [],
-          profileReady: s.profile_ready,
-          serviceAlive: s.service_running,
-          phase: s.service_running
-            ? "running"
-            : s.child_running
-              ? "starting"
-              : cur === "stopped" || cur === "error"
-                ? cur
-                : "idle",
-          initialized: true,
-        });
-      } catch {
-        /* 忽略刷新失败 */
-      }
+      // 与 init 相同的逐项 + 收尾链路：返回启动页时检查行同样逐项刷新，
+      // 不再等全部检测结束才一次性更新
+      await Promise.allSettled([
+        runToolCheck("node"),
+        runToolCheck("pnpm"),
+        runToolCheck("dsh"),
+        settleStatus(cur, false),
+      ]);
     },
 
-    ensureCredentialsCompat: async () => {
-      if (!tauri) return true;
-      let res: CredentialsCheck;
+    promptCredentialsFix: async (fallbackReason: string) => {
+      let issue: CredentialsCheck;
       try {
-        res = await withTimeout(api.checkCredentialsCompat(), 8000, "凭据配置检查");
+        issue = await withTimeout(api.checkCredentialsCompat(), 8000, "凭据配置检查");
       } catch {
-        // 检查本身失败（环境异常等）：不阻断启动，交由 dsh 自行报错
-        return true;
+        // 检查本身失败（环境异常等）：也要能弹框，用启动日志中的原始错误行兜底
+        issue = {
+          compatible: false,
+          reason: fallbackReason,
+          path: null,
+          masked_content: null,
+          template: null,
+        };
       }
-      if (res.compatible) return true;
-      // 不兼容：写入状态让弹框展示，等待用户确认是否更新为最新格式
+      // 弹框原因以 dsh 启动日志中的真实错误行为准（最贴近用户看到的失败事实）；
+      // 后端 schema 检查仅用于取打码内容与最新格式模板
+      issue = { ...issue, compatible: false, reason: fallbackReason };
       get().appendLog(
         "system",
-        "检测到凭据配置文件格式不兼容，等待用户确认是否更新为最新格式…",
+        "dsh web 启动失败：凭据配置文件格式不兼容，等待用户确认是否更新为最新格式…",
       );
       return new Promise<boolean>((resolve) => {
         credentialsConfirmResolve = resolve;
-        set({ credentialsIssue: res });
+        set({ credentialsIssue: issue });
       });
     },
 
@@ -603,14 +686,6 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     ensurePluginsThenStart: async () => {
-      // ① 凭据配置文件格式兼容性检查：不兼容时弹框，用户确认修复后才继续启动；
-      //    取消则中止本次启动（凭据文件不修好，dsh web 启动必然失败）
-      const compatOk = await get().ensureCredentialsCompat();
-      if (!compatOk) {
-        get().appendLog("system", "已取消启动：凭据配置文件格式需要更新（可稍后重新点击启动）");
-        set({ phase: "idle", error: null });
-        return;
-      }
       const s = get();
       // 浏览器预览或 profile 未生成（首次运行）：跳过插件安装直接启动
       if (!tauri || !s.profileReady) {

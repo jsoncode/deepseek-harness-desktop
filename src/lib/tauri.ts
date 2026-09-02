@@ -44,6 +44,12 @@ export interface StatusPayload {
   profile_ready: boolean;
 }
 
+/** 单项环境检测结果（tool = "node" | "pnpm" | "dsh"） */
+export interface ToolCheck {
+  path: string | null;
+  version: string | null;
+}
+
 /** 凭据配置文件（$DSH_HOME/.credentials.yaml）格式兼容性检查结果 */
 export interface CredentialsCheck {
   /** 是否与当前 dsh 兼容（兼容则无需任何处理） */
@@ -54,7 +60,7 @@ export interface CredentialsCheck {
   path: string | null;
   /** 当前文件内容（值已打码）；文件缺失/无法读取时为 null */
   masked_content: string | null;
-  /** 最新格式模板（全部为占位值）；仅不兼容时提供 */
+  /** 最新格式模板（全部为占位值）；文件可读时始终提供 */
   template: string | null;
 }
 
@@ -131,6 +137,9 @@ function requireTauri<T>(fn: () => Promise<T>): Promise<T> {
 
 export const api = {
   appStatus: () => requireTauri(() => invoke<StatusPayload>("app_status")),
+  /** 单项环境检测：tool = "node" | "pnpm" | "dsh"（启动页逐项 loading，每项独立返回） */
+  checkTool: (tool: "node" | "pnpm" | "dsh") =>
+    requireTauri(() => invoke<ToolCheck>("check_tool", { tool })),
   probeService: (url: string) => requireTauri(() => invoke<boolean>("probe_service", { url })),
   installDsh: () => requireTauri(() => invoke<void>("install_dsh")),
   /** 安装缺失的环境依赖：tool = "node" | "pnpm"（按平台自动选择 winget/brew/npm 指令） */
@@ -179,6 +188,18 @@ export const api = {
     requireTauri(() => invoke<SessionLogEntry[]>("log_content", { id })),
   /** 清空全部日志会话 */
   logClear: () => requireTauri(() => invoke<void>("log_clear")),
+  /** 是否支持原生子 webview 预览：打包正式版顶层是 tauri://localhost，
+   *  DOM iframe 跨站无法通过宿主 SameSite=Strict 认证，宿主页须作为子 webview
+   *  的顶层文档承载（当前 Windows 启用，macOS/Linux 回退 iframe） */
+  previewNativeSupported: () => requireTauri(() => invoke<boolean>("preview_native_supported")),
+  /** 在内容区显示/更新宿主页：url 变化、刷新或进入预览时调用（幂等：已存在则导航+重定位） */
+  previewShow: (url: string, x: number, y: number, width: number, height: number) =>
+    requireTauri(() => invoke<void>("preview_show", { url, x, y, width, height })),
+  /** 内容区位置/尺寸变化时同步（窗口缩放、最大化/还原等） */
+  previewResize: (x: number, y: number, width: number, height: number) =>
+    requireTauri(() => invoke<void>("preview_resize", { x, y, width, height })),
+  /** 离开预览页 / 停止服务时销毁预览子 webview */
+  previewHide: () => requireTauri(() => invoke<void>("preview_hide")),
 };
 
 export async function onEvent<T>(

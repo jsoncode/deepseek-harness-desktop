@@ -933,30 +933,157 @@ $out | Sort-Object -Unique
 }
 
 /// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与本应用的默认端口，
-/// 绝不把外部已存在的实例（如其他端口）当作我们的服务
+/// 绝不把外部已存在的实例（如其他端口）当作我们的服务。
+///
+/// 新版宿主的服务地址带进程 token（查询串），只有日志里的完整地址能通过认证；
+/// 此时**只**按带查询串的候选探测，不再拼接裸地址兜底——否则裸地址（恒 401）
+/// 会被误判为可用并抢先广播，内嵌页/浏览器都停在未授权页。
 fn child_candidates(pending: &[String]) -> Vec<String> {
     let port = service_port();
     let mut c = pending.to_vec();
+    if c.iter().any(|u| has_url_query(u)) {
+        c.retain(|u| has_url_query(u));
+        c.dedup();
+        return c;
+    }
     c.push(format!("http://127.0.0.1:{port}"));
     c.push(format!("http://localhost:{port}"));
     c.dedup();
     c
 }
 
-/// 从一行文本中提取 http://host:port 形式的 URL
-fn extract_urls(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = line;
-    while let Some(idx) = rest.find("http://") {
-        let tail = &rest[idx + 7..];
-        let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '<' | ','))
-            .unwrap_or(tail.len());
-        let host_port = &tail[..end];
-        if host_port.contains(':') && host_port.ends_with(|c: char| c.is_ascii_digit()) {
-            out.push(format!("http://{host_port}"));
+/// URL 中是否带查询串（如宿主认证链接 `http://…/?token=…`）。
+/// 这类地址必须整段保留并优先使用：裸地址在新版宿主上只会拿到 401。
+fn has_url_query(url: &str) -> bool {
+    let Some(stripped) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    // 查询串位于 authority（第一个 '/'）之后
+    match stripped.find('/') {
+        Some(slash) => stripped[slash..].contains('?'),
+        None => false,
+    }
+}
+
+/// 对 URL 发一次根路径请求并返回 HTTP 状态码（无法连通/响应非 HTTP 时为 None）。
+///
+/// 用于区分「服务可达但需要访问 token（401，裸地址不可用）」与
+/// 「服务无需认证即可访问（2xx/3xx，旧版宿主裸地址可用）」。
+fn probe_http_status(url: &str, timeout_ms: u64) -> Option<u16> {
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host_port = stripped.split('/').next().unwrap_or(stripped);
+    let (host, port_str) = host_port.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return None;
+    };
+    for addr in addrs {
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms))
+        {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
+            let req = format!(
+                "GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: deepseek-harness-desktop\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(req.as_bytes());
+            let mut buf = [0u8; 512];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n > 0 {
+                    if let Some(line) = String::from_utf8_lossy(&buf[..n]).lines().next() {
+                        // 形如 "HTTP/1.1 200 OK"
+                        if let Some(code) = line.split_whitespace().nth(1) {
+                            if let Ok(code) = code.parse::<u16>() {
+                                return Some(code);
+                            }
+                        }
+                    }
+                }
+            }
         }
-        rest = &tail[end..];
+    }
+    None
+}
+
+/// 服务在裸地址（无 token 查询串）下是否真的可用（返回 2xx/3xx）。
+/// 新版宿主对裸地址恒返回 401，因此 401/403 一律视为「不可用」。
+fn is_url_usable_without_auth(url: &str, timeout_ms: u64) -> bool {
+    probe_http_status(url, timeout_ms).is_some_and(|code| (200..400).contains(&code))
+}
+
+/// 探测候选地址，返回第一个「真正可用」的服务 URL：
+/// - 日志给出的带查询串（token）地址：TCP 可达即视为可用——它本身就是认证地址，
+///   携带 token 请求会得到 303 并在浏览器种下会话 cookie；
+/// - 裸地址兜底：只有返回非 401/403 才视为可用（旧版宿主无需认证）。
+///   新版宿主对裸地址恒返回 401，若 401 也算「可用」，会在日志中的 token 地址
+///   解析出来之前就把裸地址当作服务地址广播出去（内嵌页停在未授权页）。
+fn probe_first_usable(candidates: &[String], timeout_ms: u64) -> Option<String> {
+    let token_urls: Vec<String> = candidates
+        .iter()
+        .filter(|u| has_url_query(u))
+        .cloned()
+        .collect();
+    if !token_urls.is_empty() {
+        return probe_parallel(&token_urls, timeout_ms);
+    }
+    for u in candidates {
+        if has_url_query(u) {
+            continue;
+        }
+        if is_url_usable_without_auth(u, timeout_ms) {
+            return Some(u.clone());
+        }
+    }
+    None
+}
+
+/// 从一行文本中提取 http(s):// URL。
+///
+/// 新版宿主就绪时输出的是带认证 token 的完整地址（形如
+/// `dsh web: http://127.0.0.1:3080/?token=xxxx`，token 为 base64url、通常不以
+/// 数字结尾），因此必须保留查询串、不能只截 host:port，也不能要求地址以数字
+/// 结尾；同时去掉行内常见的收尾标点/成对符号噪音（如 `(LAN: …)` 的括号），
+/// 并按「存在 host:port」校验避免把散文里的片段当作地址。
+fn extract_urls(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = line;
+    loop {
+        // 取本行剩余部分里最早出现的 scheme（http:// / https://）
+        let mut earliest: Option<(usize, usize)> = None; // (起点, scheme 长度)
+        for scheme in ["http://", "https://"] {
+            if let Some(i) = rest.find(scheme) {
+                match earliest {
+                    Some((j, _)) if j <= i => {}
+                    _ => earliest = Some((i, scheme.len())),
+                }
+            }
+        }
+        let Some((start, scheme_len)) = earliest else {
+            break;
+        };
+        // 记住 scheme 文本（http:// / https://），cand 只保留其后的部分
+        let scheme = &rest[start..start + scheme_len];
+        let after = &rest[start + scheme_len..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`'))
+            .unwrap_or(after.len());
+        // 去掉行尾常见的标点/收尾符号（句点、逗号、(LAN: …) 的收尾括号等），
+        // token（base64url）等真实 URL 字符不受影响
+        let cand = after[..end].trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | ')' | ']' | '}' | '>' | ',' | ';' | '.' | '!'
+            )
+        });
+        let full = format!("{scheme}{cand}");
+        if url_port(&full).is_some() && !out.iter().any(|u| u == &full) {
+            out.push(full);
+        }
+        // 从已消费片段之后继续扫描（可能同一行还有 LAN 等其他地址）
+        rest = &rest[start + scheme_len + end..];
     }
     out
 }
@@ -1040,7 +1167,9 @@ fn try_detect_url(app: &AppHandle, line: &str) {
             return;
         }
     }
-    if let Some(url) = probe_parallel(&urls, 800) {
+    // 只处理「真正可用」的地址（带 token 的完整地址 / 返回非 401/403 的裸地址），
+    // 避免在日志地址解析出来前把仅 401 可达的裸地址当作服务地址广播
+    if let Some(url) = probe_first_usable(&urls, 800) {
         if let Some(state) = app.try_state::<AppState>() {
             *state.detected_url.lock().unwrap() = Some(url.clone());
         }
@@ -1127,6 +1256,17 @@ fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> Sta
             url = probe_parallel(&extra, 400);
         }
     }
+    // 端口可达但需要 token（裸地址恒 401）的实例不算「可运行」：token 只出现在
+    // 自家子进程的启动日志里，401 说明那是升级/崩溃后遗留的实例（或他人启动的
+    // 受保护实例），直接把无 token 裸地址当服务地址会让内嵌页/浏览器停在未授权页。
+    // 让其落到「未运行」→ 用户点启动时按遗留实例重新拉起（见 start_dsh_web）。
+    let url = url.and_then(|u| {
+        if has_url_query(&u) || is_url_usable_without_auth(&u, 500) {
+            Some(u)
+        } else {
+            None
+        }
+    });
     // 命中服务 URL 时由 async 包装层写回 AppState（此处不持有状态句柄）
     let service_running = url.is_some();
 
@@ -1144,6 +1284,48 @@ fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> Sta
         plugins,
         profile_ready,
     }
+}
+
+#[derive(Serialize, Clone)]
+pub struct ToolCheck {
+    pub path: Option<String>,
+    pub version: Option<String>,
+}
+
+/// 单项环境检测：只探测指定工具（node / pnpm / dsh）的路径与版本。
+///
+/// 与 app_status 拆开的原因：app_status 一次性返回全部结果，启动页必须等所有
+/// 检测（含服务探测/插件读取）结束才能渲染结果；本命令供前端并发逐项调用，
+/// 每项完成后独立返回，启动页对应检查行立即从「检测中」点亮为结果，
+/// 减少整页等待时间。与 app_status 同为 async + spawn_blocking：
+/// 子进程解析/版本读取可能秒级阻塞主线程。
+#[tauri::command]
+pub async fn check_tool(tool: String) -> Result<ToolCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // macOS 先合并登录 shell PATH（与 app_status 行为一致）
+        ensure_search_path();
+        let (path, version): (Option<String>, Option<String>) = match tool.as_str() {
+            "node" => {
+                let p = resolve_node();
+                let version = p.as_ref().and_then(read_tool_version);
+                (p.map(|x| x.to_string_lossy().into_owned()), version)
+            }
+            "pnpm" => {
+                let p = resolve_pnpm();
+                let version = p.as_ref().and_then(read_tool_version);
+                (p.map(|x| x.to_string_lossy().into_owned()), version)
+            }
+            "dsh" => {
+                let d = resolve_dsh();
+                let version = d.as_ref().and_then(read_dsh_version);
+                (d.map(|x| x.display.clone()), version)
+            }
+            _ => return Err(format!("不支持的检测项: {tool}")),
+        };
+        Ok(ToolCheck { path, version })
+    })
+    .await
+    .map_err(|e| format!("环境检测任务异常: {e}"))?
 }
 
 /// 服务探活：同样移交线程池，避免健康轮询周期性阻塞主线程
@@ -1365,18 +1547,42 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         return Ok(()); // 已在运行
     }
     // 收养遗留的孤儿服务：如安装新版本时安装器强杀了旧应用，dsh web 仍在占用服务端口。
-    // 此时直接接管（可停止/继续使用），而不是再拉起一个注定绑定失败的重复实例。
+    // 旧版宿主的裸地址即可访问 → 直接接管（可停止/继续使用）；
+    // 新版宿主要求进程 token（页面地址带查询串），遗留实例的 token 无法从外部恢复、
+    // 裸地址恒 401 → 接管没有意义，改为停掉后重新拉起一个新实例（新实例的 token
+    // 会出现在启动日志里，被正常解析并广播）。
     if adopt_orphan_service(&state) {
-        emit_log(
-            &app,
-            WEB_LOG_EVENT,
-            "system",
-            "检测到上次未正常退出遗留的服务实例，已接管（可直接停止或继续使用）",
-        );
-        if let Some(url) = state.detected_url.lock().unwrap().clone() {
-            let _ = app.emit(URL_EVENT, UrlPayload { url });
+        let url = state.detected_url.lock().unwrap().clone();
+        let usable_without_token = url
+            .as_deref()
+            .and_then(|u| probe_http_status(u, 500))
+            .is_some_and(|code| (200..400).contains(&code));
+        if !usable_without_token {
+            emit_log(
+                &app,
+                WEB_LOG_EVENT,
+                "system",
+                "检测到遗留服务实例需要访问 token 且无法从外部恢复，已停止并重新启动服务…",
+            );
+            if let Some(pid) = state.child_pid.lock().unwrap().take() {
+                kill_tree(pid);
+            }
+            *state.detected_url.lock().unwrap() = None;
+            state.pending_urls.lock().unwrap().clear();
+            // 等待端口释放，避免新实例绑定失败
+            std::thread::sleep(Duration::from_millis(400));
+        } else {
+            emit_log(
+                &app,
+                WEB_LOG_EVENT,
+                "system",
+                "检测到上次未正常退出遗留的服务实例，已接管（可直接停止或继续使用）",
+            );
+            if let Some(url) = url {
+                let _ = app.emit(URL_EVENT, UrlPayload { url });
+            }
+            return Ok(());
         }
-        return Ok(());
     }
     // 新子进程 → 重置上一轮的探测结果，避免误用外部实例/旧 URL
     *state.detected_url.lock().unwrap() = None;
@@ -1448,7 +1654,9 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
                 .map(|s| s.pending_urls.lock().unwrap().clone())
                 .unwrap_or_default();
             let candidates = child_candidates(&pending);
-            if let Some(url) = probe_parallel(&candidates, 600) {
+            // 只认「真正可用」的地址：新版宿主的 token 完整地址 / 旧版宿主返回
+            // 非 401/403 的裸地址——401 只说明端口可达、页面仍打不开
+            if let Some(url) = probe_first_usable(&candidates, 600) {
                 alive_url = Some(url);
                 break;
             }
@@ -1501,7 +1709,8 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
                 .map(|s| s.pending_urls.lock().unwrap().clone())
                 .unwrap_or_default();
             let candidates = child_candidates(&pending);
-            if let Some(url) = probe_parallel(&candidates, 250) {
+            // 见 probe_first_usable：不把需要 token 的 401 裸地址误判为就绪
+            if let Some(url) = probe_first_usable(&candidates, 250) {
                 if let Some(s) = app3.try_state::<AppState>() {
                     *s.detected_url.lock().unwrap() = Some(url.clone());
                 }
@@ -2340,5 +2549,83 @@ mod tests {
             assert!(d.exists(), "{d:?} 应存在（探测前会主动创建）");
         }
         eprintln!("detected global dirs: {dirs:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 服务地址解析（新版宿主 token 链接回归）
+    // -----------------------------------------------------------------------
+
+    /// 新版宿主输出带 token 的完整地址（base64url，几乎不以数字结尾）——
+    /// 旧实现因「要求以数字结尾」会整条漏掉，必须保留查询串
+    #[test]
+    fn extract_urls_keeps_token_query() {
+        let line = "dsh web: http://127.0.0.1:3080/?token=AbC-123_xYzQ";
+        assert_eq!(
+            extract_urls(line),
+            vec!["http://127.0.0.1:3080/?token=AbC-123_xYzQ".to_string()]
+        );
+        // 不以数字结尾也要保留
+        let line2 = "dsh web: http://localhost:6088/?token=abc";
+        assert_eq!(
+            extract_urls(line2),
+            vec!["http://localhost:6088/?token=abc".to_string()]
+        );
+    }
+
+    /// 行尾噪声（句点、逗号、(LAN: …) 括号）会被去掉，且不污染 token
+    #[test]
+    fn extract_urls_trims_prose_noise() {
+        let line = "available at http://127.0.0.1:3080/?token=abc. ";
+        assert_eq!(
+            extract_urls(line),
+            vec!["http://127.0.0.1:3080/?token=abc".to_string()]
+        );
+
+        let lan = "dsh web: http://127.0.0.1:3080/?token=a (LAN: http://192.168.1.5:3080/?token=b)";
+        assert_eq!(
+            extract_urls(lan),
+            vec![
+                "http://127.0.0.1:3080/?token=a".to_string(),
+                "http://192.168.1.5:3080/?token=b".to_string(),
+            ]
+        );
+    }
+
+    /// 旧版宿主裸地址（无查询串）仍能解析；散文片段（无端口）被过滤
+    #[test]
+    fn extract_urls_plain_and_noise_filtered() {
+        assert_eq!(
+            extract_urls("dsh web: http://127.0.0.1:3080"),
+            vec!["http://127.0.0.1:3080".to_string()]
+        );
+        assert!(extract_urls("see https://example.com for details").is_empty());
+        assert!(extract_urls("no url here").is_empty());
+    }
+
+    #[test]
+    fn has_url_query_classifies() {
+        assert!(has_url_query("http://127.0.0.1:3080/?token=abc"));
+        assert!(has_url_query("https://h/p?x=1"));
+        assert!(!has_url_query("http://127.0.0.1:3080"));
+        assert!(!has_url_query("http://127.0.0.1:3080/some/path"));
+        assert!(!has_url_query("not a url"));
+    }
+
+    /// child_candidates：日志给出带 token 的完整地址后，不再拼接裸地址兜底，
+    /// 避免 401 裸地址被误当作可用服务地址
+    #[test]
+    fn child_candidates_prefers_token_urls() {
+        let pending = vec!["http://127.0.0.1:3080/?token=abc".to_string()];
+        let c = child_candidates(&pending);
+        assert_eq!(c, vec!["http://127.0.0.1:3080/?token=abc".to_string()]);
+        // 无查询串时才保留默认端口兜底
+        let c2 = child_candidates(&[]);
+        assert_eq!(
+            c2,
+            vec![
+                format!("http://127.0.0.1:{}", service_port()),
+                format!("http://localhost:{}", service_port()),
+            ]
+        );
     }
 }

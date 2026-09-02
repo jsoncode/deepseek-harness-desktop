@@ -7,6 +7,7 @@ import WindowControls from "./WindowControls";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
+import { maskServiceUrl } from "../lib/urlMask";
 
 /**
  * 顶部标题栏：品牌区（版本号可点击进设置-关于本应用）+ Home 入口 +
@@ -71,7 +72,10 @@ export default function TitleBar() {
         </Tooltip>
         <div className="url-pill">
           <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
-          <span className="url-value">{url ?? "未检测到服务"}</span>
+          {/* 地址栏展示带 token 的完整地址时对 token 打码；复制/浏览器打开仍用真实地址 */}
+          <span className="url-value" title={url ? maskServiceUrl(url) : undefined}>
+            {url ? maskServiceUrl(url) : "未检测到服务"}
+          </span>
         </div>
         <Tooltip title="刷新（当前页面与环境状态）">
           <button className="icon-btn" type="button" aria-label="刷新" onClick={handleRefresh}>

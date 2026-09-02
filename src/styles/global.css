@@ -362,6 +362,27 @@ body {
   color: var(--warn);
 }
 
+/* 检测中：占位行用转圈替代勾叉，避免整页等待全部检测结束 */
+.env-mark.loading {
+  display: grid;
+  place-items: center;
+  color: var(--accent-2);
+}
+
+.env-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(34, 211, 238, 0.25);
+  border-top-color: var(--accent-2);
+  animation: spinSlow 0.8s linear infinite;
+}
+
+.env-detail.loading {
+  font-style: italic;
+  color: var(--text-3);
+}
+
 .env-name {
   flex-shrink: 0;
   font-weight: 600;
