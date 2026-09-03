@@ -53,11 +53,14 @@ export default function Loading() {
       return;
     }
     const s = useAppStore.getState();
+    // dsh 已安装但读不出版本 = 安装损坏（与启动页/后端完整性校验一致）→ 走一键安装链重装；
+    // 正常安装的 dsh 走常规启动链（启动链绝不自动重装/更新，避免覆盖现有版本）
     const needsInstall =
       !(
         meetsNodeRequirement(s.nodeVersion) &&
         Boolean(s.pnpmPath) &&
         s.dshInstalled &&
+        Boolean(s.dshVersion) &&
         pnpmMajorOf(s.pnpmVersion) < 11
       );
     void (needsInstall ? s.installEnvAndStart() : s.startFlow());

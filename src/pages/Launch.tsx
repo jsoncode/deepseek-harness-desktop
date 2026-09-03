@@ -50,8 +50,11 @@ export default function Launch() {
   const pnpmOk = Boolean(pnpmPath);
   // pnpm ≥11 使用隔离的全局虚拟仓库布局，dsh 与其不兼容（点击按钮可一键降级到 pnpm 10）
   const pnpm11 = pnpmMajorOf(pnpmVersion) >= 11;
-  // 任一依赖缺失（node / pnpm / dsh）或 pnpm ≥11 → 主按钮变为「安装/降级」：全自动处理后启动
-  const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled && !pnpm11);
+  // dsh 已安装但读不出版本 = 安装损坏（与后端 start_dsh_web 的完整性校验一致）。
+  // 启动链绝不自动重装已安装的 dsh，损坏时由用户点击「安装」走一键安装链手动重装
+  const dshBroken = dshInstalled && !dshVersion;
+  // 任一依赖缺失（node / pnpm / dsh）、pnpm ≥11 或 dsh 安装损坏 → 主按钮变为「安装」：全自动处理后启动
+  const needsInstall = Boolean(tauri) && !(nodeOk && pnpmOk && dshInstalled && !dshBroken && !pnpm11);
   // 缺依赖时环境卡片黄框提醒（不再阻断按钮）；全部就绪为默认样式；
   // 检测中不套黄框（此时值尚未落定，避免误报缺失）
   const cardState = !tauri ? "" : phase === "checking" ? "" : needsInstall ? "warn" : "";
@@ -118,8 +121,12 @@ export default function Launch() {
         : dshInstalled
           ? {
               name: "dsh CLI",
-              state: "ok",
-              detail: dshVersion ? <span>已安装 v{dshVersion}</span> : <span>已安装</span>,
+              state: dshBroken ? "warn" : "ok",
+              detail: dshVersion ? (
+                <span>已安装 v{dshVersion}</span>
+              ) : (
+                <span>已安装但无法读取版本（可能已损坏）· 点击「安装」重新全局安装</span>
+              ),
             }
           : {
               name: "dsh CLI",

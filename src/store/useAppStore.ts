@@ -77,7 +77,9 @@ interface AppStore {
   applyEnvToolCheck: (tool: EnvTool, result: ToolCheck) => void;
   ensurePluginsThenStart: () => Promise<void>;
   startFlow: () => Promise<void>;
-  /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务 */
+  /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务。
+   *  dsh 仅在缺失或安装损坏（读不出版本）时安装；已正常安装的 dsh 绝不在
+   *  启动链中自动重装/更新，避免 @latest 覆盖现有版本 */
   installEnvAndStart: () => Promise<void>;
   /** 开始新的日志会话（finalize 旧会话），成功后将 id 存入 logSessionId */
   beginLogSession: (title: string) => Promise<void>;
@@ -764,22 +766,17 @@ export const useAppStore = create<AppStore>((set, get) => {
         return;
       }
 
-      if (dshInstalled && downgraded) {
-        get().appendLog(
-          "system",
-          "检测到 dsh 由 pnpm 11 安装（布局不兼容），重新全局安装 @deepseek-ai/dsh@latest …",
-        );
-        set({ phase: "installing" });
-        try {
-          await api.installDsh(); // install-exit 事件链自动续接启动
-        } catch (e) {
-          get().appendLog("error", `安装失败：${String(e)}`);
-          set({ phase: "error", error: String(e) });
-        }
-        return;
-      }
-
+      // dsh 已全局安装：启动链一律保留现有版本——绝不自动重装/更新（@latest 会
+      // 覆盖现有 dsh 版本，历史上曾因 dsh 升级引发兼容性问题）。pnpm 刚从 11 降级
+      // 时也不再重装；若旧 dsh 确因布局损坏无法启动，start_dsh_web 的完整性校验
+      // 会给出明确错误，由用户在启动页点击「安装」手动重装。
       if (dshInstalled) {
+        if (downgraded) {
+          get().appendLog(
+            "system",
+            "检测到 pnpm 刚从 11 降级到 10：保留现有 dsh 版本继续启动（不再自动重装 @latest，避免覆盖现有版本）",
+          );
+        }
         get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");
         void get().ensurePluginsThenStart();
       } else {
@@ -796,7 +793,8 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     /** 一键安装缺失的环境依赖并自动启动：node → pnpm → dsh →（既有链）插件依赖 → dsh web。
      *  每步安装后刷新 PATH 并重测环境，确认生效才进入下一步；
-   *  dsh 安装沿用 install-exit 事件链，装完自动续接启动。 */
+   *  dsh 仅在缺失或安装损坏（读不出版本）时安装——正常安装的 dsh 保留现有版本，
+   *  绝不因 pnpm 降级等原因自动重装/更新 @latest。安装沿用 install-exit 事件链，装完自动续接启动。 */
     installEnvAndStart: async () => {
       if (!tauri) return;
       const st = get();
@@ -857,17 +855,26 @@ export const useAppStore = create<AppStore>((set, get) => {
         const downgraded = await get().ensurePnpm10();
 
         set({ phase: "installing", envInstallTool: null });
-        // ③ dsh：缺失，或刚从 pnpm 11 降级（旧 dsh 为坏布局）→ 重新全局安装。
+        // ③ dsh：仅在「缺失」或「已安装但无法读取版本（安装损坏，用户已通过
+        //    「安装」/「重试」按钮明确要求修复）」时全局安装；正常安装的 dsh 一律
+        //    保留现有版本——启动链绝不自动重装/更新 @latest 覆盖现有版本。
         //    沿用既有事件链——install-exit 成功后自动续接插件依赖安装与服务启动
-        if (!get().dshInstalled || downgraded) {
+        const dshBroken = Boolean(get().dshInstalled) && !get().dshVersion;
+        if (!get().dshInstalled || dshBroken) {
           get().appendLog(
             "system",
-            downgraded
-              ? "检测到 dsh 由 pnpm 11 安装（布局不兼容），重新全局安装 @deepseek-ai/dsh@latest …"
-              : "开始全局安装 @deepseek-ai/dsh@latest …",
+            dshBroken
+              ? "检测到 dsh 已安装但无法读取版本（安装可能已损坏），开始重新全局安装 @deepseek-ai/dsh@latest …"
+              : "未检测到 dsh，开始全局安装 @deepseek-ai/dsh@latest …",
           );
           await api.installDsh();
           return; // 后续流程由既有事件链驱动，本函数到此结束
+        }
+        if (downgraded) {
+          get().appendLog(
+            "system",
+            "检测到 pnpm 刚从 11 降级到 10：保留现有 dsh 版本继续启动（不再自动重装 @latest，避免覆盖现有版本）",
+          );
         }
 
         // 环境全部就绪 → 直接进入现有启动链（含插件依赖与 dsh web 启动、自动打开）

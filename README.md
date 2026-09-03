@@ -29,7 +29,7 @@
 
 **首次使用（两步完成）**：
 
-1. 安装 [Node.js](https://nodejs.org/) ≥ 22.19 与 [pnpm](https://pnpm.io/zh-CN/installation)——应用会自动执行 `pnpm add -g @deepseek-ai/dsh@latest` 安装 DSH 并启动本地服务；
+1. 安装 [Node.js](https://nodejs.org/) ≥ 22.19 与 [pnpm](https://pnpm.io/zh-CN/installation)——首次启动时应用会自动执行 `pnpm add -g @deepseek-ai/dsh@latest` 安装 DSH 并启动本地服务（仅在 dsh 未安装时执行）；
 2. 打开应用，点击「启动应用」手动启动服务（统一进入启动过渡页展示检测/安装/启动进度），服务就绪后自动打开服务页面。
 
 > - Windows 若提示 SmartScreen，请选择「更多信息 → 仍要运行」。
@@ -40,8 +40,8 @@
 ## ✨ 亮点
 
 - **安装包极小** — 全平台安装包仅 **2~3 MB**（Windows NSIS 约 2 MB、macOS DMG/PKG 约 3 MB），秒级下载、秒级安装（对比 Electron 应用动辄上百 MB）。
-- **一键启动** — 自动全局安装 `@deepseek-ai/dsh`（pnpm）并启动本地网页服务，无需任何手动配置。
-- **pnpm 兼容** — 兼容 pnpm 10 全局布局（shims 位于 `PNPM_HOME`）：未运行过 `pnpm setup` 的机器也会自动完成临时 PATH 注入与用户级 PATH 持久化，安装后立即启动，下次打开不再重装。**暂不支持 pnpm 11**（dsh 与其全局虚拟仓库布局不兼容，启动页会提示）。
+- **一键启动** — 自动全局安装 `@deepseek-ai/dsh`（pnpm）并启动本地网页服务，无需任何手动配置。已安装的 dsh 在启动时**不会被更新或重装**（保留现有版本，避免 `@latest` 覆盖引发兼容性问题）；仅当 dsh 缺失或安装损坏（读不出版本）时才安装。
+- **pnpm 兼容** — 兼容 pnpm 10 全局布局（shims 位于 `PNPM_HOME`）：未运行过 `pnpm setup` 的机器也会自动完成临时 PATH 注入与用户级 PATH 持久化，安装后立即启动，下次打开不再重装。**暂不支持 pnpm 11**（dsh 与其全局虚拟仓库布局不兼容，启动页会提示并一键降级到 pnpm 10；降级后同样保留现有 dsh 版本）。
 - **智能服务检测** — 探测默认端口，且只认自家子进程输出中提及的 URL，绝不误连外部已运行的实例。
 - **流式终端** — macOS 风格模拟终端，实时输出安装/启动日志，支持停止、重启与崩溃提示。
 - **内嵌预览** — iframe 内嵌本地 DSH 网页，带健康轮询、刷新、复制地址、浏览器打开等功能。
