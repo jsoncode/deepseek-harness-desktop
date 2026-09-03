@@ -23,7 +23,9 @@ if (debugMode) {
 import { spawn } from "node:child_process";
 
 const isWin = process.platform === "win32";
-const child = spawn(isWin ? "pnpm.cmd" : "pnpm", ["tauri", "dev"], {
+// TTS 语音播报功能已集成：通过 --features tts 启用 ONNX Runtime 推理
+// 参考 Audio8_TTS 项目的小尺寸模型 CPU 推理方案
+const child = spawn(isWin ? "pnpm.cmd" : "pnpm", ["tauri", "dev", "--features", "tts"], {
   stdio: "inherit",
   shell: isWin,
 });

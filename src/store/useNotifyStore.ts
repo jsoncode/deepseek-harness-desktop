@@ -9,6 +9,7 @@ export type NotifyStyle = "clickable" | "plain";
 
 const STORAGE_KEY = "hl.notify";
 const STYLE_KEY = "hl.notify.style";
+const VOICE_KEY = "hl.notify.voice";
 
 function loadMode(): NotifyMode {
   try {
@@ -33,6 +34,22 @@ function loadStyle(): NotifyStyle {
   return "clickable";
 }
 
+function loadVoice(): boolean {
+  try {
+    const v = localStorage.getItem(VOICE_KEY);
+    if (v === "true" || v === "false") return v === "true";
+  } catch {
+    /* ignore */
+  }
+  // 默认关闭语音播报
+  return false;
+}
+
+/** 把语音播报状态同步给 Rust */
+function syncVoice(enabled: boolean) {
+  void api.setVoiceEnabled(enabled).catch(() => undefined);
+}
+
 /** 把开关状态同步给 Rust（浏览器预览模式下 requireTauri 直接 reject，忽略即可） */
 function sync(mode: NotifyMode) {
   void api.setNotifyEnabled(mode === "on").catch(() => undefined);
@@ -48,6 +65,9 @@ interface NotifyState {
   toggle: () => void;
   style: NotifyStyle;
   setStyle: (style: NotifyStyle) => void;
+  /** 语音播报开关 */
+  voiceEnabled: boolean;
+  toggleVoice: () => void;
 }
 
 export const useNotifyStore = create<NotifyState>((set, get) => {
@@ -57,6 +77,9 @@ export const useNotifyStore = create<NotifyState>((set, get) => {
   // 样式同理：本机存的值与 Rust 侧初值（clickable）不一致时需回写
   const initialStyle = loadStyle();
   syncStyle(initialStyle);
+  // 语音播报状态同步
+  const initialVoice = loadVoice();
+  syncVoice(initialVoice);
   return {
     mode: initial,
     toggle: () => {
@@ -78,6 +101,17 @@ export const useNotifyStore = create<NotifyState>((set, get) => {
       }
       set({ style: next });
       syncStyle(next);
+    },
+    voiceEnabled: initialVoice,
+    toggleVoice: () => {
+      const next = !get().voiceEnabled;
+      try {
+        localStorage.setItem(VOICE_KEY, String(next));
+      } catch {
+        /* ignore */
+      }
+      set({ voiceEnabled: next });
+      syncVoice(next);
     },
   };
 });

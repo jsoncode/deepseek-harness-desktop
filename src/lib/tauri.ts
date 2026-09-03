@@ -165,6 +165,24 @@ export const api = {
    *  0 = 不可点击（原 notify-rust 样式，仅展示） */
   setNotifyStyle: (style: 0 | 1) =>
     requireTauri(() => invoke<void>("set_notify_style", { style })),
+  /** 语音播报开关：true = 启用语音播报通知内容（需配置 TTS 模型） */
+  setVoiceEnabled: (enabled: boolean) =>
+    requireTauri(() => invoke<void>("set_voice_enabled", { enabled })),
+  /** TTS 推理设备：0 = CPU，1 = GPU（需在启用 tts 特性时编译） */
+  setTtsInferenceDevice: (device: 0 | 1) =>
+    requireTauri(() => invoke<void>("set_tts_inference_device", { device })),
+  /** 下载 TTS 模型，返回模型目录路径 */
+  downloadTtsModel: () =>
+    requireTauri(() => invoke<string>("download_tts_model")),
+  /** 取消 TTS 模型下载 */
+  cancelTtsDownload: () =>
+    requireTauri(() => invoke<void>("cancel_tts_download")),
+  /** 测试 TTS 语音播报 */
+  testTtsSpeak: (text: string) =>
+    requireTauri(() => invoke<void>("test_tts_speak", { text })),
+  /** 打开目录选择器选择本地 TTS 模型目录，返回路径或 null */
+  selectTtsModelDir: () =>
+    requireTauri(() => invoke<string | null>("select_tts_model_dir")),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
   /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */

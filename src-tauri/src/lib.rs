@@ -4,6 +4,8 @@ mod logs;
 mod notify;
 mod proxy;
 mod session_events;
+#[cfg(feature = "tts")]
+mod tts;
 
 use dsh::AppState;
 use tauri::{
@@ -312,6 +314,7 @@ pub fn run() {
                 .button_id("win-maximize")
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             dsh::app_status,
@@ -330,6 +333,12 @@ pub fn run() {
             dsh::check_plugin_updates,
             dsh::set_notify_enabled,
             dsh::set_notify_style,
+            dsh::set_voice_enabled,
+            dsh::set_tts_inference_device,
+            dsh::download_tts_model,
+            dsh::cancel_tts_download,
+            dsh::test_tts_speak,
+            dsh::select_tts_model_dir,
             dsh::http_get_json,
             credentials::check_credentials_compat,
             credentials::fix_credentials,

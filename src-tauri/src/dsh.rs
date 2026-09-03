@@ -6,6 +6,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -61,6 +62,12 @@ pub struct AppState {
     /// 1 = clickable（winrt 直连，带「打开对话」按钮与激活回调，默认）。
     /// 「两种提示切换开关」后续在设置页接入，只需改这个值（见 notify.rs）。
     pub notify_style: AtomicU8,
+    /// 语音播报开关：关闭时不通过语音通道播报通知内容
+    pub voice_enabled: AtomicBool,
+    /// TTS 推理设备：0 = CPU，1 = GPU（默认 CPU）
+    pub tts_inference_device: AtomicU8,
+    /// TTS 模型下载取消标志
+    pub tts_download_cancel: AtomicBool,
     /// 当前活动日志会话（无则 None；见 logs.rs）
     pub active_log: Mutex<Option<ActiveLog>>,
 }
@@ -74,6 +81,9 @@ impl Default for AppState {
             pending_urls: Mutex::new(Vec::new()),
             notify_enabled: AtomicBool::new(true),
             notify_style: AtomicU8::new(1),
+            voice_enabled: AtomicBool::new(false),
+            tts_inference_device: AtomicU8::new(0),
+            tts_download_cancel: AtomicBool::new(false),
             active_log: Mutex::new(None),
         }
     }
@@ -2404,6 +2414,138 @@ pub async fn set_notify_style(
         crate::notify::push_sample(&app);
     }
     Ok(())
+}
+
+/// 设置语音播报开关
+#[tauri::command]
+pub async fn set_voice_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .voice_enabled
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// 设置 TTS 推理设备：0 = CPU，1 = GPU
+/// 设备变更会通知 TTS 引擎重新加载模型（如果已加载）
+#[tauri::command]
+pub async fn set_tts_inference_device(
+    state: State<'_, AppState>,
+    device: u8,
+) -> Result<(), String> {
+    state
+        .tts_inference_device
+        .store(device, std::sync::atomic::Ordering::SeqCst);
+    // TODO: 通知 tts 模块更新设备配置（需在 tts.rs 中暴露更新函数）
+    Ok(())
+}
+
+/// 下载 TTS 模型到应用数据目录
+/// 模型来源：Hugging Face - Audio8/audio8-TTS-0.1B-ONNX-INT8
+/// 注意：自动下载当前不可用（模型 URL 可能变更），请使用「选择本地模型」或手动放置文件
+/// 返回下载后的模型文件路径
+#[tauri::command]
+pub async fn download_tts_model() -> Result<String, String> {
+    use std::path::PathBuf;
+
+    // 目标路径：应用数据目录 / tts_models / audio8_tts_0.1b_int8.onnx
+    let app_data = dirs::data_dir()
+        .ok_or_else(|| "无法获取应用数据目录".to_string())?;
+    let model_dir: PathBuf = app_data.join("dsh").join("tts_models");
+    std::fs::create_dir_all(&model_dir)
+        .map_err(|e| format!("创建模型目录失败: {}", e))?;
+
+    let model_path = model_dir.join("audio8_tts_0.1b_int8.onnx");
+
+    // 如果已存在，直接返回路径
+    if model_path.exists() {
+        return Ok(model_path.to_string_lossy().to_string());
+    }
+
+    // 使用 git clone 下载整个 Hugging Face 仓库
+    // 仓库包含多个 .onnx 文件及所有配置文件
+    let repo_url = "https://huggingface.co/Audio8/audio8-TTS-0.1B-ONNX-INT8";
+    let clone_target = model_dir.join("audio8-TTS-0.1B-ONNX-INT8");
+
+    // 如果目标目录已存在，先删除（避免 git clone 失败）
+    if clone_target.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&clone_target) {
+            return Err(format!("无法清理已存在的目录 {}: {}", clone_target.display(), e));
+        }
+    }
+
+    // 执行 git clone
+    let output = std::process::Command::new("git")
+        .args(["clone", repo_url, clone_target.to_str().unwrap()])
+        .output()
+        .map_err(|e| {
+            format!(
+                "无法执行 git 命令: {}\n\n请确保已安装 Git 并添加到系统 PATH 环境变量。",
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git clone 失败:\n{}\n\n请手动克隆仓库：\ngit clone https://huggingface.co/Audio8/audio8-TTS-0.1B-ONNX-INT8\n\n然后使用「选择本地模型目录」按钮指定克隆后的目录路径。",
+            stderr
+        ));
+    }
+
+    // 返回克隆后的目录路径
+    Ok(clone_target.to_string_lossy().to_string())
+}
+
+/// 取消正在进行的 TTS 模型下载
+#[tauri::command]
+pub async fn cancel_tts_download(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .tts_download_cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// 测试 TTS 语音播报：输入文字并朗读
+#[tauri::command]
+pub async fn test_tts_speak(text: String) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("请输入要测试的文字".to_string());
+    }
+
+    #[cfg(feature = "tts")]
+    {
+        use crate::tts;
+        let model_path = tts::default_model_path();
+        if let Some(mut engine) = tts::try_get_engine() {
+            engine
+                .speak(&text, &model_path)
+                .map(|_| ())
+                .map_err(|e| format!("语音测试失败: {}", e))
+        } else {
+            Err("无法获取 TTS 引擎（可能正在使用中）".to_string())
+        }
+    }
+
+    #[cfg(not(feature = "tts"))]
+    {
+        // TTS 特性未启用时的模拟
+        eprintln!("[tts-test] 模拟播报: {}", text);
+        Ok(())
+    }
+}
+
+/// 打开目录选择对话框选择 TTS 模型目录
+/// 返回用户选择的目录路径（该目录应包含 model.onnx 及所有配置文件）
+#[tauri::command]
+pub async fn select_tts_model_dir(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let dir_path = app.dialog().file().blocking_pick_folder();
+
+    Ok(dir_path.map(|p| p.to_string()))
 }
 
 // ---------------------------------------------------------------------------

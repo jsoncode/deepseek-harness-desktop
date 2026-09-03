@@ -29,6 +29,20 @@ ureq = "2"
 # （默认特性即含它），显式列出只为表达「刻意不要 TLS 相关默认项」——本机只连 loopback 明文 ws。
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
+# TTS 语音播报（可选特性）：基于 ONNX Runtime 的小尺寸 TTS 模型 CPU 推理
+# 参考 Audio8_TTS 项目（https://github.com/Audio8-AI/Audio8_TTS），
+# 使用 Audio8/audio8-TTS-0.1B-ONNX-INT8 等小模型在低配 CPU 上运行
+# 启用方式：cargo build --features tts
+# 依赖：
+# - ort (ONNX Runtime Rust 绑定)：进行模型推理
+# - hound：WAV 文件读写
+# - rodio：跨平台音频播放
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["load-dynamic", "copy-dylibs"] }
+hound = { version = "3", optional = true }
+rodio = { version = "0.17", optional = true, default-features = false, features = ["wav"] }
+dirs = "5"
+tauri-plugin-dialog = "2"
+
 # 系统推送（Windows）：两种 toast 实现并存，由 AppState::notify_style 切换
 # （见 notify.rs 的 ToastStyle；设置页「两种提示切换开关」后续接入）。
 # - notify-rust：原有实现，保留。default-features = false 是刻意的——默认特性会
@@ -41,3 +55,6 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
 notify-rust = { version = ">=4.17, <4.18", default-features = false }
+
+[features]
+tts = ["dep:ort", "dep:hound", "dep:rodio"]

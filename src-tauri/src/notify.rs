@@ -103,6 +103,58 @@ impl NotifyChannel for ToastChannel {
     }
 }
 
+/// 语音播报通道：当 AppState::voice_enabled 为 true 时，通过 TTS 引擎朗读通知内容
+pub struct VoiceChannel;
+
+impl NotifyChannel for VoiceChannel {
+    fn name(&self) -> &'static str {
+        "voice"
+    }
+
+    fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
+        use std::sync::atomic::Ordering;
+        // 检查语音播报是否启用
+        let enabled = app
+            .state::<dsh::AppState>()
+            .voice_enabled
+            .load(Ordering::SeqCst);
+        if !enabled {
+            return;
+        }
+
+        // 构造要朗读的文本：优先使用 summary，其次 body
+        let text_to_speak = if !msg.summary.is_empty() {
+            msg.summary.clone()
+        } else if !msg.body.is_empty() {
+            msg.body.clone()
+        } else {
+            return;
+        };
+
+        // 在后台线程执行 TTS 推理，避免阻塞通知投递主流程
+        // 注意：实际生产环境应使用任务队列避免并发推理冲突
+        std::thread::spawn(move || {
+            #[cfg(feature = "tts")]
+            {
+                use crate::tts;
+                let model_path = tts::default_model_path();
+                if let Some(mut engine) = tts::try_get_engine() {
+                    if let Err(e) = engine.speak(&text_to_speak, &model_path) {
+                        eprintln!("[tts] 语音播报失败: {}", e);
+                    }
+                } else {
+                    eprintln!("[tts] 无法获取 TTS 引擎锁（可能正在推理中）");
+                }
+            }
+            #[cfg(not(feature = "tts"))]
+            {
+                // TTS 特性未启用时的占位日志
+                eprintln!("[tts] 收到播报请求（特性未启用）: {}", text_to_speak);
+            }
+        });
+    }
+}
+
 /// 原实现：notify-rust → WinRT。summary → toast 标题、body → 第二行文本、
 /// image_path → toast 图片（`.icon()` 只在 XDG 后端生效，logo 必须走 image_path）。
 /// Critical 紧急度映射为 Windows Reminder 场景（见 notify-rust windows.rs 的
@@ -177,7 +229,7 @@ fn clickable_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
 }
 
 /// 当前启用的投递通道。语音通道后续追加到这里。
-static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel];
+static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel, &VoiceChannel];
 
 fn channels() -> &'static [&'static dyn NotifyChannel] {
     CHANNELS
