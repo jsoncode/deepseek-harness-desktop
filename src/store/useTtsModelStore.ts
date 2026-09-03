@@ -174,7 +174,9 @@ export const useTtsModelStore = create<TtsModelState>((set, get) => {
 
     testSpeak: async (text: string) => {
       try {
-        await api.testTtsSpeak(text);
+        // 传递当前配置的模型目录路径
+        const modelDir = get().modelPath;
+        await api.testTtsSpeak(text, modelDir);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         set({ error: `语音测试失败: ${msg}` });

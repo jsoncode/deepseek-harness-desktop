@@ -178,8 +178,8 @@ export const api = {
   cancelTtsDownload: () =>
     requireTauri(() => invoke<void>("cancel_tts_download")),
   /** 测试 TTS 语音播报 */
-  testTtsSpeak: (text: string) =>
-    requireTauri(() => invoke<void>("test_tts_speak", { text })),
+  testTtsSpeak: (text: string, modelDir?: string | null) =>
+    requireTauri(() => invoke<void>("test_tts_speak", { text, modelDir })),
   /** 打开目录选择器选择本地 TTS 模型目录，返回路径或 null */
   selectTtsModelDir: () =>
     requireTauri(() => invoke<string | null>("select_tts_model_dir")),

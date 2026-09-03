@@ -2509,8 +2509,9 @@ pub async fn cancel_tts_download(state: State<'_, AppState>) -> Result<(), Strin
 }
 
 /// 测试 TTS 语音播报：输入文字并朗读
+/// model_dir: 用户配置的模型目录路径（包含多个 .onnx 文件）
 #[tauri::command]
-pub async fn test_tts_speak(text: String) -> Result<(), String> {
+pub async fn test_tts_speak(text: String, model_dir: Option<String>) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("请输入要测试的文字".to_string());
     }
@@ -2518,21 +2519,31 @@ pub async fn test_tts_speak(text: String) -> Result<(), String> {
     #[cfg(feature = "tts")]
     {
         use crate::tts;
-        let model_path = tts::default_model_path();
-        if let Some(mut engine) = tts::try_get_engine() {
-            engine
-                .speak(&text, &model_path)
-                .map(|_| ())
-                .map_err(|e| format!("语音测试失败: {}", e))
-        } else {
-            Err("无法获取 TTS 引擎（可能正在使用中）".to_string())
+        // 优先使用用户配置的模型目录，否则使用默认路径
+        let model_path = match model_dir {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => tts::default_model_path(),
+        };
+
+        if !model_path.exists() {
+            return Err(format!("模型目录不存在: {}", model_path.display()));
         }
+
+        // 优先尝试非阻塞获取，如果失败则使用阻塞获取（会自动初始化）
+        let mut engine = match tts::try_get_engine() {
+            Some(e) => e,
+            None => tts::get_engine(), // 阻塞获取，会自动初始化 OnceLock
+        };
+        engine
+            .speak(&text, &model_path)
+            .map(|_| ())
+            .map_err(|e| format!("语音测试失败: {}", e))
     }
 
     #[cfg(not(feature = "tts"))]
     {
         // TTS 特性未启用时的模拟
-        eprintln!("[tts-test] 模拟播报: {}", text);
+        eprintln!("[tts-test] 模拟播报 (模型目录: {:?}): {}", model_dir, text);
         Ok(())
     }
 }
