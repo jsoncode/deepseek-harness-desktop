@@ -5,7 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:webview:allow-create-webview",
     "core:webview:allow-internal-toggle-devtools",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",

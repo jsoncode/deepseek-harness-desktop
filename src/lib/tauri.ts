@@ -188,18 +188,11 @@ export const api = {
     requireTauri(() => invoke<SessionLogEntry[]>("log_content", { id })),
   /** 清空全部日志会话 */
   logClear: () => requireTauri(() => invoke<void>("log_clear")),
-  /** 是否支持原生子 webview 预览：打包正式版顶层是 tauri://localhost，
-   *  DOM iframe 跨站无法通过宿主 SameSite=Strict 认证，宿主页须作为子 webview
-   *  的顶层文档承载（当前 Windows 启用，macOS/Linux 回退 iframe） */
-  previewNativeSupported: () => requireTauri(() => invoke<boolean>("preview_native_supported")),
-  /** 在内容区显示/更新宿主页：url 变化、刷新或进入预览时调用（幂等：已存在则导航+重定位） */
-  previewShow: (url: string, x: number, y: number, width: number, height: number) =>
-    requireTauri(() => invoke<void>("preview_show", { url, x, y, width, height })),
-  /** 内容区位置/尺寸变化时同步（窗口缩放、最大化/还原等） */
-  previewResize: (x: number, y: number, width: number, height: number) =>
-    requireTauri(() => invoke<void>("preview_resize", { x, y, width, height })),
-  /** 离开预览页 / 停止服务时销毁预览子 webview */
-  previewHide: () => requireTauri(() => invoke<void>("preview_hide")),
+  /** 预览 iframe 的本地反向代理地址（origin 形态，如 `http://127.0.0.1:3090`）：
+   *  代理做认证终结（Rust 侧持有 dsh-auth Cookie 并注入转发请求），浏览器
+   *  无需 Cookie，打包正式版壳顶层 tauri://localhost 也能以普通 DOM iframe
+   *  同源内嵌宿主页。未启动成功返回 null（预览回退/提示，见 Preview.tsx） */
+  proxyBaseUrl: () => requireTauri(() => invoke<string | null>("proxy_base_url")),
 };
 
 export async function onEvent<T>(

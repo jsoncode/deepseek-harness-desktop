@@ -141,6 +141,8 @@ src/                前端（React + Zustand + React Router）
   lib/tauri.ts      Tauri invoke/event 桥接
 src-tauri/          Rust 后端
   src/dsh.rs        工具解析、进程管理、日志泵、URL 探测
+  src/proxy.rs      本地反向代理（预览 iframe 的认证终结层，见下）
+  src/session_events.rs  服务事件订阅（含 Cookie 换取，供代理复用）
   capabilities/     权限声明
 scripts/            setup-nsis（离线 NSIS）/ sync-version / release-tag / verify-*
 libs/               离线 NSIS 工具链（nsis-3.11.zip + nsis_tauri_utils.dll）
@@ -149,7 +151,7 @@ libs/               离线 NSIS 工具链（nsis-3.11.zip + nsis_tauri_utils.dll
 ## 📄 说明
 
 - `dsh web` 默认监听 `127.0.0.1:3080`（正式版）；应用通过解析其 stdout 的 `http://...` 行 + TCP 探活确认服务就绪。
-- 新版宿主带进程 token 的浏览器认证（root 换 `SameSite=Strict` Cookie）要求宿主页以**顶层文档**加载：Windows 打包版（壳顶层为 `tauri://localhost`，DOM iframe 跨站无法认证）把宿主页放进与壳同窗口的**原生子 webview**（仅覆盖内容区，顶栏/底栏等壳 DOM 不变，见 `preview.rs`）；开发模式与 macOS/Linux 预览使用 iframe，壳顶层为 `http://localhost` 时自动把宿主改写为 `localhost` 保持同站。
+- 新版宿主带进程 token 的浏览器认证（root 换 `SameSite=Strict` Cookie）在打包正式版里无法靠 DOM iframe 直接完成——壳顶层为 `tauri://localhost`，iframe 相对它是**跨站**，Strict Cookie 永不发回。桌面壳内置一个**本地反向代理**（`proxy.rs`，nginx 式认证终结层，仅监听 127.0.0.1）：宿主页回归普通 DOM iframe，代理在 Rust 侧持有 dsh-auth Cookie 并注入每个转发请求（HTTP 与 WebSocket），响应里的 `Set-Cookie` 一律剥掉——浏览器永不接触 Cookie，跨站语义不再相关；壳内浮层（Tooltip/Popconfirm 等）是 iframe 的同文档兄弟节点，天然浮在宿主内容之上。非 Tauri 浏览器预览（开发模式顶层为 `http://localhost`）退回 iframe 直接内嵌，必要时把宿主 host 改写为 `localhost` 保持同站。
 - 调试构建完全隔离：app id `com.deepseek.harness.desktop.dev`、服务端口 6088、UI 端口 6089。
 
 ## 📖 其他语言

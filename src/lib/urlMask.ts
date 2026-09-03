@@ -33,7 +33,7 @@ export function maskServiceUrl(raw: string): string {
 }
 
 /**
- * 内嵌预览用的同站地址。
+ * 内嵌预览用的同站地址（浏览器预览回退路径）。
  *
  * 新版宿主的浏览器认证通过「root 请求换 SameSite=Strict 会话 Cookie」完成；Strict
  * Cookie 只在【同站】请求里携带。桌面壳在开发模式（Vite dev server）下的顶层页面是
@@ -43,9 +43,13 @@ export function maskServiceUrl(raw: string): string {
  *
  * 因此在顶层页面本身就是 `http://localhost` 时（开发模式 / 浏览器预览），把内嵌
  * 地址的 host 改写为 `localhost`（同 scheme+host = 同站，端口不影响 site），
- * Strict Cookie 即可正常生效。打包正式版的顶层是 `tauri://localhost`（自定义
- * scheme），与任何 http 站点都不同站，此处改写无效——正式版需「宿主页面作为顶层
- * 原生 webview 承载」的方案（见 dsh-tauri-desk 的 child webview 迁移）。
+ * Strict Cookie 即可正常生效。
+ *
+ * 注意：打包正式版的顶层是 `tauri://localhost`（自定义 scheme），与任何 http
+ * 站点都不同站，此处改写无效——但正式版预览不经过本函数：Tauri 运行时里宿主页
+ * 通过本地反向代理（src-tauri/src/proxy.rs）以普通 DOM iframe 同源内嵌，认证
+ * Cookie 由代理在 Rust 侧持有并注入，浏览器无需任何 Cookie。本函数仅供浏览器
+ * 预览（非 Tauri、顶层为 http://localhost）时兜底使用。
  *
  * 仅用于 iframe src；复制/浏览器打开/健康探测仍使用日志解析出的原始地址。
  */

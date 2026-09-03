@@ -19,6 +19,9 @@ const OPEN_SESSION_MSG = "dsh-desktop:open-session";
 const SESSION_OPEN_ACK_MSG = "dsh-desktop:session-open-acked";
 /** 待打开会话的有效期：超过则视为陈旧丢弃（桥找不到目标或页面未恢复的兜底） */
 const PENDING_OPEN_TTL_MS = 60_000;
+/** 代理地址查询失败后的重试间隔/次数（代理线程在 setup 里启动，理论上立即可用） */
+const PROXY_RETRY_MS = 300;
+const PROXY_MAX_RETRY = 5;
 
 /**
  * 从插件加载失败的错误项中提取插件名：
@@ -40,14 +43,20 @@ function extractPluginName(items: string[]): string | null {
 }
 
 /**
- * 预览承载方式：
- * - 原生（native = true，当前仅 Windows）：宿主页放进与桌面壳同窗口的【原生子
- *   webview】并作为其顶层文档加载——打包正式版壳顶层是 tauri://localhost，DOM
- *   iframe 相对它跨站，宿主 SameSite=Strict 认证 Cookie 发不回；子 webview 的顶层
- *   即宿主地址本身，认证与系统浏览器一致。桌面壳顶栏/底栏仍是壳 DOM，照常显示
- *   可操作；子 webview 只覆盖内容区（preview-frame），位置/尺寸由本页实时同步。
- * - iframe（native = false / 非 Windows / 浏览器预览）：开发模式（壳顶层
- *   http://localhost:*）下用 sameSiteEmbedUrl 把宿主改写为 localhost 保持同站。
+ * 预览承载方式：宿主页一律用普通 DOM iframe 内嵌（同文档内 Tooltip/Popconfirm
+ * 等浮层天然浮在 iframe 之上，无需任何让位协调）。
+ *
+ * 跨站认证问题由 Rust 本地反向代理（src-tauri/src/proxy.rs）在服务端解决——
+ * 代理监听 127.0.0.1 并把上游 dsh web 暴露成另一个本地 origin，浏览器（无论
+ * 顶层是打包正式版的 tauri://localhost 还是开发模式的 http://localhost）访问的
+ * 都是代理 origin；认证 Cookie 由 Rust 持有并注入，浏览器永不接触，因此不存在
+ * SameSite=Strict 发不回的问题：
+ *
+ * - Tauri 桌面运行时：iframe src = 代理地址（api.proxyBaseUrl()，无 token，
+ *   代理按请求实时从 AppState.detected_url 解析上游并注入 Cookie）；
+ * - 浏览器预览（非 Tauri，仅在开发模式 http://localhost 顶层下可用）：Rust
+ *   代理不在场，退回首版方案——sameSiteEmbedUrl 把宿主改写为 localhost 保持
+ *   同站，浏览器自己走 root 换 Cookie 认证。
  */
 export default function Preview() {
   const navigate = useNavigate();
@@ -61,36 +70,50 @@ export default function Preview() {
   const pendingOpenSession = useUiStore((s) => s.pendingOpenSession);
   const clearPendingOpenSession = useUiStore((s) => s.clearPendingOpenSession);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const frameRef = useRef<HTMLDivElement>(null);
   /** iframe 当前文档是否已加载（onLoad 置 true；url/reloadKey 变化时渲染期复位） */
   const [iframeLoaded, setIframeLoaded] = useState(false);
 
-  // ---- 原生子 webview 预览能力探测（null = 探测中）----
-  const [native, setNative] = useState<boolean | null>(null);
+  // ---- Tauri 下取代理地址（null = 查询中 / 失败重试中）----
+  const [proxyBase, setProxyBase] = useState<string | null>(null);
+  const proxyReady = !tauri || proxyBase !== null;
+
   useEffect(() => {
+    if (!tauri || !url) return;
     let alive = true;
-    if (!tauri) {
-      setNative(false);
-      return () => {
-        alive = false;
-      };
-    }
-    api
-      .previewNativeSupported()
-      .then((v) => {
-        if (alive) setNative(v);
-      })
-      .catch(() => {
-        if (alive) setNative(false);
-      });
+    let attempts = 0;
+    const probe = () => {
+      api
+        .proxyBaseUrl()
+        .then((base) => {
+          if (!alive) return;
+          if (base) {
+            setProxyBase(base);
+            return;
+          }
+          if (attempts++ < PROXY_MAX_RETRY) {
+            window.setTimeout(probe, PROXY_RETRY_MS);
+          } else {
+            message.error("本地预览代理不可用，请重启应用后重试");
+          }
+        })
+        .catch(() => {
+          if (!alive) return;
+          if (attempts++ < PROXY_MAX_RETRY) {
+            window.setTimeout(probe, PROXY_RETRY_MS);
+          }
+        });
+    };
+    probe();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [tauri, url, message]);
 
-  // 内嵌地址（iframe 路径）：开发模式（壳顶层为 http://localhost:*）下把宿主 host
-  // 改写为 localhost 保持同站（详见 urlMask.ts）；原生路径直接用原始地址即可。
-  const iframeUrl = url ? sameSiteEmbedUrl(url) : null;
+  // 内嵌地址：
+  // - Tauri：代理 origin（不带 token；浏览器无 Cookie，代理负责认证）
+  // - 浏览器预览：sameSiteEmbedUrl（开发模式顶层 http://localhost，改写 host
+  //   为 localhost 保持同站让浏览器自己完成 Cookie 认证）
+  const iframeUrl = tauri ? proxyBase : url ? sameSiteEmbedUrl(url) : null;
   // iframe 以 `iframeUrl|reloadKey` 为键重挂载：键变化时在渲染期同步复位就绪位。
   // 不能放在 effect 里复位——onLoad 可能在 effect 之前触发，复位会覆盖已触发的
   // onLoad，导致新文档加载完成后就绪位仍是 false、待打开会话永不发送。
@@ -106,64 +129,11 @@ export default function Preview() {
     if (!initialized) void init();
   }, [initialized, init]);
 
-  // 原生预览激活态：有地址且在原生支持环境
-  const nativeActive = native === true && Boolean(url);
-
-  // ---- 原生预览：进入/地址变化时创建或更新子 webview；离开时销毁 ----
-  useEffect(() => {
-    if (!nativeActive || !url) return;
-    const el = frameRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return;
-    void api.previewShow(url, r.x, r.y, r.width, r.height).catch(() => undefined);
-    return () => {
-      void api.previewHide().catch(() => undefined);
-    };
-  }, [nativeActive, url]);
-
-  // ---- 原生预览：标题栏「刷新」（reloadKey）→ 重导航到同一地址重新走认证 ----
-  const prevReloadRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!nativeActive || !url) {
-      prevReloadRef.current = null;
-      return;
-    }
-    const prev = prevReloadRef.current;
-    prevReloadRef.current = reloadKey;
-    if (prev === null || prev === reloadKey) return; // 首次创建由 attach effect 完成
-    const el = frameRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return;
-    void api.previewShow(url, r.x, r.y, r.width, r.height).catch(() => undefined);
-  }, [reloadKey, nativeActive, url]);
-
-  // ---- 原生预览：内容区布局/窗口尺寸变化时同步子 webview 边界 ----
-  useEffect(() => {
-    if (!nativeActive) return;
-    const el = frameRef.current;
-    if (!el) return;
-    const sync = () => {
-      const r = el.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1) return;
-      void api.previewResize(r.x, r.y, r.width, r.height).catch(() => undefined);
-    };
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    window.addEventListener("resize", sync);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", sync);
-    };
-  }, [nativeActive]);
-
   // 系统通知点击待打开的会话：iframe 就绪后 postMessage 给 SESSION_OPEN_BRIDGE，
   // 由其在 dsh web 内定位该会话行并模拟点击（打开对应会话对话框）。
   // 发送后**不立即清空**：等桥的 ACK（SESSION_OPEN_ACK_MSG）确认已点开，或超过
   // 有效期丢弃。iframe 重载（onLoad 再次触发，如托盘隐藏期间 WebView2 丢弃页面）
   // 时会重新下发同一会话——桥对重复消息幂等，多余点击无害。
-  // （原生子 webview 路径暂无 DOM 会话桥：通知打开会话后续需按事件通道迁移）
   useEffect(() => {
     if (!iframeLoaded) return;
     const pending = useUiStore.getState().pendingOpenSession;
@@ -188,7 +158,7 @@ export default function Preview() {
   // 接收桥接脚本（EXTERNAL_LINK_BRIDGE / PLUGIN_FAILURE_BRIDGE）从预览 iframe 内
   // postMessage 过来的消息：外链打开请求转交系统浏览器；插件加载失败上报弹框。
   // Windows 上 wry 的 on_new_window 不会为 iframe 内 target=_blank 触发，所以外链
-  // 必须由注入脚本拦截后经此通道转发。原生路径 iframeRef 为空，自动跳过。
+  // 必须由注入脚本拦截后经此通道转发。
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       const data = e.data;
@@ -237,18 +207,17 @@ export default function Preview() {
 
   // 无 URL（状态同步中或跳转前的一瞬）时不渲染任何内容，由上方 effect 负责回启动页
   if (!url) return null;
-
-  // 原生能力探测完成前不渲染 iframe，避免正式版闪现一次 401 页面
-  const renderIframe = !(tauri && native === null) && native !== true;
+  // 代理地址就绪前不渲染 iframe（避免闪现一次代理未就绪页面）
+  if (!proxyReady) return null;
 
   return (
     <div className="page preview">
-      <div className="preview-frame" ref={frameRef}>
-        {renderIframe ? (
+      <div className="preview-frame">
+        {iframeUrl ? (
           <iframe
-            key={`${iframeUrl ?? ""}|${reloadKey}`}
+            key={`${iframeUrl}|${reloadKey}`}
             ref={iframeRef}
-            src={iframeUrl ?? undefined}
+            src={iframeUrl}
             title="Harness Preview"
             onLoad={() => setIframeLoaded(true)}
             style={{

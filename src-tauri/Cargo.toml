@@ -14,11 +14,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# unstable：启用 Window::add_child / tauri::webview::WebviewBuilder（多 webview）。
-# 打包正式版的顶层是自定义协议 tauri://localhost，宿主认证（SameSite=Strict
-# Cookie）要求宿主页面以“顶层文档”加载——DOM iframe 跨站无法换发 Cookie，
-# 需要把服务页放进与桌面壳同窗口的原生子 webview（见 preview.rs）。
-tauri = { version = "2", features = ["tray-icon", "unstable"] }
+# 预览承载不再依赖多 webview：宿主经本地反向代理（proxy.rs）认证终结后以普通
+# DOM iframe 嵌入，无需 tauri 的 unstable 多 webview API（Window::add_child）。
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-snap-layout = "1"
 serde = { version = "1", features = ["derive"] }

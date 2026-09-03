@@ -2,7 +2,7 @@ mod credentials;
 mod dsh;
 mod logs;
 mod notify;
-mod preview;
+mod proxy;
 mod session_events;
 
 use dsh::AppState;
@@ -65,8 +65,8 @@ const EXTERNAL_LINK_BRIDGE: &str = r##"
 /// postMessage 给主框架，由前端弹框提示"移除插件并重启"。
 ///
 /// 为什么用注入脚本而非前端直读 iframe DOM：预览 iframe 是跨源页面
-/// （http://127.0.0.1:3080 vs 桌面壳 tauri://localhost），前端受同源策略
-/// 限制无法访问 iframe 内部 DOM；WebView2 的
+/// （http://127.0.0.1:<代理端口>——本地反向代理暴露的宿主地址——vs 桌面壳
+/// tauri://localhost），前端受同源策略限制无法访问 iframe 内部 DOM；WebView2 的
 /// AddScriptToExecuteOnDocumentCreated 对所有子 frame 生效，注入脚本在
 /// iframe 内部执行，不受跨源限制。
 const PLUGIN_FAILURE_BRIDGE: &str = r##"
@@ -156,8 +156,9 @@ const THEME_SYNC_BRIDGE: &str = r##"
 /// iframe 内定位该会话的行并模拟点击，触发 dsh web 前端的 `sessions.open(id)`
 /// ——工作区即切到该会话的对话框。
 ///
-/// 为什么必须注入脚本：预览 iframe 是跨源页面（http://127.0.0.1:3080 vs
-/// tauri://localhost），前端受同源策略无法访问 iframe 内部 DOM；且调研结论是
+/// 为什么必须注入脚本：预览 iframe 是跨源页面（http://127.0.0.1:<代理端口>——
+/// 本地反向代理暴露的宿主地址——vs tauri://localhost），前端受同源策略无法访问
+/// iframe 内部 DOM；且调研结论是
 /// dsh web 前端不暴露任何外部入口（无 URL 深链、无 window 控制钩子、会话行 DOM
 /// 不含会话 id，见 docs/superpowers/specs/2026-08-28-notify-click-open-design.md），
 /// 只能在 iframe 内部读 React fiber 拿行对应的 sessionId 再模拟点击。
@@ -338,10 +339,7 @@ pub fn run() {
             logs::log_sessions,
             logs::log_content,
             logs::log_clear,
-            preview::preview_native_supported,
-            preview::preview_show,
-            preview::preview_resize,
-            preview::preview_hide,
+            proxy::proxy_base_url,
         ])
         .setup(|app| {
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
@@ -423,6 +421,9 @@ pub fn run() {
             // 会话事件 → 系统推送：后台线程订阅服务的下行 WebSocket。
             // 服务未起时线程挂在探活循环里，故不依赖 start/stop 命令的时机。
             session_events::spawn(app.handle().clone());
+            // 本地反向代理（预览 iframe 的认证终结层，见 proxy.rs）：启动即绑定
+            // loopback 端口；服务未起时请求会得到 502 兜底，无需等待 dsh 启动。
+            proxy::spawn(app.handle().clone());
             // 恢复上次异常退出遗留的活动日志会话（崩溃/强杀）：补写结束时间，
             // 避免历史记录永远显示「进行中」
             logs::finalize_active(app.handle());
