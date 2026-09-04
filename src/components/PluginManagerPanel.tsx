@@ -537,7 +537,7 @@ export default function PluginManagerPanel() {
           <div className="mk-row">
             <Input
               className="mk-search"
-              placeholder="精准搜索：NPM 匹配名称/作者/维护者 · GitHub 匹配仓库名/作者；支持 keywords:/topic:/in: 语法"
+              placeholder="搜索插件：NPM 按 keywords 匹配包标签 · GitHub 关键词原样搜索；未输入时展示 dsh-plugin 全集"
               allowClear
               prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
               value={query}
