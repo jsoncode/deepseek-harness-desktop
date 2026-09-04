@@ -26,13 +26,14 @@ export interface NotifyMessage {
 export type NotifyChannel = (m: NotifyMessage) => void;
 
 /**
- * 语音播放通道：本期留桩。接通时在此朗读，例如
- * `speechSynthesis.speak(new SpeechSynthesisUtterance(`${m.title}，${m.desc}`))`。
- * 注意：窗口隐藏后 WebView2 可能节流定时器/音频，若实测不可靠，改为在 Rust
- * `notify.rs` 里加一个 VoiceChannel（Windows SAPI），上游同样零改动。
+ * 语音播报不在前端做：Rust 侧 `src-tauri/src/tts.rs` 的 VoiceChannel 已经接入
+ * （常驻 Python worker 合成 Audio8 TTS + rodio 原生播放）。原因：
+ * 1) WebView2 隐藏/最小化时会节流定时器与音频，通知场景恰好是后台状态；
+ * 2) 前端朗读会与 Rust 通道双播。
+ * 这里保留空通道位维持 channels 结构；语音状态展示在设置页（监听 notifyVoice）。
  */
 const voiceChannel: NotifyChannel = () => {
-  /* TODO(voice) */
+  /* 由 Rust tts.rs 语音通道承担 */
 };
 
 /** 当前启用的前端通道。Rust 侧的 toast 通道不在此列（已直发系统通知）。 */

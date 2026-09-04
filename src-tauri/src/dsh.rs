@@ -61,6 +61,9 @@ pub struct AppState {
     /// 1 = clickable（winrt 直连，带「打开对话」按钮与激活回调，默认）。
     /// 「两种提示切换开关」后续在设置页接入，只需改这个值（见 notify.rs）。
     pub notify_style: AtomicU8,
+    /// 语音播报配置（持久层在前端 localStorage，启动时经 set_voice_config 回灌，
+    /// 见 tts.rs；Rust 侧不落盘）
+    pub voice: Mutex<crate::tts::VoiceConfig>,
     /// 当前活动日志会话（无则 None；见 logs.rs）
     pub active_log: Mutex<Option<ActiveLog>>,
 }
@@ -74,6 +77,7 @@ impl Default for AppState {
             pending_urls: Mutex::new(Vec::new()),
             notify_enabled: AtomicBool::new(true),
             notify_style: AtomicU8::new(1),
+            voice: Mutex::new(crate::tts::VoiceConfig::default()),
             active_log: Mutex::new(None),
         }
     }
@@ -119,7 +123,7 @@ pub struct StatusPayload {
 ///
 /// GUI 父进程（本应用为 windows_subsystem=windows）派生的控制台子进程默认会
 /// 新建一个控制台窗口；设置 `CREATE_NO_WINDOW`（0x08000000）即可避免闪烁。
-fn hide_window(cmd: &mut Command) -> &mut Command {
+pub(crate) fn hide_window(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -368,7 +372,7 @@ fn resolve_npm() -> Option<PathBuf> {
 /// - Windows：注册表 PreferredUILanguages（reg query 快速读取，无需额外依赖）；
 /// - macOS/Linux：LANG / LC_ALL 环境变量以 zh 开头。
 /// 检测失败一律按非中文处理：绝不改动用户的源配置。
-fn system_is_chinese() -> bool {
+pub(crate) fn system_is_chinese() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
         #[cfg(windows)]
@@ -1106,7 +1110,12 @@ fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
 ///
 /// web 日志事件下同时尝试从输出行识别服务 URL（try_detect_url），与原
 /// pump_process 行为一致；是否发出 exit 事件由调用方裁决。
-fn pump_streams_until_exit(app: &AppHandle, mut child: Child, log_event: &'static str) -> i32 {
+/// pub(crate)：tts.rs 的一键安装（pip）复用同一逐行日志泵。
+pub(crate) fn pump_streams_until_exit(
+    app: &AppHandle,
+    mut child: Child,
+    log_event: &'static str,
+) -> i32 {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 

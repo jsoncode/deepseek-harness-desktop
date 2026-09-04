@@ -14,12 +14,14 @@
 //! `legacy_toast` 的 `Urgency::Critical` 与 `clickable_toast` 的
 //! `Scenario::Reminder`）。
 //!
-//! **语音播放接入位**就在这里：新增一个实现 [`NotifyChannel`] 的结构体并加进
-//! [`channels`]，上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
+//! **语音播放**已接入：`tts::VoiceChannel` 实现了 [`NotifyChannel`] 并在 [`CHANNELS`]
+//! 表中——deliver 只入队立即返回，由常驻 Python worker（Audio8 TTS，见 `tts.rs`）
+//! 合成后用 rodio 播放；上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
 //! 的同名扩展点在 `src/lib/notify.ts`，两边通过 `dispatch` 里的一次 `emit` 对齐。
 
 use crate::dsh;
 use crate::session_events::NotifyMessage;
+use crate::tts;
 use std::path::PathBuf;
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
@@ -28,6 +30,10 @@ use tauri::{AppHandle, Emitter, Manager};
 /// winrt-notification 不设 app_id 时会回退到 PowerShell 的 AUMID，通知会被显示成
 /// 「Windows PowerShell」，既丢品牌也点不进本应用。
 pub const APP_ID: &str = "com.deepseek.harness.desktop";
+
+/// 自检通知的 kind。独立成常量：tts.rs 的测试锁定它，防止有人改名后
+/// 「自检通知不朗读」的判断静默失效。
+pub const SAMPLE_KIND: &str = "sample";
 
 // ---------------------------------------------------------------------------
 // toast 投递方式（Windows-only）：两种实现并存，按 `AppState::notify_style` 切换。
@@ -176,8 +182,9 @@ fn clickable_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
     }
 }
 
-/// 当前启用的投递通道。语音通道后续追加到这里。
-static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel];
+/// 当前启用的投递通道。语音通道（tts.rs）：deliver 只入队不阻塞，
+/// toast 照常先弹，语音异步跟上。
+static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel, &tts::VoiceChannel];
 
 fn channels() -> &'static [&'static dyn NotifyChannel] {
     CHANNELS
@@ -215,7 +222,7 @@ pub fn dispatch(app: &AppHandle, msg: &NotifyMessage) {
 /// 「sample」会话，按设计静默降级。legacy 样式（notify-rust）不渲染 actions，不受影响。
 pub fn push_sample(app: &AppHandle) {
     let msg = NotifyMessage {
-        kind: "sample",
+        kind: SAMPLE_KIND,
         session_id: "sample".to_string(),
         session_title: String::new(),
         title: "系统推送",

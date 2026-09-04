@@ -29,6 +29,15 @@ ureq = "2"
 # （默认特性即含它），显式列出只为表达「刻意不要 TLS 相关默认项」——本机只连 loopback 明文 ws。
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
+# 语音播报（tts.rs）：WAV 解码 + 本机音频输出（不受 WebView2 后台节流影响）。
+# default-features = false 只留 wav（hound）：避免拉进 mp3/opus/vorbis 等
+# 用不上的解码器。
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
+# 语音合成工具（独立窗口）：hound 读/写 WAV（长文本分段合成后的拼接导出）
+hound = "3.5"
+# 语音合成工具的「另存为」系统对话框
+tauri-plugin-dialog = "2"
+
 # 系统推送（Windows）：两种 toast 实现并存，由 AppState::notify_style 切换
 # （见 notify.rs 的 ToastStyle；设置页「两种提示切换开关」后续接入）。
 # - notify-rust：原有实现，保留。default-features = false 是刻意的——默认特性会

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tts-studio",
+  "description": "语音合成工具窗口 capability：窗口操作（自绘标题栏拖拽/最小化/最大化/关闭）+ 另存为对话框",
+  "windows": ["tts-studio"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "snap-layout:default",
+    "dialog:default"
+  ]
+}
