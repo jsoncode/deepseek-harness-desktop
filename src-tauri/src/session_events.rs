@@ -18,6 +18,14 @@
 //! 本模块是纯 Rust 订阅端（不依赖前端/WebView）：窗口关掉后应用驻留托盘也能
 //! 收到提醒。投递通道收在 [`notify`](crate::notify)，这里不碰任何 UI/平台 API。
 //!
+//! # 2026-09-03 修复：WS 升级请求缺少必需握手头
+//!
+//! v0.1.20 适配 Cookie 认证时把连接改成了手建 `Request`（只有 uri + Cookie），
+//! 而 tungstenite 对用户 `Request` 原样透传、不注入 `Sec-WebSocket-Key` 等
+//! RFC 6455 必需头 → 握手恒定失败且被静默吞掉，推送自该版本起完全失效
+//! （0.1.1-rc.2 时代传 URL 字符串由库补头，无此问题）。现改为
+//! `build_ws_request`：URL 走 `IntoClientRequest` 生成全部必需头，再附加 Cookie。
+//!
 //! # 只提醒两类
 //!
 //! `todo/write`（任务清单更新）与 `turn/end`（一轮对话结束），其余事件过滤。
@@ -32,6 +40,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
+use tungstenite::client::IntoClientRequest;
 use tungstenite::http::header::COOKIE;
 use tungstenite::Message;
 
@@ -150,12 +159,7 @@ fn run_once(app: &AppHandle, notes: &mut Notes) {
         return;
     };
     let uri = ep.ws_url(MUX_PATH);
-    let req = tungstenite::handshake::client::Request::builder()
-        .uri(uri.as_str())
-        .header(COOKIE, cookie.as_str())
-        .body(())
-        .ok();
-    let Some(req) = req else {
+    let Some(req) = build_ws_request(&uri, &cookie) else {
         return;
     };
     let Ok((mut ws, _resp)) = tungstenite::client(req, tcp) else {
@@ -165,6 +169,7 @@ fn run_once(app: &AppHandle, notes: &mut Notes) {
 
     let mut live = Live::new();
     discover_and_follow(&ep, &cookie, notes, &mut live, &mut ws);
+    let _ = ws.flush(); // 立刻刷出 discover 排队的 open 帧，不等服务端心跳触发隐式 flush
 
     let mut last_alive = Instant::now();
     let mut last_discover = Instant::now();
@@ -208,6 +213,23 @@ fn notify_enabled(app: &AppHandle) -> bool {
     app.state::<dsh::AppState>()
         .notify_enabled
         .load(Ordering::SeqCst)
+}
+
+/// 构造 `/api/remote.mux` 的 WS 升级请求：从 URL 生成（补齐 RFC 6455 必需的
+/// `Sec-WebSocket-Key` / `Connection` / `Upgrade` / `Sec-WebSocket-Version` / `Host`），
+/// 再附加认证 Cookie。
+///
+/// 为什么必须从 URL 生成而不是手建 Request：tungstenite 的
+/// `IntoClientRequest for Request` 会【原样透传】用户请求，不注入任何必需头；
+/// 直接 `Request::builder()` 出来的裸请求（只有 uri + Cookie）会在
+/// `create_request` 处因缺少 `Sec-WebSocket-Key` 恒定握手失败
+/// （`InvalidHeader("sec-websocket-key")`）——v0.1.20 为 dsh 0.1.2-alpha.4/5
+/// 加 Cookie 认证时改成了手建 Request，推送功能自那时起完全失效，本函数即修复点。
+fn build_ws_request(uri: &str, cookie: &str) -> Option<tungstenite::handshake::client::Request> {
+    let mut req = uri.into_client_request().ok()?;
+    let value = tungstenite::http::HeaderValue::from_str(cookie).ok()?;
+    req.headers_mut().insert(COOKIE, value);
+    Some(req)
 }
 
 // ---------------------------------------------------------------------------
@@ -891,5 +913,51 @@ mod tests {
         let _ = live.next_stream();
         // is_following 判定足以让 discover 跳过
         assert_eq!(live.streams.len(), before);
+    }
+
+    /// 回归（v0.1.20 推送失效根因）：WS 升级请求必须携带 RFC 6455 全部必需头。
+    /// 手建 Request 会被 tungstenite 原样透传（不注入 Sec-WebSocket-Key 等），
+    /// 握手恒定失败且错误被静默吞掉——这里锁死 build_ws_request 的输出形态。
+    #[test]
+    fn ws升级请求带全部必需头与cookie() {
+        let req = build_ws_request(
+            "ws://127.0.0.1:6199/api/remote.mux",
+            "dsh-auth-abc=v1.body.sig",
+        )
+        .expect("request should build");
+        let h = req.headers();
+        for name in [
+            "host",
+            "connection",
+            "upgrade",
+            "sec-websocket-version",
+            "sec-websocket-key",
+        ] {
+            assert!(h.get(name).is_some(), "missing required header {name}");
+        }
+        // Sec-WebSocket-Key：库生成的 16 字节随机数的 base64（24 字符）
+        let key = h.get("sec-websocket-key").unwrap();
+        assert_eq!(key.len(), 24, "generated key should be 24-char base64");
+        assert_eq!(h.get("connection").unwrap(), "Upgrade");
+        assert_eq!(h.get("upgrade").unwrap(), "websocket");
+        assert_eq!(h.get("sec-websocket-version").unwrap(), "13");
+        // Cookie 附加在必需头之外
+        assert_eq!(
+            h.get("cookie").unwrap(),
+            "dsh-auth-abc=v1.body.sig",
+            "auth cookie must be attached"
+        );
+        assert_eq!(
+            req.uri().path_and_query().unwrap().as_str(),
+            "/api/remote.mux"
+        );
+        assert_eq!(req.uri().host(), Some("127.0.0.1"));
+        assert_eq!(req.uri().port_u16(), Some(6199));
+    }
+
+    #[test]
+    fn ws升级请求拒绝非法cookie值() {
+        // 非可见 ASCII 的 HeaderValue 会被拒绝 → 返回 None（由 supervisor 重试）
+        assert!(build_ws_request("ws://127.0.0.1:1/x", "bad\u{0}value").is_none());
     }
 }

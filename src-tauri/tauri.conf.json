@@ -17,8 +17,6 @@
         "create": false,
         "width": 1280,
         "height": 905,
-        "minWidth": 880,
-        "minHeight": 640,
         "center": true,
         "resizable": true,
         "decorations": false,
