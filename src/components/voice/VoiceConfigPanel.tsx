@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { App as AntApp } from "antd";
 import { FolderOpenOutlined } from "@ant-design/icons";
-import { Button, Collapse, Input, InputNumber, Segmented, Space, Typography } from "antd";
+import { Button, Collapse, Input, InputNumber, Segmented, Select, Space, Typography } from "antd";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNotifyStore, VOICE_SYNTH_DEFAULTS } from "../../store/useNotifyStore";
 import {
@@ -9,6 +9,7 @@ import {
   EVENTS,
   onEvent,
   tauri,
+  type BuiltinVoiceMeta,
   type LogLine,
   type NotifyVoicePayload,
   type VoiceConfig,
@@ -49,6 +50,20 @@ export default function VoiceConfigPanel() {
   const [autoSettingUp, setAutoSettingUp] = useState(false);
   const [cloning, setCloning] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  // 内置音色列表（Rust 静态表，参考音频随应用打包）：音色下拉框数据源。
+  // 浏览器预览模式无 Tauri 运行时列表为空，下拉框只剩「自定义」
+  const [builtinVoices, setBuiltinVoices] = useState<BuiltinVoiceMeta[]>([]);
+  useEffect(() => {
+    void api.ttsBuiltinVoices().then(setBuiltinVoices).catch(() => undefined);
+  }, []);
+
+  const isCustomVoice = voice.voiceId === "custom";
+  // voiceId 空值（老配置）由 Rust 按默认内置音色解析，展示层同步对齐
+  const defaultVoiceId = builtinVoices.find((v) => v.isDefault)?.id ?? "";
+  const selectedBuiltin = builtinVoices.find(
+    (v) => v.id === (isCustomVoice ? "" : voice.voiceId || defaultVoiceId),
+  );
 
   // runEnvCheck 的 ref：安装结束事件回调（挂载时订阅）里需要触发最新版本的自检
   const runEnvCheckRef = useRef<() => void>(() => {});
@@ -362,40 +377,67 @@ export default function VoiceConfigPanel() {
       </div>
       <div>
         <p className="settings-desc">
-          参考音频（zero-shot 音色克隆，可选）：念一句语料录音，之后所有播报/合成都模仿该音色；
-          与参考原文必须成对填写，都空则用模型默认音色
+          音色：内置音色自带固定参考音频，选哪个就稳定是哪个音色（通知朗读与长文本合成共用）
         </p>
         <Space direction="vertical" style={{ width: "100%" }} size={6}>
-          <Space.Compact style={{ width: "100%" }}>
-            <Input
-              size="small"
-              value={refAudioDraft}
-              placeholder='参考音频绝对路径，例如 "D:\\voices\\ref.wav"（建议 5~15 秒、安静环境、44.1kHz；可点「选择文件」）'
-              onChange={(e) => setRefAudioDraft(e.target.value)}
-              onBlur={() => commitVoice({ refAudio: refAudioDraft.trim() })}
-              onPressEnter={() => commitVoice({ refAudio: refAudioDraft.trim() })}
-            />
-            <Button
-              size="small"
-              icon={<FolderOpenOutlined />}
-              title={tauri ? "在系统中选择参考音频文件" : "浏览器预览模式不可用"}
-              disabled={!tauri}
-              onClick={() => void pickRefAudio()}
-            >
-              选择文件
-            </Button>
-          </Space.Compact>
-          <Input.TextArea
+          <Select
             size="small"
-            value={refTextDraft}
-            placeholder="参考音频的准确原文（转写不准会降低音色相似度与稳定性）"
-            autoSize={{ minRows: 1, maxRows: 3 }}
-            onChange={(e) => setRefTextDraft(e.target.value)}
-            onBlur={() => commitVoice({ refText: refTextDraft.trim() })}
-            onPressEnter={() => commitVoice({ refText: refTextDraft.trim() })}
+            style={{ width: "100%" }}
+            value={isCustomVoice ? "custom" : voice.voiceId || defaultVoiceId || undefined}
+            onChange={(v) => commitVoice({ voiceId: v })}
+            options={[
+              ...builtinVoices.map((v) => ({
+                label: v.isDefault ? `${v.name}（默认）` : v.name,
+                value: v.id,
+              })),
+              { label: "自定义（参考音频克隆）", value: "custom" },
+            ]}
           />
+          {!isCustomVoice && selectedBuiltin && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {selectedBuiltin.description}；想克隆自己的音色（念一句语料录音）请选「自定义」
+            </Text>
+          )}
         </Space>
       </div>
+      {isCustomVoice && (
+        <div>
+          <p className="settings-desc">
+            参考音频（zero-shot 音色克隆）：念一句语料录音，之后所有播报/合成都模仿该音色；
+            与参考原文必须成对填写，都空则用模型原生默认音色（音色不保证稳定）
+          </p>
+          <Space direction="vertical" style={{ width: "100%" }} size={6}>
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                size="small"
+                value={refAudioDraft}
+                placeholder='参考音频绝对路径，例如 "D:\\voices\\ref.wav"（建议 5~15 秒、安静环境、44.1kHz；可点「选择文件」）'
+                onChange={(e) => setRefAudioDraft(e.target.value)}
+                onBlur={() => commitVoice({ refAudio: refAudioDraft.trim() })}
+                onPressEnter={() => commitVoice({ refAudio: refAudioDraft.trim() })}
+              />
+              <Button
+                size="small"
+                icon={<FolderOpenOutlined />}
+                title={tauri ? "在系统中选择参考音频文件" : "浏览器预览模式不可用"}
+                disabled={!tauri}
+                onClick={() => void pickRefAudio()}
+              >
+                选择文件
+              </Button>
+            </Space.Compact>
+            <Input.TextArea
+              size="small"
+              value={refTextDraft}
+              placeholder="参考音频的准确原文（转写不准会降低音色相似度与稳定性）"
+              autoSize={{ minRows: 1, maxRows: 3 }}
+              onChange={(e) => setRefTextDraft(e.target.value)}
+              onBlur={() => commitVoice({ refText: refTextDraft.trim() })}
+              onPressEnter={() => commitVoice({ refText: refTextDraft.trim() })}
+            />
+          </Space>
+        </div>
+      )}
       <Space wrap>
         <Button size="small" loading={checking} onClick={runEnvCheck}>
           环境自检

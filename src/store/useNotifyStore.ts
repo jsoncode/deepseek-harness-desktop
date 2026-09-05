@@ -22,13 +22,16 @@ export const VOICE_SYNTH_DEFAULTS = {
   greedy: false,
 } as const;
 
-/** 语音播报默认配置：与 Rust `tts::VoiceConfig::default` 一致 */
+/** 语音播报默认配置：与 Rust `tts::VoiceConfig::default` 一致。
+ *  voiceId 空值由 Rust 解析为默认内置音色（tts_builtin_voices 中 isDefault 项，
+ *  当前为 "wanwan"），老版本存储缺该字段时经合并补齐后行为一致 */
 const VOICE_DEFAULT: VoiceConfig = {
   enabled: false,
   speakContent: "summary",
   pythonCmd: "python",
   repoDir: "",
   modelDir: "",
+  voiceId: "",
   refAudio: "",
   refText: "",
   ...VOICE_SYNTH_DEFAULTS,

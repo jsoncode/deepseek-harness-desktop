@@ -137,7 +137,11 @@ export interface VoiceConfig {
   repoDir: string;
   /** 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth） */
   modelDir: string;
-  /** 参考音频路径（zero-shot 音色克隆）：与 refText 成对填写才生效，都空走默认音色 */
+  /** 音色：内置音色 id（ttsBuiltinVoices 返回，如 "wanwan"）| "custom"
+   *  （自定义参考音频克隆）| ""（老版本配置，等价默认内置音色） */
+  voiceId: string;
+  /** 参考音频路径（zero-shot 音色克隆）：仅 voiceId = "custom" 时生效，
+   *  与 refText 成对填写才走克隆，都空走模型原生默认音色 */
   refAudio: string;
   /** 参考音频的准确原文（与录音内容一致，转写不准会降低音色相似度） */
   refText: string;
@@ -153,6 +157,16 @@ export interface VoiceConfig {
   maxNewTokens: number;
   /** 贪心解码：忽略采样参数，输出最稳定 */
   greedy: boolean;
+}
+
+/** 内置音色（Rust `tts::BuiltinVoiceMeta` 同形）：参考音频随应用打包，
+ *  下拉框数据源来自 ttsBuiltinVoices；首个标记 isDefault 的即默认音色 */
+export interface BuiltinVoiceMeta {
+  id: string;
+  name: string;
+  description: string;
+  /** 是否默认音色（voiceId 为空时的实际生效项） */
+  isDefault: boolean;
 }
 
 /** 环境自检报告：与 Rust `tts::VoiceEnvReport` 同形（serde camelCase） */
@@ -255,6 +269,9 @@ export const api = {
    *  python/仓库/模型变化会使常驻 worker 在下次合成时重建 */
   setVoiceConfig: (config: VoiceConfig) =>
     requireTauri(() => invoke<void>("set_voice_config", { config })),
+  /** 内置音色列表（参考音频随应用打包；音色下拉框数据源） */
+  ttsBuiltinVoices: () =>
+    requireTauri(() => invoke<BuiltinVoiceMeta[]>("tts_builtin_voices")),
   /** 语音环境自检（python / 仓库 / 模型 / codec / torch，cheap 不加载模型） */
   ttsEnvCheck: () => requireTauri(() => invoke<VoiceEnvReport>("tts_env_check")),
   /** 一键安装语音依赖（torch/transformers/soundfile/numpy）：按 N 卡选 CUDA/CPU 版，

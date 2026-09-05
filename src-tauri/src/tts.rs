@@ -45,6 +45,66 @@ const RESPAWN_BACKOFF: Duration = Duration::from_secs(5);
 const CACHE_KEEP: usize = 30;
 
 // ---------------------------------------------------------------------------
+// 内置音色
+// ---------------------------------------------------------------------------
+
+/// 内置音色：随应用打包的参考音频（zero-shot 克隆样本），运行时解压到
+/// app_data/tts/voices/。为什么需要：Audio8 无参考音频时走模型无条件生成，
+/// 没有固定说话人身份，采样随机性直接体现为音色漂移（同配置不同文本听感不一）；
+/// 固定音色的官方手段是给一段参考音频 + 准确原文。内置样本用同一语料、不同
+/// 韵律预生成，保证「选了哪个音色就稳定是哪个音色」。
+struct BuiltinVoice {
+    /// 配置里的音色 id（VoiceConfig.voice_id）
+    id: &'static str,
+    /// 展示名（设置页音色下拉框）
+    name: &'static str,
+    /// 一句话说明
+    description: &'static str,
+    /// 参考音频的准确原文（与录音内容一致）
+    ref_text: &'static str,
+    /// 44.1kHz 16bit 单声道 WAV（内嵌进二进制）
+    wav: &'static [u8],
+}
+
+/// 内置音色共用参考语料：内置样本念的都是这段话，worker 的 reference_text 与之一致
+const BUILTIN_REF_TEXT: &str =
+    "大家好，我是你的语音助手。今天也要保持好心情，认真完成每一件事，让生活充满阳光和活力。";
+
+/// 默认音色：voice_id 为空（老版本配置）时的实际生效项
+const DEFAULT_VOICE_ID: &str = "wanwan";
+
+/// 自定义音色的保留 id：使用用户填写的 ref_audio/ref_text
+const CUSTOM_VOICE_ID: &str = "custom";
+
+const BUILTIN_VOICES: &[BuiltinVoice] = &[
+    BuiltinVoice {
+        id: "wanwan",
+        name: "晚晚 · 温柔女声",
+        description: "语速平缓、音调偏甜，适合日常通知播报（默认）",
+        ref_text: BUILTIN_REF_TEXT,
+        wav: include_bytes!("../resources/voices/wanwan.wav"),
+    },
+    BuiltinVoice {
+        id: "zhixia",
+        name: "知夏 · 明快女声",
+        description: "语速稍快、干净利落",
+        ref_text: BUILTIN_REF_TEXT,
+        wav: include_bytes!("../resources/voices/zhixia.wav"),
+    },
+    BuiltinVoice {
+        id: "yunshu",
+        name: "云舒 · 沉稳女声",
+        description: "语速偏慢、音调低沉，适合长文朗读",
+        ref_text: BUILTIN_REF_TEXT,
+        wav: include_bytes!("../resources/voices/yunshu.wav"),
+    },
+];
+
+fn find_builtin_voice(id: &str) -> Option<&'static BuiltinVoice> {
+    BUILTIN_VOICES.iter().find(|v| v.id == id)
+}
+
+// ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------
 
@@ -63,8 +123,13 @@ pub struct VoiceConfig {
     pub repo_dir: String,
     /// 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth）
     pub model_dir: String,
-    /// 参考音频路径（zero-shot 音色克隆）：与 ref_text 必须同时给出才生效，
-    /// 都空走默认音色。只在 processor 输入层生效，不参与 worker 键（无需重启）
+    /// 音色选择：内置音色 id（见 BUILTIN_VOICES，如 "wanwan"）| "custom"（自定义
+    /// 参考音频克隆）| 空（老版本配置，等价默认内置音色）。决定了合成时实际下发给
+    /// worker 的 reference_audio/reference_text，进缓存键（换音色必须换缓存）
+    pub voice_id: String,
+    /// 参考音频路径（zero-shot 音色克隆）：仅 voice_id == "custom" 时生效，
+    /// 与 ref_text 成对给出才走克隆，都空走模型原生默认音色。
+    /// 只在 processor 输入层生效，不参与 worker 键（无需重启）
     pub ref_audio: String,
     /// 参考音频的准确原文（与录音内容一致；官方警告：转写不准会降低相似度与稳定性）
     pub ref_text: String,
@@ -90,6 +155,8 @@ impl Default for VoiceConfig {
             python_cmd: "python".into(),
             repo_dir: String::new(),
             model_dir: String::new(),
+            // 默认音色锚定到内置音色：不再走模型原生默认（音色漂移）
+            voice_id: DEFAULT_VOICE_ID.into(),
             ref_audio: String::new(),
             ref_text: String::new(),
             // 与 tts_worker.py 原硬编码值一致：默认行为不变
@@ -124,51 +191,116 @@ impl VoiceConfig {
         )
     }
 
-    /// 参考音频指纹（纯文本部分）：路径 + 参考原文。与 reference_mtime_tag
-    /// 合用保证「同路径换文件/改内容」也能区分。
-    fn reference_tag(&self) -> String {
-        if !has_reference(self) {
-            return String::new();
+    /// 完整缓存标签 = 采样参数 + 实际生效的参考音频指纹（路径 + 原文 + 文件
+    /// mtime/字节长）。换音色/换参考文件内容必须换缓存，否则播的还是旧音色的
+    /// 音频；无参考（custom 空对）时与 params_tag 相同。
+    fn cache_tag(&self, reference: Option<(&Path, &str)>) -> String {
+        let mut tag = self.params_tag();
+        if let Some((audio, ref_text)) = reference {
+            let meta = std::fs::metadata(audio).ok();
+            let mtime = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            tag.push_str(&format!(
+                "\u{1f}ra{}\u{1f}rt{}\u{1f}rm{}\u{1f}rl{}",
+                audio.display(),
+                ref_text,
+                mtime,
+                len
+            ));
         }
-        format!(
-            "\u{1f}ra{}\u{1f}rt{}",
-            self.ref_audio.trim(),
-            self.ref_text.trim()
-        )
-    }
-
-    /// 参考音频文件改动指纹：mtime（毫秒）+ 字节数。文件不存在时全 0——
-    /// 宿主在 set_voice_config 已拒绝不存在的文件，这里只是防御。
-    fn reference_mtime_tag(&self) -> String {
-        if !has_reference(self) {
-            return String::new();
-        }
-        let meta = std::fs::metadata(self.ref_audio.trim()).ok();
-        let mtime = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        format!("\u{1f}rm{}\u{1f}rl{}", mtime, len)
-    }
-
-    /// 完整缓存标签 = 采样参数 + 参考音频指纹。换参考音频（或其内容变化）
-    /// 必须换缓存，否则播的还是旧音色的音频。
-    fn cache_tag(&self) -> String {
-        format!(
-            "{}{}{}",
-            self.params_tag(),
-            self.reference_tag(),
-            self.reference_mtime_tag()
-        )
+        tag
     }
 }
 
-/// 参考音频是否生效：两个字段都非空才算配齐（官方要求成对出现）
+/// 参考音频是否生效（custom 模式）：两个字段都非空才算配齐（官方要求成对出现）
 fn has_reference(cfg: &VoiceConfig) -> bool {
     !cfg.ref_audio.trim().is_empty() && !cfg.ref_text.trim().is_empty()
+}
+
+/// 音色选择归一化（resolve_reference 前置；纯函数供单测）：
+/// 空/未知 id → 默认内置音色（老配置与脏数据的兜底），custom → 用户参考音频
+enum EffectiveVoice {
+    Builtin(&'static BuiltinVoice),
+    Custom,
+}
+
+fn effective_voice(cfg: &VoiceConfig) -> EffectiveVoice {
+    let id = cfg.voice_id.trim();
+    if !id.is_empty() && id != CUSTOM_VOICE_ID {
+        if let Some(v) = find_builtin_voice(id) {
+            return EffectiveVoice::Builtin(v);
+        }
+    }
+    if id == CUSTOM_VOICE_ID {
+        return EffectiveVoice::Custom;
+    }
+    EffectiveVoice::Builtin(find_builtin_voice(DEFAULT_VOICE_ID).expect("默认音色必须在内置表中"))
+}
+
+/// 解析当前配置实际生效的参考音频（zero-shot 克隆条件；generate_wav 是合成
+/// 唯一出口，通知播报/试听/长文本全部经此生效）：
+/// - 内置音色 → 解压打包参考 wav + 内置原文
+/// - custom → 用户填写的 ref_audio/ref_text（成对有效才走克隆，都空返回 None
+///   走模型原生默认音色，即旧行为的逃生口）
+fn resolve_reference(
+    app: &AppHandle,
+    cfg: &VoiceConfig,
+) -> Result<Option<(PathBuf, String)>, String> {
+    match effective_voice(cfg) {
+        EffectiveVoice::Builtin(v) => {
+            let path = ensure_builtin_voice_file(app, v)?;
+            Ok(Some((path, v.ref_text.to_string())))
+        }
+        EffectiveVoice::Custom => {
+            if has_reference(cfg) {
+                Ok(Some((
+                    PathBuf::from(cfg.ref_audio.trim()),
+                    cfg.ref_text.trim().to_string(),
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// 把内嵌的内置音色参考 wav 解压到应用数据目录（幂等：已存在且大小一致直接
+/// 复用；应用升级换样本后大小不同会自动覆盖）
+fn ensure_builtin_voice_file(app: &AppHandle, v: &BuiltinVoice) -> Result<PathBuf, String> {
+    let dir = tts_dir(app)?.join("voices");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建内置音色目录失败: {e}"))?;
+    let path = dir.join(format!("{}.wav", v.id));
+    let fresh = std::fs::metadata(&path)
+        .map(|m| m.len() == v.wav.len() as u64)
+        .unwrap_or(false);
+    if !fresh {
+        std::fs::write(&path, v.wav).map_err(|e| format!("写入内置音色参考音频失败: {e}"))?;
+    }
+    Ok(path)
+}
+
+/// 音色选择校验（set_voice_config 用；纯逻辑供单测）：
+/// voice_id 为空（老配置兼容）或内置 id 合法；custom 时参考音频必须成对且
+/// 文件存在；未知 id 拒绝（前端下拉框数据源是 tts_builtin_voices，正常不会出现）
+fn validate_voice_selection(cfg: &VoiceConfig) -> Result<(), String> {
+    let id = cfg.voice_id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+    if id == CUSTOM_VOICE_ID {
+        return validate_reference_pair(cfg);
+    }
+    if find_builtin_voice(id).is_none() {
+        return Err(format!(
+            "未知音色: {id}（请从内置音色列表选择，或使用 custom）"
+        ));
+    }
+    Ok(())
 }
 
 /// 参考音频配置校验（set_voice_config 用；纯函数供单测）：
@@ -311,8 +443,7 @@ fn process_job(job: SpeakJob) {
     }
     emit_voice(&app, "generating", Some(&text), None);
 
-    let tag = cfg.cache_tag();
-    let path = match cache_path(&app, &text, &cfg.model_dir, &tag) {
+    let path = match cache_path_for(&app, &cfg, &text) {
         Ok(p) if p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false) => Ok(p),
         _ => generate_wav(&app, &cfg, &text),
     };
@@ -377,6 +508,15 @@ fn cache_path(
     let dir = tts_dir(app)?.join("tts-cache");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缓存目录失败: {e}"))?;
     Ok(dir.join(format!("{:016x}.wav", cache_key(text, model_dir, params_tag))))
+}
+
+/// 当前配置对应的缓存路径（缓存键带实际生效的参考音频指纹）：process_job /
+/// synthesize_blocking 的缓存预检与 generate_wav 的实际写入共用同一把键，
+/// 保证「预检命中」与「合成落盘」不会因键不一致而双份生成
+fn cache_path_for(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBuf, String> {
+    let reference = resolve_reference(app, cfg)?;
+    let tag = cfg.cache_tag(reference.as_ref().map(|(p, t)| (p.as_path(), t.as_str())));
+    cache_path(app, text, &cfg.model_dir, &tag)
 }
 
 fn trim_cache(dir: &Path) {
@@ -569,7 +709,7 @@ impl WorkerInner {
         text: &str,
         output: &Path,
         params: &GenerateParams,
-        reference: Option<(&str, &str)>,
+        reference: Option<(&Path, &str)>,
     ) -> Result<(), String> {
         self.wait_ready(Instant::now() + READY_TIMEOUT)?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst).to_string();
@@ -582,7 +722,7 @@ impl WorkerInner {
             "params": params,
         });
         if let Some((audio, rtext)) = reference {
-            line["reference_audio"] = json!(audio);
+            line["reference_audio"] = json!(audio.display().to_string());
             line["reference_text"] = json!(rtext);
         }
         let line = line.to_string();
@@ -875,15 +1015,18 @@ fn stop_voice_service_blocking() -> bool {
 // ---------------------------------------------------------------------------
 
 fn generate_wav(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBuf, String> {
-    let path = cache_path(app, text, &cfg.model_dir, &cfg.cache_tag())?;
+    // 先解析实际生效的参考音频（音色选择 → 内置 wav 解压 / 自定义参考音频），
+    // 缓存键随之带参考指纹：换音色自动换缓存，不会串音色
+    let reference = resolve_reference(app, cfg)?;
+    let cache_tag = cfg.cache_tag(reference.as_ref().map(|(p, t)| (p.as_path(), t.as_str())));
+    let path = cache_path(app, text, &cfg.model_dir, &cache_tag)?;
     let worker = worker_for(cfg, app)?;
-    // 全局参考音色：配置成对给出时所有播报/试听/合成都走音色克隆
-    let reference = if has_reference(cfg) {
-        Some((cfg.ref_audio.trim(), cfg.ref_text.trim()))
-    } else {
-        None
-    };
-    worker.generate(text, &path, &GenerateParams::from(cfg), reference)?;
+    worker.generate(
+        text,
+        &path,
+        &GenerateParams::from(cfg),
+        reference.as_ref().map(|(p, t)| (p.as_path(), t.as_str())),
+    )?;
     if let Some(dir) = path.parent() {
         trim_cache(dir);
     }
@@ -920,6 +1063,31 @@ fn play_wav(path: &Path) -> Result<(), String> {
 // Tauri 命令
 // ---------------------------------------------------------------------------
 
+/// 内置音色元数据（设置页音色下拉框数据源；与前端 BuiltinVoiceMeta 同形）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinVoiceMeta {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// 是否默认音色（voiceId 为空时的实际生效项）
+    pub is_default: bool,
+}
+
+/// 内置音色列表：静态表随应用打包，无需磁盘/模型参与，前端下拉框直接渲染
+#[tauri::command]
+pub async fn tts_builtin_voices() -> Result<Vec<BuiltinVoiceMeta>, String> {
+    Ok(BUILTIN_VOICES
+        .iter()
+        .map(|v| BuiltinVoiceMeta {
+            id: v.id.into(),
+            name: v.name.into(),
+            description: v.description.into(),
+            is_default: v.id == DEFAULT_VOICE_ID,
+        })
+        .collect())
+}
+
 /// 环境自检报告（cheap：不加载模型；torch 检查只 import 不建 session）
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -953,7 +1121,7 @@ pub async fn set_voice_config(
     if config.enabled && (config.repo_dir.is_empty() || config.model_dir.is_empty()) {
         return Err("启用语音播报前请先填写 Audio8 仓库目录与模型目录".into());
     }
-    validate_reference_pair(&config)?;
+    validate_voice_selection(&config)?;
     validate_generate_params(&config)?;
     *state.voice.lock().unwrap() = config;
     Ok(())
@@ -1670,13 +1838,12 @@ fn synthesize_blocking(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result
     }
     let total = chunks.len();
     let mut parts: Vec<PathBuf> = Vec::with_capacity(total);
-    let tag = cfg.cache_tag();
     for (i, chunk) in chunks.iter().enumerate() {
         let _ = app.emit(
             TTS_SYNTH_PROGRESS_EVENT,
             json!({ "current": i + 1, "total": total }),
         );
-        let path = match cache_path(app, chunk, &cfg.model_dir, &tag) {
+        let path = match cache_path_for(app, cfg, chunk) {
             Ok(p) if p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false) => Ok(p),
             _ => generate_wav(app, cfg, chunk),
         }?;
@@ -1897,6 +2064,8 @@ mod tests {
         assert!(!d.enabled);
         assert_eq!(d.speak_content, "summary");
         assert_eq!(d.python_cmd, "python");
+        // 默认音色锚定内置音色：不再走模型原生默认（音色漂移）
+        assert_eq!(d.voice_id, DEFAULT_VOICE_ID);
         assert_eq!(d.worker_key(), "python\u{1f}\u{1f}");
         // 采样参数默认与 worker 原硬编码值一致（行为不变）
         assert_eq!(
@@ -1930,10 +2099,12 @@ mod tests {
         // 老版本存储没有参考音频字段：默认为空（默认音色）
         assert!(cfg.ref_audio.is_empty());
         assert!(cfg.ref_text.is_empty());
+        // 老版本存储没有音色字段：默认内置音色补齐（resolve 时等价生效）
+        assert_eq!(cfg.voice_id, DEFAULT_VOICE_ID);
     }
 
-    /// 参考音频缓存指纹：换参考（路径/原文/文件内容）必须换缓存；未配置时
-    /// cache_tag 与原 params_tag 相同（默认音色的旧缓存继续命中）
+    /// 参考音频缓存指纹：换参考（路径/原文/文件内容）必须换缓存；无参考
+    /// （custom 空对）时 cache_tag 与 params_tag 相同
     #[test]
     fn 参考音频进缓存键() {
         let tmp = std::env::temp_dir().join("dsh-tts-ref-tag");
@@ -1941,22 +2112,88 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let wav = tmp.join("ref.wav");
         std::fs::write(&wav, b"RIFF....").unwrap();
-        let mut d = VoiceConfig::default();
-        // 未配置参考：cache_tag == params_tag，老缓存全部兼容
-        assert_eq!(d.cache_tag(), d.params_tag());
-        d.ref_audio = wav.to_string_lossy().into_owned();
-        d.ref_text = "参考原文".into();
-        assert_ne!(d.cache_tag(), d.params_tag(), "配了参考必须换缓存键");
+        let d = VoiceConfig::default();
+        // 无参考：cache_tag == params_tag（模型原生默认音色的逃生口）
+        assert_eq!(d.cache_tag(None), d.params_tag());
+        // 有参考（generate_wav 传入实际生效的参考音频）
+        let ref_some = Some((wav.as_path(), "参考原文"));
+        assert_ne!(d.cache_tag(ref_some), d.params_tag(), "配了参考必须换缓存键");
         // 换参考原文
-        let with_text_a = d.cache_tag();
-        d.ref_text = "另一句原文".into();
-        assert_ne!(d.cache_tag(), with_text_a, "换参考原文必须换缓存键");
+        let with_text_a = d.cache_tag(ref_some);
+        assert_ne!(
+            d.cache_tag(Some((wav.as_path(), "另一句原文"))),
+            with_text_a,
+            "换参考原文必须换缓存键"
+        );
         // 同路径换文件内容（mtime/len 变化）
-        d.ref_text = "参考原文".into();
-        let before = d.cache_tag();
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&wav, b"RIFF..........").unwrap();
-        assert_ne!(d.cache_tag(), before, "参考文件内容变化必须换缓存键");
+        assert_ne!(
+            d.cache_tag(ref_some),
+            with_text_a,
+            "参考文件内容变化必须换缓存键"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 音色归一化：内置 id 原样生效；空/未知 id 回退默认内置音色（老配置与脏数据
+    /// 兜底）；custom 走用户参考音频
+    #[test]
+    fn 音色选择归一化() {
+        let mut c = VoiceConfig::default();
+        match effective_voice(&c) {
+            EffectiveVoice::Builtin(v) => assert_eq!(v.id, DEFAULT_VOICE_ID),
+            EffectiveVoice::Custom => panic!("默认配置不应是 custom"),
+        }
+        c.voice_id = "zhixia".into();
+        match effective_voice(&c) {
+            EffectiveVoice::Builtin(v) => assert_eq!(v.id, "zhixia"),
+            EffectiveVoice::Custom => panic!("内置 id 应解析为内置音色"),
+        }
+        c.voice_id = CUSTOM_VOICE_ID.into();
+        assert!(matches!(effective_voice(&c), EffectiveVoice::Custom));
+        c.voice_id = String::new();
+        match effective_voice(&c) {
+            EffectiveVoice::Builtin(v) => assert_eq!(v.id, DEFAULT_VOICE_ID, "空值回退默认音色"),
+            EffectiveVoice::Custom => panic!("空值不应是 custom"),
+        }
+        c.voice_id = "no-such-voice".into();
+        match effective_voice(&c) {
+            EffectiveVoice::Builtin(v) => assert_eq!(v.id, DEFAULT_VOICE_ID, "未知 id 回退默认音色"),
+            EffectiveVoice::Custom => panic!("未知 id 不应是 custom"),
+        }
+    }
+
+    /// 音色选择校验：内置 id 合法；custom 时参考音频成对且文件存在；未知 id 拒绝；
+    /// 空值（老配置兼容）通过
+    #[test]
+    fn 音色选择校验() {
+        let tmp = std::env::temp_dir().join("dsh-tts-voice-validate");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let wav = tmp.join("ref.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        // 空 voice_id：老配置兼容，通过
+        let mut c = VoiceConfig::default();
+        c.voice_id = String::new();
+        assert!(validate_voice_selection(&c).is_ok());
+        // 内置音色：通过
+        c.voice_id = "zhixia".into();
+        assert!(validate_voice_selection(&c).is_ok());
+        // 未知音色：拒绝
+        c.voice_id = "no-such-voice".into();
+        assert!(validate_voice_selection(&c).is_err());
+        // custom：成对且存在通过；只填一边/文件不存在拒绝；都空走模型原生默认，通过
+        c.voice_id = CUSTOM_VOICE_ID.into();
+        c.ref_audio = wav.to_string_lossy().into_owned();
+        assert!(validate_voice_selection(&c).is_err(), "只填音频不成对应拒绝");
+        c.ref_text = "参考原文".into();
+        assert!(validate_voice_selection(&c).is_ok());
+        c.ref_audio = tmp.join("nope.wav").to_string_lossy().into_owned();
+        assert!(validate_voice_selection(&c).is_err(), "文件不存在应拒绝");
+        c.ref_audio = String::new();
+        c.ref_text = String::new();
+        assert!(validate_voice_selection(&c).is_ok(), "custom 空对走模型原生默认");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
