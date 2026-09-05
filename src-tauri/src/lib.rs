@@ -4,7 +4,6 @@ mod logs;
 mod notify;
 mod proxy;
 mod session_events;
-#[cfg(feature = "tts")]
 mod tts;
 
 use dsh::AppState;
@@ -314,6 +313,7 @@ pub fn run() {
                 .button_id("win-maximize")
                 .build(),
         )
+        // 语音合成工具窗口的「另存为」系统对话框（tts.rs tts_export_wav 前置）
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -333,13 +333,18 @@ pub fn run() {
             dsh::check_plugin_updates,
             dsh::set_notify_enabled,
             dsh::set_notify_style,
-            dsh::set_voice_enabled,
-            dsh::set_tts_inference_device,
-            dsh::download_tts_model,
-            dsh::cancel_tts_download,
-            dsh::test_tts_speak,
-            dsh::select_tts_model_dir,
             dsh::http_get_json,
+            tts::set_voice_config,
+            tts::tts_env_check,
+            tts::tts_install_voice_deps,
+            tts::tts_speak_test,
+            tts::tts_stop_voice_service,
+            tts::tts_voice_status,
+            tts::tts_open_studio,
+            tts::tts_synthesize,
+            tts::tts_play_file,
+            tts::tts_export_wav,
+            tts::tts_open_path,
             credentials::check_credentials_compat,
             credentials::fix_credentials,
             logs::log_start_session,
@@ -440,9 +445,12 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // 关闭窗口 → 隐藏到托盘，服务继续运行（托盘"退出"才真正退出）
-                api.prevent_close();
-                let _ = window.hide();
+                // 主窗口关闭 → 隐藏到托盘，服务继续运行（托盘"退出"才真正退出）；
+                // 其他窗口（语音合成工具等独立工具窗口）正常关闭
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .build(tauri::generate_context!())
@@ -455,6 +463,8 @@ pub fn run() {
                 }
                 // 结束当前日志会话（补写 ended_at）
                 logs::finalize_active(app_handle);
+                // 回收常驻 TTS worker（否则退出后 python 进程继续占用 ~1-2GB 内存）
+                tts::shutdown_worker();
             }
         });
 }

@@ -101,12 +101,76 @@ export const EVENTS = {
   /** 用户点击了系统通知（toast 激活，见 notify.rs 的 ActivatePayload）：
    *  sessionId 为「打开对话」按钮携带的会话 id，null 表示点到 toast 正文 */
   notifyActivate: "dsh://notify-activate",
+  /** 语音播报状态（Rust tts.rs：generating / playing / done / error），
+   *  设置页「语音播报」卡片监听展示 */
+  notifyVoice: "dsh://notify-voice",
+  /** 语音依赖一键安装的 pip 逐行输出（Rust tts.rs，装 torch/transformers 等） */
+  voiceInstallLog: "dsh://voice-install-log",
+  /** 长文本分段合成的逐段进度（Rust tts.rs：第 current/total 段完成） */
+  ttsSynthProgress: "dsh://tts-synth-progress",
 } as const;
 
 /** 系统通知点击（toast 激活）负载：与 Rust `notify::ActivatePayload` 同形（serde camelCase） */
 export interface NotifyActivatePayload {
   /** 被点击「打开对话」按钮携带的会话 id；点到 toast 正文时为 null */
   sessionId: string | null;
+}
+
+/** 语音播报状态事件负载：与 Rust `tts.rs` emit 的 json 同形 */
+export interface NotifyVoicePayload {
+  state: "generating" | "playing" | "done" | "error";
+  text: string | null;
+  error: string | null;
+  /** 事件发出时 worker 是否驻留内存（命中缓存直接播放时为 false：不走合成、不起 worker） */
+  running: boolean;
+}
+
+/** 语音播报配置：与 Rust `tts::VoiceConfig` 同形（serde camelCase） */
+export interface VoiceConfig {
+  enabled: boolean;
+  /** 播报内容："summary"（标题+描述）| "title" | "desc" */
+  speakContent: "summary" | "title" | "desc";
+  /** Python 解释器（命令名或绝对路径，需已装 torch/transformers） */
+  pythonCmd: string;
+  /** Audio8_TTS 仓库克隆目录（含 audio8_tts_data.py） */
+  repoDir: string;
+  /** 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth） */
+  modelDir: string;
+  /** 采样温度（>0）：越高越随机，越低越平稳 */
+  temperature: number;
+  /** nucleus 采样概率阈值（0 < topP ≤ 1） */
+  topP: number;
+  /** top-k 采样候选数（0 = 不启用） */
+  topK: number;
+  /** 随机种子：同文本+同参数+同 seed 结果可复现；换种子即换一种读法 */
+  seed: number;
+  /** 单段生成 token 上限（不够时长会被截断） */
+  maxNewTokens: number;
+  /** 贪心解码：忽略采样参数，输出最稳定 */
+  greedy: boolean;
+}
+
+/** 环境自检报告：与 Rust `tts::VoiceEnvReport` 同形（serde camelCase） */
+export interface VoiceEnvReport {
+  pythonVersion: string | null;
+  pythonError: string | null;
+  repoOk: boolean;
+  repoHint: string;
+  modelOk: boolean;
+  modelHint: string;
+  codecOk: boolean;
+  codecHint: string;
+  torchOk: boolean;
+  torchInfo: string | null;
+  torchError: string | null;
+  /** torch 检测失败且 Python 可用时的完整一键安装命令；正常/Python 不可用时为 null */
+  torchInstallCmd: string | null;
+}
+
+/** 长文本分段合成进度负载（Rust tts.rs TTS_SYNTH_PROGRESS_EVENT） */
+export interface TtsSynthProgress {
+  current: number;
+  total: number;
 }
 
 /** 浏览器预览模式下的统一提示 */
@@ -165,24 +229,37 @@ export const api = {
    *  0 = 不可点击（原 notify-rust 样式，仅展示） */
   setNotifyStyle: (style: 0 | 1) =>
     requireTauri(() => invoke<void>("set_notify_style", { style })),
-  /** 语音播报开关：true = 启用语音播报通知内容（需配置 TTS 模型） */
-  setVoiceEnabled: (enabled: boolean) =>
-    requireTauri(() => invoke<void>("set_voice_enabled", { enabled })),
-  /** TTS 推理设备：0 = CPU，1 = GPU（需在启用 tts 特性时编译） */
-  setTtsInferenceDevice: (device: 0 | 1) =>
-    requireTauri(() => invoke<void>("set_tts_inference_device", { device })),
-  /** 下载 TTS 模型，返回模型目录路径 */
-  downloadTtsModel: () =>
-    requireTauri(() => invoke<string>("download_tts_model")),
-  /** 取消 TTS 模型下载 */
-  cancelTtsDownload: () =>
-    requireTauri(() => invoke<void>("cancel_tts_download")),
-  /** 测试 TTS 语音播报 */
-  testTtsSpeak: (text: string, modelDir?: string | null) =>
-    requireTauri(() => invoke<void>("test_tts_speak", { text, modelDir })),
-  /** 打开目录选择器选择本地 TTS 模型目录，返回路径或 null */
-  selectTtsModelDir: () =>
-    requireTauri(() => invoke<string | null>("select_tts_model_dir")),
+  /** 语音播报配置（enabled/播报内容/python/仓库目录/模型目录，见 tts.rs）；
+   *  python/仓库/模型变化会使常驻 worker 在下次合成时重建 */
+  setVoiceConfig: (config: VoiceConfig) =>
+    requireTauri(() => invoke<void>("set_voice_config", { config })),
+  /** 语音环境自检（python / 仓库 / 模型 / codec / torch，cheap 不加载模型） */
+  ttsEnvCheck: () => requireTauri(() => invoke<VoiceEnvReport>("tts_env_check")),
+  /** 一键安装语音依赖（torch/transformers/soundfile/numpy）：按 N 卡选 CUDA/CPU 版，
+   *  pip 输出经 EVENTS.voiceInstallLog 逐行推送；命令在全部步骤结束后才 resolve */
+  ttsInstallVoiceDeps: () => requireTauri(() => invoke<void>("tts_install_voice_deps")),
+  /** 语音试听：走通知同一条队列与缓存；总开关未开也能试 */
+  ttsSpeakTest: (text?: string) =>
+    requireTauri(() => invoke<void>("tts_speak_test", { text: text ?? null })),
+  /** 手动停止语音服务：清空排队播报 + 杀常驻 worker，模型内存立即释放；
+   *  返回是否真的停掉了一个运行中的 worker。下次播报会自动重新拉起（冷启动重载模型） */
+  ttsStopVoiceService: () =>
+    requireTauri(() => invoke<boolean>("tts_stop_voice_service")),
+  /** 语音 worker 是否驻留运行（true = 模型已加载、占着内存） */
+  ttsVoiceStatus: () => requireTauri(() => invoke<boolean>("tts_voice_status")),
+  /** 打开语音合成工具独立窗口（已开则聚焦）：长文本合成 + 导出 + 完整配置 */
+  ttsOpenStudio: () => requireTauri(() => invoke<void>("tts_open_studio")),
+  /** 长文本分段合成 → 拼接导出（app_data/tts/exports/tts-<ts>.wav）；
+   *  进度经 EVENTS.ttsSynthProgress 逐段推送；命令在全部完成后返回导出文件绝对路径。
+   *  每段独立复用文本缓存；首次调用会拉起 worker 加载模型（30~90s） */
+  ttsSynthesize: (text: string) => requireTauri(() => invoke<string>("tts_synthesize", { text })),
+  /** 播放本地 WAV 文件（合成结果预览；rodio 直连系统音频，窗口失焦照常出声） */
+  ttsPlayFile: (path: string) => requireTauri(() => invoke<void>("tts_play_file", { path })),
+  /** 把合成结果复制另存为 dest（用户经系统另存为对话框选定） */
+  ttsExportWav: (src: string, dest: string) =>
+    requireTauri(() => invoke<void>("tts_export_wav", { src, dest })),
+  /** 在文件管理器中打开目录 */
+  ttsOpenPath: (path: string) => requireTauri(() => invoke<void>("tts_open_path", { path })),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
   /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */

@@ -14,12 +14,14 @@
 //! `legacy_toast` 的 `Urgency::Critical` 与 `clickable_toast` 的
 //! `Scenario::Reminder`）。
 //!
-//! **语音播放接入位**就在这里：新增一个实现 [`NotifyChannel`] 的结构体并加进
-//! [`channels`]，上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
+//! **语音播放**已接入：`tts::VoiceChannel` 实现了 [`NotifyChannel`] 并在 [`CHANNELS`]
+//! 表中——deliver 只入队立即返回，由常驻 Python worker（Audio8 TTS，见 `tts.rs`）
+//! 合成后用 rodio 播放；上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
 //! 的同名扩展点在 `src/lib/notify.ts`，两边通过 `dispatch` 里的一次 `emit` 对齐。
 
 use crate::dsh;
 use crate::session_events::NotifyMessage;
+use crate::tts;
 use std::path::PathBuf;
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
@@ -28,6 +30,10 @@ use tauri::{AppHandle, Emitter, Manager};
 /// winrt-notification 不设 app_id 时会回退到 PowerShell 的 AUMID，通知会被显示成
 /// 「Windows PowerShell」，既丢品牌也点不进本应用。
 pub const APP_ID: &str = "com.deepseek.harness.desktop";
+
+/// 自检通知的 kind。独立成常量：tts.rs 的测试锁定它，防止有人改名后
+/// 「自检通知不朗读」的判断静默失效。
+pub const SAMPLE_KIND: &str = "sample";
 
 // ---------------------------------------------------------------------------
 // toast 投递方式（Windows-only）：两种实现并存，按 `AppState::notify_style` 切换。
@@ -100,58 +106,6 @@ impl NotifyChannel for ToastChannel {
         {
             let _ = (app, msg);
         }
-    }
-}
-
-/// 语音播报通道：当 AppState::voice_enabled 为 true 时，通过 TTS 引擎朗读通知内容
-pub struct VoiceChannel;
-
-impl NotifyChannel for VoiceChannel {
-    fn name(&self) -> &'static str {
-        "voice"
-    }
-
-    fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
-        use std::sync::atomic::Ordering;
-        // 检查语音播报是否启用
-        let enabled = app
-            .state::<dsh::AppState>()
-            .voice_enabled
-            .load(Ordering::SeqCst);
-        if !enabled {
-            return;
-        }
-
-        // 构造要朗读的文本：优先使用 summary，其次 body
-        let text_to_speak = if !msg.summary.is_empty() {
-            msg.summary.clone()
-        } else if !msg.body.is_empty() {
-            msg.body.clone()
-        } else {
-            return;
-        };
-
-        // 在后台线程执行 TTS 推理，避免阻塞通知投递主流程
-        // 注意：实际生产环境应使用任务队列避免并发推理冲突
-        std::thread::spawn(move || {
-            #[cfg(feature = "tts")]
-            {
-                use crate::tts;
-                let model_path = tts::default_model_path();
-                if let Some(mut engine) = tts::try_get_engine() {
-                    if let Err(e) = engine.speak(&text_to_speak, &model_path) {
-                        eprintln!("[tts] 语音播报失败: {}", e);
-                    }
-                } else {
-                    eprintln!("[tts] 无法获取 TTS 引擎锁（可能正在推理中）");
-                }
-            }
-            #[cfg(not(feature = "tts"))]
-            {
-                // TTS 特性未启用时的占位日志
-                eprintln!("[tts] 收到播报请求（特性未启用）: {}", text_to_speak);
-            }
-        });
     }
 }
 
@@ -228,8 +182,9 @@ fn clickable_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
     }
 }
 
-/// 当前启用的投递通道。语音通道后续追加到这里。
-static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel, &VoiceChannel];
+/// 当前启用的投递通道。语音通道（tts.rs）：deliver 只入队不阻塞，
+/// toast 照常先弹，语音异步跟上。
+static CHANNELS: &[&dyn NotifyChannel] = &[&ToastChannel, &tts::VoiceChannel];
 
 fn channels() -> &'static [&'static dyn NotifyChannel] {
     CHANNELS
@@ -267,7 +222,7 @@ pub fn dispatch(app: &AppHandle, msg: &NotifyMessage) {
 /// 「sample」会话，按设计静默降级。legacy 样式（notify-rust）不渲染 actions，不受影响。
 pub fn push_sample(app: &AppHandle) {
     let msg = NotifyMessage {
-        kind: "sample",
+        kind: SAMPLE_KIND,
         session_id: "sample".to_string(),
         session_title: String::new(),
         title: "系统推送",
