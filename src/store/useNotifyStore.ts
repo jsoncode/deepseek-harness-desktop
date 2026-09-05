@@ -23,8 +23,9 @@ export const VOICE_SYNTH_DEFAULTS = {
 } as const;
 
 /** 语音播报默认配置：与 Rust `tts::VoiceConfig::default` 一致。
- *  voiceId 空值由 Rust 解析为默认内置音色（tts_builtin_voices 中 isDefault 项，
- *  当前为 "wanwan"），老版本存储缺该字段时经合并补齐后行为一致 */
+ *  voiceId 空值由 Rust 解析为默认内置音色（voices 目录下 DEFAULT_VOICE_ID 对应
+ *  文件，当前为 "晚晚"；缺失时回退排序第一个），老版本存储缺该字段时经合并
+ *  补齐后行为一致 */
 const VOICE_DEFAULT: VoiceConfig = {
   enabled: false,
   speakContent: "summary",

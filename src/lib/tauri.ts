@@ -137,8 +137,9 @@ export interface VoiceConfig {
   repoDir: string;
   /** 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth） */
   modelDir: string;
-  /** 音色：内置音色 id（ttsBuiltinVoices 返回，如 "wanwan"）| "custom"
-   *  （自定义参考音频克隆）| ""（老版本配置，等价默认内置音色） */
+  /** 音色：内置音色 id（ttsBuiltinVoices 返回，即 voices 目录下的音频文件名，
+   *  如 "晚晚"）| "custom"（自定义参考音频克隆）| ""（老版本配置，等价默认
+   *  内置音色；陈旧 id 由 Rust 自愈为默认音色） */
   voiceId: string;
   /** 参考音频路径（zero-shot 音色克隆）：仅 voiceId = "custom" 时生效，
    *  与 refText 成对填写才走克隆，都空走模型原生默认音色 */
@@ -159,11 +160,12 @@ export interface VoiceConfig {
   greedy: boolean;
 }
 
-/** 内置音色（Rust `tts::BuiltinVoiceMeta` 同形）：参考音频随应用打包，
- *  下拉框数据源来自 ttsBuiltinVoices；首个标记 isDefault 的即默认音色 */
+/** 内置音色（Rust `tts::BuiltinVoiceMeta` 同形）：来自资源目录 voices/ 下的
+ *  音频文件，文件名即选项名；下拉框数据源来自 ttsBuiltinVoices */
 export interface BuiltinVoiceMeta {
   id: string;
   name: string;
+  /** 参考原文（同名 .txt 优先，缺省内置语料）——展示用，也便于排查克隆不符 */
   description: string;
   /** 是否默认音色（voiceId 为空时的实际生效项） */
   isDefault: boolean;

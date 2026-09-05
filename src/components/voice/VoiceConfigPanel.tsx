@@ -51,8 +51,8 @@ export default function VoiceConfigPanel() {
   const [cloning, setCloning] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  // 内置音色列表（Rust 静态表，参考音频随应用打包）：音色下拉框数据源。
-  // 浏览器预览模式无 Tauri 运行时列表为空，下拉框只剩「自定义」
+  // 内置音色列表（实时扫描资源目录 voices/，音频文件名即选项名）：
+  // 音色下拉框数据源。浏览器预览模式无 Tauri 运行时列表为空，下拉框只剩「自定义」
   const [builtinVoices, setBuiltinVoices] = useState<BuiltinVoiceMeta[]>([]);
   useEffect(() => {
     void api.ttsBuiltinVoices().then(setBuiltinVoices).catch(() => undefined);
@@ -377,7 +377,8 @@ export default function VoiceConfigPanel() {
       </div>
       <div>
         <p className="settings-desc">
-          音色：内置音色自带固定参考音频，选哪个就稳定是哪个音色（通知朗读与长文本合成共用）
+          音色：来自应用内置的参考音频库（voices 目录，文件名即音色名），选哪个就稳定是哪个音色；
+          通知朗读与长文本合成共用
         </p>
         <Space direction="vertical" style={{ width: "100%" }} size={6}>
           <Select
@@ -395,7 +396,7 @@ export default function VoiceConfigPanel() {
           />
           {!isCustomVoice && selectedBuiltin && (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              {selectedBuiltin.description}；想克隆自己的音色（念一句语料录音）请选「自定义」
+              参考原文：{selectedBuiltin.description}；想克隆自己的音色（念一句语料录音）请选「自定义」
             </Text>
           )}
         </Space>
