@@ -13,7 +13,9 @@ import Loading from "./pages/Loading";
 import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
 import TtsStudio from "./pages/TtsStudio";
+import TtsHistory from "./pages/TtsHistory";
 import { useThemeStore } from "./store/useThemeStore";
+import { initNotifySync } from "./store/useNotifyStore";
 import { startNotifyListener } from "./lib/notify";
 
 const FONT_FAMILY =
@@ -48,6 +50,10 @@ export default function App() {
   // 订阅 Rust 侧投递过的推送消息（供前端通道消费，目前是语音留桩）；幂等，整个 App 生命周期只挂一次
   useEffect(() => {
     startNotifyListener();
+    // 启动即把推送开关/样式/语音配置回灌 Rust（幂等）：历史上回灌只发生在
+    // 「打开过设置页/语音工具窗口」时——重启后 Rust 侧语音配置停留在默认
+    // （enabled=false），通知语音被静默跳过。根因修复，见 initNotifySync 注释。
+    initNotifySync();
   }, []);
 
   // 把实际主题同步到 <html> 的 data-theme 与 color-scheme（驱动 CSS 变量）
@@ -97,6 +103,7 @@ function Shell() {
         <div className="app-content">
           <Routes>
             <Route path="/tts-studio" element={<TtsStudio />} />
+            <Route path="/tts-studio/history" element={<TtsHistory />} />
             <Route path="*" element={<Navigate to="/tts-studio" replace />} />
           </Routes>
         </div>

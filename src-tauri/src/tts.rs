@@ -24,6 +24,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -62,6 +63,11 @@ pub struct VoiceConfig {
     pub repo_dir: String,
     /// 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth）
     pub model_dir: String,
+    /// 参考音频路径（zero-shot 音色克隆）：与 ref_text 必须同时给出才生效，
+    /// 都空走默认音色。只在 processor 输入层生效，不参与 worker 键（无需重启）
+    pub ref_audio: String,
+    /// 参考音频的准确原文（与录音内容一致；官方警告：转写不准会降低相似度与稳定性）
+    pub ref_text: String,
     /// 采样温度（>0）：越高音色/韵律越随机，越低越平稳
     pub temperature: f32,
     /// nucleus 采样概率阈值（0 < top_p ≤ 1）
@@ -84,6 +90,8 @@ impl Default for VoiceConfig {
             python_cmd: "python".into(),
             repo_dir: String::new(),
             model_dir: String::new(),
+            ref_audio: String::new(),
+            ref_text: String::new(),
             // 与 tts_worker.py 原硬编码值一致：默认行为不变
             temperature: 0.8,
             top_p: 0.95,
@@ -115,6 +123,66 @@ impl VoiceConfig {
             self.max_new_tokens
         )
     }
+
+    /// 参考音频指纹（纯文本部分）：路径 + 参考原文。与 reference_mtime_tag
+    /// 合用保证「同路径换文件/改内容」也能区分。
+    fn reference_tag(&self) -> String {
+        if !has_reference(self) {
+            return String::new();
+        }
+        format!(
+            "\u{1f}ra{}\u{1f}rt{}",
+            self.ref_audio.trim(),
+            self.ref_text.trim()
+        )
+    }
+
+    /// 参考音频文件改动指纹：mtime（毫秒）+ 字节数。文件不存在时全 0——
+    /// 宿主在 set_voice_config 已拒绝不存在的文件，这里只是防御。
+    fn reference_mtime_tag(&self) -> String {
+        if !has_reference(self) {
+            return String::new();
+        }
+        let meta = std::fs::metadata(self.ref_audio.trim()).ok();
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        format!("\u{1f}rm{}\u{1f}rl{}", mtime, len)
+    }
+
+    /// 完整缓存标签 = 采样参数 + 参考音频指纹。换参考音频（或其内容变化）
+    /// 必须换缓存，否则播的还是旧音色的音频。
+    fn cache_tag(&self) -> String {
+        format!(
+            "{}{}{}",
+            self.params_tag(),
+            self.reference_tag(),
+            self.reference_mtime_tag()
+        )
+    }
+}
+
+/// 参考音频是否生效：两个字段都非空才算配齐（官方要求成对出现）
+fn has_reference(cfg: &VoiceConfig) -> bool {
+    !cfg.ref_audio.trim().is_empty() && !cfg.ref_text.trim().is_empty()
+}
+
+/// 参考音频配置校验（set_voice_config 用；纯函数供单测）：
+/// 成对出现（要么都空要么都非空）且文件真实存在
+fn validate_reference_pair(cfg: &VoiceConfig) -> Result<(), String> {
+    let has_audio = !cfg.ref_audio.trim().is_empty();
+    let has_text = !cfg.ref_text.trim().is_empty();
+    if has_audio != has_text {
+        return Err("参考音频与参考原文必须同时填写（官方要求两者成对出现）".into());
+    }
+    if has_audio && !Path::new(cfg.ref_audio.trim()).is_file() {
+        return Err(format!("参考音频文件不存在: {}", cfg.ref_audio.trim()));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -129,13 +197,38 @@ impl crate::notify::NotifyChannel for VoiceChannel {
     }
 
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
-        // 自检通知（push_sample）不朗读：它不是会话事件，静默；试听走 tts_speak_test
+        // 自检通知（push_sample）不朗读：它不是会话事件；试听走 tts_speak_test。
+        // 跳过不再纯静默：emit skipped 让语音面板能看到「为什么不响」
         if msg.kind == "sample" {
+            emit_voice(
+                app,
+                "skipped",
+                Some(&msg.summary),
+                Some("自检通知不朗读（验证语音请用「试听」按钮）"),
+            );
             return;
         }
         let cfg = app.state::<AppState>().voice.lock().unwrap().clone();
-        if !cfg.enabled || cfg.repo_dir.is_empty() || cfg.model_dir.is_empty() {
+        if !cfg.enabled {
+            // 总开关未开：通知照常弹，语音跳过但给出可诊断的 skipped 事件
+            eprintln!("[tts] 语音播报跳过（总开关未开启）: {}", msg.summary);
+            emit_voice(
+                app,
+                "skipped",
+                Some(speak_text(msg, &cfg.speak_content)),
+                Some("语音播报总开关未开启（在设置→通知管理或语音工具窗口开启）"),
+            );
             return;
+        }
+        // 严格校验路径：不仅检查空，还检查盘符根等无效路径。
+        // 校验失败同样 emit skipped：历史上这里是纯静默 return，用户只会看到
+        // 「通知弹了但没声音」，无从定位是路径配置问题
+        for (dir, label) in [(&cfg.repo_dir, "Audio8 仓库目录"), (&cfg.model_dir, "模型目录")] {
+            if let Err(e) = validate_audio_path(dir, label) {
+                eprintln!("[tts] 语音播报跳过（{label} 无效）: {e}");
+                emit_voice(app, "skipped", Some(speak_text(msg, &cfg.speak_content)), Some(&e));
+                return;
+            }
         }
         enqueue_job(SpeakJob { app: app.clone(), text: speak_text(msg, &cfg.speak_content).to_string(), force: false });
     }
@@ -211,13 +304,14 @@ fn queue_loop(q: &'static Queue) {
 fn process_job(job: SpeakJob) {
     let SpeakJob { app, text, force } = job;
     let cfg = app.state::<AppState>().voice.lock().unwrap().clone();
-    // 排队期间用户关掉总开关：放弃播报（试听 force 除外）
+    // 排队期间用户关掉总开关：放弃播报（试听 force 除外），同样给出 skipped 事件
     if !cfg.enabled && !force {
+        emit_voice(&app, "skipped", Some(&text), Some("语音播报在排队期间被关闭"));
         return;
     }
     emit_voice(&app, "generating", Some(&text), None);
 
-    let tag = cfg.params_tag();
+    let tag = cfg.cache_tag();
     let path = match cache_path(&app, &text, &cfg.model_dir, &tag) {
         Ok(p) if p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false) => Ok(p),
         _ => generate_wav(&app, &cfg, &text),
@@ -230,6 +324,8 @@ fn process_job(job: SpeakJob) {
             return;
         }
     };
+    // 生成成功即落历史（试听与通知播报都算「生成过的语音」）；记录失败不影响播报
+    append_history(&app, &text, &path, if force { "test" } else { "notify" }, 1);
 
     emit_voice(&app, "playing", Some(&text), None);
     match play_wav(&path) {
@@ -310,6 +406,96 @@ fn trim_wav_dir(dir: &Path, keep: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// 语音生成历史（app_data/tts/history.jsonl，JSONL 追加 + LRU 截断）
+// ---------------------------------------------------------------------------
+
+/// 历史记录条数上限（LRU：超出按时间删最旧）
+const HISTORY_KEEP: usize = 200;
+/// 单条记录的文本截断上限（防超长文本撑爆记录文件；展示够用）
+const HISTORY_TEXT_KEEP: usize = 500;
+
+/// 文件操作串行锁：追加/列表/删除可能来自队列线程与多个命令线程
+static HISTORY_LOCK: Mutex<()> = Mutex::new(());
+
+/// 历史自增序号：同毫秒内多条记录保证 id 唯一
+static HISTORY_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 一条生成记录（JSONL 持久层；camelCase 与前端 VoiceHistoryEntry 同形）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct HistoryRecord {
+    id: String,
+    /// 生成完成时刻（unix 毫秒）
+    ts_ms: i64,
+    /// 合成的文本（超长截断）
+    text: String,
+    /// WAV 文件绝对路径（文本缓存或导出区）
+    path: String,
+    /// "notify"（通知播报）| "test"（试听）| "studio"（长文本合成导出）
+    source: String,
+    /// 分段数（长文本合成为段数；单段来源恒为 1）
+    chunks: u32,
+}
+
+/// 追加并按 LRU 截断（纯函数，供单测）：push 后按时间倒序保留最新 keep 条。
+/// 排序带 id 兜底：同毫秒多条时保证截断稳定。
+fn merge_history(records: &mut Vec<HistoryRecord>, rec: HistoryRecord, keep: usize) {
+    records.push(rec);
+    if records.len() > keep {
+        records.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms).then_with(|| b.id.cmp(&a.id)));
+        records.truncate(keep);
+    }
+}
+
+fn history_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(tts_dir(app)?.join("history.jsonl"))
+}
+
+/// 读全部记录（坏行跳过；文件不存在视为空）
+fn read_history_records(file: &Path) -> Vec<HistoryRecord> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<HistoryRecord>(l).ok())
+        .collect()
+}
+
+/// 记录一条生成成功的历史（append + LRU 截断）。旁路能力：任何失败只打日志，
+/// 不影响播报/合成本身。
+fn append_history(app: &AppHandle, text: &str, path: &Path, source: &str, chunks: u32) {
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let rec = HistoryRecord {
+        id: format!("h{}-{}", ts_ms, HISTORY_SEQ.fetch_add(1, Ordering::Relaxed)),
+        ts_ms,
+        text: text.chars().take(HISTORY_TEXT_KEEP).collect(),
+        path: path.to_string_lossy().into_owned(),
+        source: source.into(),
+        chunks,
+    };
+    let Ok(file) = history_path(app) else { return };
+    let _guard = HISTORY_LOCK.lock().unwrap();
+    let mut records = read_history_records(&file);
+    merge_history(&mut records, rec, HISTORY_KEEP);
+    let mut body = String::with_capacity(records.len() * 160);
+    for r in &records {
+        if let Ok(line) = serde_json::to_string(r) {
+            body.push_str(&line);
+            body.push('\n');
+        }
+    }
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&file, body) {
+        eprintln!("[tts] 写入语音历史失败: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 常驻 worker 管理
 // ---------------------------------------------------------------------------
 
@@ -376,19 +562,30 @@ impl WorkerInner {
         }
     }
 
-    /// 提交一条合成请求并等待 WAV 落盘。
-    fn generate(&self, text: &str, output: &Path, params: &GenerateParams) -> Result<(), String> {
+    /// 提交一条合成请求并等待 WAV 落盘。reference：Some((音频路径, 准确原文))
+    /// 时走 zero-shot 音色克隆（worker 传给 processor，与官方 infer 同构）。
+    fn generate(
+        &self,
+        text: &str,
+        output: &Path,
+        params: &GenerateParams,
+        reference: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         self.wait_ready(Instant::now() + READY_TIMEOUT)?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst).to_string();
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
-        let line = json!({
+        let mut line = json!({
             "id": id,
             "text": text,
             "output": output.to_string_lossy(),
             "params": params,
-        })
-        .to_string();
+        });
+        if let Some((audio, rtext)) = reference {
+            line["reference_audio"] = json!(audio);
+            line["reference_text"] = json!(rtext);
+        }
+        let line = line.to_string();
         {
             let mut guard = self.stdin.lock().unwrap();
             // JSONL 行必须有结尾换行：worker 按行读 stdin，缺 \n 会永远阻塞
@@ -493,14 +690,76 @@ fn worker_for(cfg: &VoiceConfig, app: &AppHandle) -> Result<Arc<WorkerInner>, St
 
 fn spawn_worker(cfg: &VoiceConfig, app: &AppHandle) -> Result<Arc<WorkerInner>, String> {
     let script = ensure_worker_script(app)?;
-    spawn_worker_with(cfg, &script)
+    // HF 缓存与宿主环境解耦：固定在应用数据目录下，保证存在且可写
+    let hf_home = tts_dir(app)?.join("hf");
+    spawn_worker_with(cfg, &script, &hf_home)
 }
 
-/// 拆出脚本路径参数：单测用桩脚本直连协议（无需 AppHandle）
-fn spawn_worker_with(cfg: &VoiceConfig, script: &Path) -> Result<Arc<WorkerInner>, String> {
+/// worker 子进程的 HF 缓存环境覆盖（纯函数，供单测）。
+/// worker 只用本地仓库/模型目录，从不下载，不需要共享宿主的 HF 缓存；而用户/
+/// 系统环境里的 HF_HOME 可能指向不存在的盘（实机案例：HF_HOME=E:\... 且 E 盘未
+/// 挂载），transformers trust_remote_code 初始化模块缓存时 os.makedirs 直接抛
+/// 「系统找不到指定的路径: 'E:\'」——错误信息只有盘符根，极难定位。这里把
+/// HF 全家桶缓存强制指到应用数据目录，与宿主环境彻底解耦。
+fn apply_worker_env(cmd: &mut Command, hf_home: &Path) {
+    let p = |sub: &str| hf_home.join(sub).to_string_lossy().into_owned();
+    for (k, v) in [
+        ("HF_HOME", hf_home.to_string_lossy().into_owned()),
+        ("HF_HUB_CACHE", p("hub")),
+        // TRANSFORMERS_CACHE 是旧名，部分 transformers 版本仍优先读取
+        ("TRANSFORMERS_CACHE", p("hub")),
+        // trust_remote_code 的动态模块缓存：本次 E:\ 报错的直接来源
+        ("HF_MODULES_CACHE", p("modules")),
+        ("HF_DATASETS_CACHE", p("datasets")),
+    ] {
+        cmd.env(k, v);
+    }
+}
+
+/// 校验目录路径是否有效（非空、不是盘符根目录、有合理长度）
+fn validate_audio_path(p: &str, label: &str) -> Result<(), String> {
+    let t = p.trim();
+    if t.is_empty() {
+        return Err(format!("{} 不能为空", label));
+    }
+    // 可靠检测盘符根目录：检查是否形如 "X:" 或 "X:\"
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() >= 2 && chars[1] == ':' {
+        let is_disk_root = if chars.len() == 2 {
+            true // "E:"
+        } else if chars.len() == 3 && (chars[2] == '\\' || chars[2] == '/') {
+            true // "E:\" 或 "E:/"
+        } else {
+            false
+        };
+        if is_disk_root {
+            eprintln!("[tts] validate_audio_path 检测到盘符根目录: label={}, raw={:?}, trimmed={:?}", label, p, t);
+            return Err(format!("{} 不能是盘符根目录，请填写完整目录路径", label));
+        }
+    }
+    // 兜底：原长度检查
+    if t.len() <= 3 && t.chars().nth(1) == Some(':') {
+        eprintln!("[tts] validate_audio_path 检测到短盘符路径: label={}, raw={:?}, trimmed={:?}", label, p, t);
+        return Err(format!("{} 路径无效（仅盘符），请填写完整目录", label));
+    }
+    // 要求路径看起来像目录（包含分隔符或足够长）
+    if !t.contains('/') && !t.contains('\\') && t.len() < 4 {
+        return Err(format!("{} 路径格式不正确", label));
+    }
+    Ok(())
+}
+
+/// 拆出脚本路径参数：单测用桩脚本直连协议（无需 AppHandle）。
+/// hf_home：worker 子进程的 HF 缓存根目录（先确保存在，再注入环境）。
+fn spawn_worker_with(cfg: &VoiceConfig, script: &Path, hf_home: &Path) -> Result<Arc<WorkerInner>, String> {
+    validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")?;
+    validate_audio_path(&cfg.model_dir, "模型目录")?;
+    std::fs::create_dir_all(hf_home)
+        .map_err(|e| format!("创建 HF 缓存目录失败（{}）: {e}", hf_home.display()))?;
     let mut cmd = Command::new(&cfg.python_cmd);
     // GUI 进程派生控制台子进程会弹黑窗，worker 一驻留 10 分钟更不能闪
     crate::dsh::hide_window(&mut cmd);
+    apply_worker_env(&mut cmd, hf_home);
     let mut child = cmd
         .arg(script)
         .arg(&cfg.repo_dir)
@@ -616,9 +875,15 @@ fn stop_voice_service_blocking() -> bool {
 // ---------------------------------------------------------------------------
 
 fn generate_wav(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBuf, String> {
-    let path = cache_path(app, text, &cfg.model_dir, &cfg.params_tag())?;
+    let path = cache_path(app, text, &cfg.model_dir, &cfg.cache_tag())?;
     let worker = worker_for(cfg, app)?;
-    worker.generate(text, &path, &GenerateParams::from(cfg))?;
+    // 全局参考音色：配置成对给出时所有播报/试听/合成都走音色克隆
+    let reference = if has_reference(cfg) {
+        Some((cfg.ref_audio.trim(), cfg.ref_text.trim()))
+    } else {
+        None
+    };
+    worker.generate(text, &path, &GenerateParams::from(cfg), reference)?;
     if let Some(dir) = path.parent() {
         trim_cache(dir);
     }
@@ -688,6 +953,7 @@ pub async fn set_voice_config(
     if config.enabled && (config.repo_dir.is_empty() || config.model_dir.is_empty()) {
         return Err("启用语音播报前请先填写 Audio8 仓库目录与模型目录".into());
     }
+    validate_reference_pair(&config)?;
     validate_generate_params(&config)?;
     *state.voice.lock().unwrap() = config;
     Ok(())
@@ -716,6 +982,13 @@ pub async fn tts_env_check(state: State<'_, AppState>) -> Result<VoiceEnvReport,
 }
 
 fn env_check_blocking(cfg: &VoiceConfig) -> Result<VoiceEnvReport, String> {
+    // 路径校验：若无效，直接返回错误，不执行后续检查
+    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
+        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
+    {
+        return Err(e);
+    }
+
     let mut report = VoiceEnvReport {
         python_version: None,
         python_error: None,
@@ -920,8 +1193,10 @@ pub async fn tts_speak_test(
     text: Option<String>,
 ) -> Result<(), String> {
     let cfg = state.voice.lock().unwrap().clone();
-    if cfg.repo_dir.is_empty() || cfg.model_dir.is_empty() {
-        return Err("请先填写 Audio8 仓库目录与模型目录".into());
+    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
+        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
+    {
+        return Err(e);
     }
     let text = text
         .map(|t| t.trim().to_string())
@@ -1052,26 +1327,210 @@ const SYNTH_GAP_MS: u64 = 180;
 /// 打开语音合成工具独立窗口（已开则聚焦），主窗口设置页「语音播报」卡片入口。
 /// 复用同一前端 bundle 经 hash 路由到 /tts-studio；无边框 + 自绘标题栏与主窗口
 /// 观感一致（WindowControls 按 getCurrentWindow 对本窗口操作）。
+/// section：None/"synth" → 合成页；"history" → 生成历史页（已开窗时原地路由切换）。
 #[tauri::command]
-pub async fn tts_open_studio(app: AppHandle) -> Result<(), String> {
+pub async fn tts_open_studio(app: AppHandle, section: Option<String>) -> Result<(), String> {
+    let history = matches!(section.as_deref(), Some("history"));
     if let Some(w) = app.get_webview_window("tts-studio") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        // 已开则聚焦并原地路由到目标页（hash 变化由前端 HashRouter 消费）
+        let _ = w.eval(&format!(
+            "window.location.hash = '#/tts-studio{}';",
+            if history { "/history" } else { "" }
+        ));
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
+    // 窗口尺寸：放大宽度到 1100px
+    let win_w = 1100.0_f64;
+    let win_h = 820.0_f64;
+
+    let url = if history {
+        "index.html#/tts-studio/history"
+    } else {
+        "index.html#/tts-studio"
+    };
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         "tts-studio",
-        tauri::WebviewUrl::App("index.html#/tts-studio".into()),
+        tauri::WebviewUrl::App(url.into()),
     )
     .title("语音合成工具")
-    .inner_size(840.0, 780.0)
-    .min_inner_size(680.0, 620.0)
-    .decorations(false)
-    .build()
-    .map_err(|e| format!("创建语音合成工具窗口失败: {e}"))?;
+    .inner_size(win_w, win_h)
+    .min_inner_size(900.0, 680.0)
+    .decorations(false);
+
+    // 优先使用 Tauri 的 center() 方法（若可用），否则回退到手动计算
+    // Tauri 2 的 WebviewWindowBuilder 支持 .center() 使窗口真正居中（而非仅设置左上角）
+    builder = builder.center();
+
+    builder
+        .build()
+        .map_err(|e| format!("创建语音合成工具窗口失败: {e}"))?;
     Ok(())
+}
+
+/// Audio8_TTS 仓库地址（自动配置 / 一键克隆共用）
+const AUDIO8_REPO_URL: &str = "https://github.com/Audio8-AI/Audio8_TTS";
+/// 模型仓库地址：ModelScope 优先（国内快），失败回退 HuggingFace
+const AUDIO8_MODEL_URL_MODELSCOPE: &str =
+    "https://www.modelscope.cn/Audio8/Audio8-TTS-Preview-0.1b.git";
+const AUDIO8_MODEL_URL_HF: &str = "https://huggingface.co/Audio8/Audio8-TTS-Preview-0.1b";
+/// 仓库 / 模型在应用数据目录 `tts/` 下的默认目录名
+const AUDIO8_REPO_DIR_NAME: &str = "Audio8_TTS";
+const AUDIO8_MODEL_DIR_NAME: &str = "Audio8-TTS-Preview-0.1b";
+
+/// 解析克隆目标目录：命令参数 `target`（去空白后非空才认）优先——即语音配置面板
+/// 输入框里填的路径；留空则落到应用数据目录 `tts/` 下的默认目录名。
+fn resolve_clone_target(target: Option<String>, base: &Path, default_name: &str) -> PathBuf {
+    match target.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        Some(t) => PathBuf::from(t),
+        None => base.join(default_name),
+    }
+}
+
+/// 克隆 Audio8_TTS 仓库到 `target_dir`（已存在则跳过）。
+/// 返回 (是否跳过, 动作描述列表)；git 缺失 / 克隆失败都返回 Err。
+fn ensure_audio8_repo(target_dir: &Path) -> Result<(bool, Vec<String>), String> {
+    let mut actions = Vec::new();
+    if target_dir.exists() {
+        actions.push("仓库目录已存在，跳过克隆".into());
+        return Ok((true, actions));
+    }
+    if let Some(parent) = target_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    actions.push(format!(
+        "git clone {AUDIO8_REPO_URL} {}",
+        target_dir.display()
+    ));
+    let status = Command::new("git")
+        .args(["clone", AUDIO8_REPO_URL, &target_dir.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("执行 git clone 失败（请确保已安装 git）: {e}"))?;
+    if !status.success() {
+        return Err("Audio8_TTS 仓库克隆失败".into());
+    }
+    actions.push("Audio8_TTS 仓库克隆完成".into());
+    Ok((false, actions))
+}
+
+/// 克隆模型 checkpoint 到 `target_dir`（已存在则跳过）：ModelScope 优先、
+/// HuggingFace 回退（国内可配 HF_ENDPOINT）。返回 (是否跳过, 动作描述列表)。
+fn ensure_audio8_model(target_dir: &Path) -> Result<(bool, Vec<String>), String> {
+    let mut actions = Vec::new();
+    if target_dir.exists() {
+        actions.push("模型目录已存在，跳过下载".into());
+        return Ok((true, actions));
+    }
+    if let Some(parent) = target_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    actions.push(format!(
+        "git clone {AUDIO8_MODEL_URL_MODELSCOPE} {}",
+        target_dir.display()
+    ));
+    let ms = Command::new("git")
+        .args([
+            "clone",
+            AUDIO8_MODEL_URL_MODELSCOPE,
+            &target_dir.to_string_lossy(),
+        ])
+        .status();
+    match ms {
+        Ok(s) if s.success() => {
+            actions.push("模型仓库克隆完成（ModelScope）".into());
+        }
+        _ => {
+            actions.push("ModelScope 克隆失败，尝试 Hugging Face 回退…".into());
+            let status = Command::new("git")
+                .args([
+                    "clone",
+                    AUDIO8_MODEL_URL_HF,
+                    &target_dir.to_string_lossy(),
+                ])
+                .status()
+                .map_err(|e| format!("执行 git clone (HF) 失败: {e}"))?;
+            if !status.success() {
+                return Err("模型下载失败，请手动执行 git clone 或配置 HF_ENDPOINT".into());
+            }
+            actions.push("模型仓库（HF）克隆完成".into());
+        }
+    }
+    Ok((false, actions))
+}
+
+/// 自动配置 Audio8_TTS 仓库和模型（若路径为空）。
+/// 在用户未配置时，自动克隆到应用数据目录下的 `tts/` 子目录。
+#[tauri::command]
+pub async fn tts_auto_setup(app: AppHandle) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    fs::create_dir_all(&base).map_err(|e| format!("创建 tts 目录失败: {e}"))?;
+
+    let repo_dir = base.join(AUDIO8_REPO_DIR_NAME);
+    let model_dir = base.join(AUDIO8_MODEL_DIR_NAME);
+
+    let mut actions = Vec::new();
+    let (_, repo_actions) = ensure_audio8_repo(&repo_dir)?;
+    actions.extend(repo_actions);
+    let (_, model_actions) = ensure_audio8_model(&model_dir)?;
+    actions.extend(model_actions);
+
+    Ok(json!({
+        "repoDir": repo_dir.to_string_lossy().to_string(),
+        "modelDir": model_dir.to_string_lossy().to_string(),
+        "actions": actions,
+    }))
+}
+
+/// 一键克隆 Audio8_TTS 仓库（语音配置面板仓库输入框旁按钮）。
+/// `target` 省略/空 → 克隆到 `app_data/tts/Audio8_TTS`；填了路径 → 克隆到该路径。
+/// 目录已存在时 `skipped=true` 直接返回，前端把 `repoDir` 回填输入框。
+#[tauri::command]
+pub async fn tts_clone_repo(
+    app: AppHandle,
+    target: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    let target_dir = resolve_clone_target(target, &base, AUDIO8_REPO_DIR_NAME);
+    let (skipped, actions) = ensure_audio8_repo(&target_dir)?;
+    Ok(json!({
+        "repoDir": target_dir.to_string_lossy().to_string(),
+        "skipped": skipped,
+        "actions": actions,
+    }))
+}
+
+/// 一键下载模型 checkpoint（模型输入框旁按钮）：ModelScope 优先、HF 回退。
+/// `target` 省略/空 → `app_data/tts/Audio8-TTS-Preview-0.1b`；填了路径 → 该路径。
+/// 目录已存在时 `skipped=true` 直接返回，前端把 `modelDir` 回填输入框。
+#[tauri::command]
+pub async fn tts_download_model(
+    app: AppHandle,
+    target: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    let target_dir = resolve_clone_target(target, &base, AUDIO8_MODEL_DIR_NAME);
+    let (skipped, actions) = ensure_audio8_model(&target_dir)?;
+    Ok(json!({
+        "modelDir": target_dir.to_string_lossy().to_string(),
+        "skipped": skipped,
+        "actions": actions,
+    }))
 }
 
 /// 长文本分段（纯函数，供单测）：先按句末标点（。！？!?；;\n）分句，贪心组段
@@ -1211,7 +1670,7 @@ fn synthesize_blocking(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result
     }
     let total = chunks.len();
     let mut parts: Vec<PathBuf> = Vec::with_capacity(total);
-    let tag = cfg.params_tag();
+    let tag = cfg.cache_tag();
     for (i, chunk) in chunks.iter().enumerate() {
         let _ = app.emit(
             TTS_SYNTH_PROGRESS_EVENT,
@@ -1232,6 +1691,8 @@ fn synthesize_blocking(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result
     let out = dir.join(format!("tts-{epoch}.wav"));
     concat_wavs(&parts, SYNTH_GAP_MS, &out)?;
     trim_wav_dir(&dir, EXPORTS_KEEP);
+    // 导出成功即落历史（source=studio，带分段数）；记录失败不影响返回结果
+    append_history(app, text, &out, "studio", total as u32);
     Ok(out)
 }
 
@@ -1245,8 +1706,10 @@ pub async fn tts_synthesize(
     text: String,
 ) -> Result<String, String> {
     let cfg = state.voice.lock().unwrap().clone();
-    if cfg.repo_dir.is_empty() || cfg.model_dir.is_empty() {
-        return Err("请先填写 Audio8 仓库目录与模型目录".into());
+    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
+        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
+    {
+        return Err(e);
     }
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -1286,9 +1749,108 @@ pub async fn tts_open_path(path: String) -> Result<(), String> {
     crate::dsh::open_url(&path)
 }
 
+// ---------------------------------------------------------------------------
+// 语音生成历史命令
+// ---------------------------------------------------------------------------
+
+/// 历史列表条目（持久层 HistoryRecord + 列表时计算的 exists 文件存在标记）
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceHistoryEntry {
+    pub id: String,
+    pub ts_ms: i64,
+    pub text: String,
+    pub path: String,
+    pub source: String,
+    pub chunks: u32,
+    /// WAV 文件当前是否还存在（缓存 LRU/手动清理可能已删；false 时不可播放）
+    pub exists: bool,
+}
+
+/// 语音生成历史列表（按时间倒序；文件已缺失的条目 exists=false 原样返回，
+/// 由前端标记「文件已缺失」并允许清理）
+#[tauri::command]
+pub async fn tts_history_list(app: AppHandle) -> Result<Vec<VoiceHistoryEntry>, String> {
+    let file = history_path(&app)?;
+    let _guard = HISTORY_LOCK.lock().unwrap();
+    let mut records = read_history_records(&file);
+    records.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms).then_with(|| b.id.cmp(&a.id)));
+    Ok(records
+        .into_iter()
+        .map(|r| {
+            let exists = Path::new(&r.path).is_file();
+            VoiceHistoryEntry {
+                id: r.id,
+                ts_ms: r.ts_ms,
+                text: r.text,
+                path: r.path,
+                source: r.source,
+                chunks: r.chunks,
+                exists,
+            }
+        })
+        .collect())
+}
+
+/// 删除一条历史记录：移除记录行；当没有其他记录引用同一文件且文件位于应用
+/// 数据目录内（防御性约束，绝不删用户目录下的文件）时连 WAV 一起删除。
+#[tauri::command]
+pub async fn tts_history_delete(app: AppHandle, id: String) -> Result<(), String> {
+    let file = history_path(&app)?;
+    let _guard = HISTORY_LOCK.lock().unwrap();
+    let records = read_history_records(&file);
+    let Some(target) = records.iter().find(|r| r.id == id) else {
+        return Err("记录不存在（可能已被删除）".into());
+    };
+    let target_path = target.path.clone();
+    let still_referenced = records
+        .iter()
+        .any(|r| r.id != id && r.path == target_path);
+    let rest: String = records
+        .iter()
+        .filter(|r| r.id != id)
+        .filter_map(|r| serde_json::to_string(r).ok())
+        .map(|mut l| {
+            l.push('\n');
+            l
+        })
+        .collect();
+    std::fs::write(&file, rest).map_err(|e| format!("写入语音历史失败: {e}"))?;
+    if !still_referenced {
+        if let Ok(base) = tts_dir(&app) {
+            let p = Path::new(&target_path);
+            if p.starts_with(&base) {
+                if let Err(e) = std::fs::remove_file(p) {
+                    // 文件可能已被缓存 LRU 清掉：删不掉不视为错误，只记日志
+                    eprintln!("[tts] 删除历史音频文件失败（忽略）: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 克隆目标解析：命令 target 非空（含前后空白）优先，None/空白回退默认目录
+    #[test]
+    fn 克隆目标解析_target优先_留空回默认() {
+        let base = Path::new("C:\\data\\tts");
+        assert_eq!(
+            resolve_clone_target(None, base, AUDIO8_REPO_DIR_NAME),
+            base.join(AUDIO8_REPO_DIR_NAME)
+        );
+        assert_eq!(
+            resolve_clone_target(Some("   ".into()), base, AUDIO8_REPO_DIR_NAME),
+            base.join(AUDIO8_REPO_DIR_NAME)
+        );
+        assert_eq!(
+            resolve_clone_target(Some(" D:\\custom\\repo ".into()), base, AUDIO8_REPO_DIR_NAME),
+            PathBuf::from("D:\\custom\\repo")
+        );
+    }
 
     fn msg() -> NotifyMessage {
         NotifyMessage {
@@ -1365,6 +1927,64 @@ mod tests {
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.max_new_tokens, 512);
         assert!(!cfg.greedy);
+        // 老版本存储没有参考音频字段：默认为空（默认音色）
+        assert!(cfg.ref_audio.is_empty());
+        assert!(cfg.ref_text.is_empty());
+    }
+
+    /// 参考音频缓存指纹：换参考（路径/原文/文件内容）必须换缓存；未配置时
+    /// cache_tag 与原 params_tag 相同（默认音色的旧缓存继续命中）
+    #[test]
+    fn 参考音频进缓存键() {
+        let tmp = std::env::temp_dir().join("dsh-tts-ref-tag");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let wav = tmp.join("ref.wav");
+        std::fs::write(&wav, b"RIFF....").unwrap();
+        let mut d = VoiceConfig::default();
+        // 未配置参考：cache_tag == params_tag，老缓存全部兼容
+        assert_eq!(d.cache_tag(), d.params_tag());
+        d.ref_audio = wav.to_string_lossy().into_owned();
+        d.ref_text = "参考原文".into();
+        assert_ne!(d.cache_tag(), d.params_tag(), "配了参考必须换缓存键");
+        // 换参考原文
+        let with_text_a = d.cache_tag();
+        d.ref_text = "另一句原文".into();
+        assert_ne!(d.cache_tag(), with_text_a, "换参考原文必须换缓存键");
+        // 同路径换文件内容（mtime/len 变化）
+        d.ref_text = "参考原文".into();
+        let before = d.cache_tag();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&wav, b"RIFF..........").unwrap();
+        assert_ne!(d.cache_tag(), before, "参考文件内容变化必须换缓存键");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 参考音频成对校验：只填一边拒绝；文件不存在拒绝；成对且存在通过
+    #[test]
+    fn 参考音频配置必须成对且文件存在() {
+        let tmp = std::env::temp_dir().join("dsh-tts-ref-validate");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let wav = tmp.join("ref.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let w = |ref_audio: &str, ref_text: &str| {
+            validate_reference_pair(&VoiceConfig {
+                ref_audio: ref_audio.into(),
+                ref_text: ref_text.into(),
+                ..VoiceConfig::default()
+            })
+        };
+        // 都空：默认音色，通过
+        assert!(w("", "").is_ok());
+        // 只填一边：官方要求成对
+        assert!(w(wav.to_str().unwrap(), "").is_err());
+        assert!(w("", "原文").is_err());
+        // 成对但文件不存在
+        assert!(w(tmp.join("nope.wav").to_str().unwrap(), "原文").is_err());
+        // 成对且存在
+        assert!(w(wav.to_str().unwrap(), "原文").is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1420,11 +2040,12 @@ mod tests {
     /// 桩 worker：argv[1] 为模式（ok | fatal），ok 模式对每条请求写一段
     /// 0.2s 440Hz WAV 后按协议应答；对非法输出路径如实回复失败
     const STUB_PY: &str = r#"
-import sys, json, wave, struct, math
+import sys, os, json, wave, struct, math
 def emit(o):
     sys.stdout.write(json.dumps(o) + "\n")
     sys.stdout.flush()
-if sys.argv[1] == "fatal":
+mode = os.path.basename(sys.argv[1])
+if "fatal" in mode:
     emit({"event": "fatal", "error": "stub fatal: boom"})
     sys.exit(1)
 emit({"event": "ready", "device": "stub"})
@@ -1451,11 +2072,14 @@ for line in sys.stdin:
     fn stub_cfg(python: &str, tmp: &Path, mode: &str) -> VoiceConfig {
         let script = tmp.join(format!("stub_{mode}.py"));
         std::fs::write(&script, STUB_PY).unwrap();
+        // repo_dir 传模式开关给桩；用真实存在的目录路径（盘符根等会被校验拒绝）
+        let repo = tmp.join(format!("repo-{mode}"));
+        std::fs::create_dir_all(&repo).unwrap();
         VoiceConfig {
             enabled: true,
             speak_content: "summary".into(),
             python_cmd: python.into(),
-            repo_dir: mode.into(),   // 透传给桩当模式开关
+            repo_dir: repo.to_string_lossy().into_owned(), // 桩按目录名取模式
             model_dir: "stub-model".into(),
             ..VoiceConfig::default()
         }
@@ -1470,8 +2094,9 @@ for line in sys.stdin:
         let tmp = std::env::temp_dir().join("dsh-tts-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg = stub_cfg(&python, &tmp, "ok");
-        let worker = spawn_worker_with(&cfg, &tmp.join("stub_ok.py"))
-            .expect("拉起桩 worker 失败");
+        let worker =
+            spawn_worker_with(&cfg, &tmp.join("stub_ok.py"), &tmp.join("hf-home"))
+                .expect("拉起桩 worker 失败");
 
         // 1) ready 握手
         worker.wait_ready(Instant::now() + Duration::from_secs(30)).expect("握手失败");
@@ -1479,7 +2104,7 @@ for line in sys.stdin:
         // 2) 正常生成：WAV 落盘且带 RIFF 头
         let out = tmp.join("out_ok.wav");
         worker
-            .generate("你好", &out, &GenerateParams::from(&cfg))
+            .generate("你好", &out, &GenerateParams::from(&cfg), None)
             .expect("生成失败");
         let bytes = std::fs::read(&out).expect("wav 未写出");
         assert!(bytes.len() > 44, "wav 过小: {}", bytes.len());
@@ -1489,7 +2114,7 @@ for line in sys.stdin:
         let bad = tmp.join("already_a_file.wav");
         std::fs::write(&bad, b"x").unwrap();
         let err = worker
-            .generate("你好", &bad.join("nested.wav"), &GenerateParams::from(&cfg))
+            .generate("你好", &bad.join("nested.wav"), &GenerateParams::from(&cfg), None)
             .expect_err("非法路径应失败");
         assert!(!err.is_empty());
 
@@ -1505,13 +2130,90 @@ for line in sys.stdin:
         let tmp = std::env::temp_dir().join("dsh-tts-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg = stub_cfg(&python, &tmp, "fatal");
-        let worker = spawn_worker_with(&cfg, &tmp.join("stub_fatal.py"))
-            .expect("拉起桩 worker 失败");
+        let worker =
+            spawn_worker_with(&cfg, &tmp.join("stub_fatal.py"), &tmp.join("hf-home"))
+                .expect("拉起桩 worker 失败");
         let err = worker
             .wait_ready(Instant::now() + Duration::from_secs(30))
             .expect_err("fatal 后握手必须失败");
         assert!(err.contains("stub fatal"), "实际错误: {err}");
         worker.kill();
+    }
+
+    /// HF 缓存环境覆盖（纯函数）：HF 全家桶一律指向传入的 hf_home。
+    /// 这是「系统找不到指定的路径 E:\」的根因修复——worker 不继承宿主 HF_HOME。
+    #[test]
+    fn worker子进程覆盖HF缓存环境变量() {
+        let mut cmd = Command::new("python");
+        let hf = Path::new("D:\\anywhere\\hf");
+        apply_worker_env(&mut cmd, hf);
+        let get = |k: &str| {
+            cmd.get_envs()
+                .find(|(name, _)| name.to_string_lossy() == k)
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned())
+        };
+        assert_eq!(get("HF_HOME").as_deref(), Some("D:\\anywhere\\hf"));
+        assert_eq!(get("HF_MODULES_CACHE").as_deref(), Some("D:\\anywhere\\hf\\modules"));
+        assert_eq!(get("HF_HUB_CACHE").as_deref(), Some("D:\\anywhere\\hf\\hub"));
+        assert_eq!(get("TRANSFORMERS_CACHE").as_deref(), Some("D:\\anywhere\\hf\\hub"));
+        assert_eq!(get("HF_DATASETS_CACHE").as_deref(), Some("D:\\anywhere\\hf\\datasets"));
+    }
+
+    /// 端到端回归：宿主环境把 HF_HOME 指到不存在的盘（实机 E:\ 案例）时，
+    /// worker 子进程必须收到覆盖后的应用内缓存路径，而不是继承的坏值。
+    /// 桩把子进程里的 HF_MODULES_CACHE 原样回传，Rust 侧断言其等于 hf_home/modules。
+    #[test]
+    fn 桩worker继承的HF缓存环境被覆盖() {
+        let Some(python) = python_for_tests() else {
+            eprintln!("skip: 测试机无可用 Python");
+            return;
+        };
+        let tmp = std::env::temp_dir().join("dsh-tts-env");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let echo_py = tmp.join("stub_env.py");
+        std::fs::write(
+            &echo_py,
+            r#"
+import sys, os, json
+def emit(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+emit({"event": "ready", "device": "stub"})
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    emit({"id": req.get("id"), "ok": False,
+          "error": os.environ.get("HF_MODULES_CACHE", "<unset>")})
+"#,
+        )
+        .unwrap();
+        let cfg = VoiceConfig {
+            enabled: true,
+            speak_content: "summary".into(),
+            python_cmd: python.into(),
+            repo_dir: tmp.to_string_lossy().into_owned(),
+            model_dir: "stub-model".into(),
+            ..VoiceConfig::default()
+        };
+        let hf_home = tmp.join("hf-home");
+        let worker = spawn_worker_with(&cfg, &echo_py, &hf_home).expect("spawn stub worker");
+        worker
+            .wait_ready(Instant::now() + Duration::from_secs(30))
+            .expect("握手失败");
+        let err = worker
+            .generate("你好", &tmp.join("env.wav"), &GenerateParams::from(&cfg), None)
+            .expect_err("桩按约定以错误回传环境值");
+        assert_eq!(
+            err,
+            hf_home.join("modules").to_string_lossy().into_owned(),
+            "子进程必须收到覆盖后的 HF_MODULES_CACHE，而不是宿主的 E:\\ 等坏值"
+        );
+        worker.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1671,6 +2373,71 @@ for line in sys.stdin:
         );
     }
 
+    // -----------------------------------------------------------------------
+    // 语音生成历史
+    // -----------------------------------------------------------------------
+
+    fn hist_rec(id: &str, ts: i64) -> HistoryRecord {
+        HistoryRecord {
+            id: id.into(),
+            ts_ms: ts,
+            text: format!("文本{id}"),
+            path: format!("C:\\tmp\\{id}.wav"),
+            source: "notify".into(),
+            chunks: 1,
+        }
+    }
+
+    /// 追加超上限按时间倒序截断，最新保留；同毫秒按 id 兜底稳定
+    #[test]
+    fn 历史LRU超出上限删最旧() {
+        let mut records: Vec<HistoryRecord> = Vec::new();
+        for i in 0..(HISTORY_KEEP + 5) {
+            merge_history(&mut records, hist_rec(&format!("r{i}"), 1000 + i as i64), HISTORY_KEEP);
+        }
+        assert_eq!(records.len(), HISTORY_KEEP);
+        // 205 条截到 200：最旧的 r0..r4 被删，第一条是最新
+        assert_eq!(records[0].id, format!("r{}", HISTORY_KEEP + 4));
+        assert!(!records.iter().any(|r| r.id == "r0"), "最旧应被删");
+    }
+
+    /// 历史记录 wire 格式锁定：camelCase（前端 VoiceHistoryEntry 同形）
+    #[test]
+    fn 历史记录序列化为camelCase() {
+        let v = serde_json::to_value(hist_rec("x", 1234)).unwrap();
+        assert_eq!(v["id"], json!("x"));
+        assert_eq!(v["tsMs"], json!(1234));
+        assert_eq!(v["path"], json!("C:\\tmp\\x.wav"));
+        assert_eq!(v["source"], json!("notify"));
+        assert_eq!(v["chunks"], json!(1));
+        // 反序列化容忍缺字段（手改/旧版记录）
+        let back: HistoryRecord = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id, "x");
+    }
+
+    /// append → list → delete 全链路（用 AppHandle 的 tts_dir 依赖真实 app，
+    /// 这里只测纯函数可覆盖的部分：记录读取容错坏行）
+    #[test]
+    fn 历史文件读取跳过坏行() {
+        let tmp = std::env::temp_dir().join("dsh-tts-history");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("history.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\nnot-json\n{{\"id\":\"b\",\"tsMs\":2,\"text\":\"t\",\"path\":\"p\",\"source\":\"studio\",\"chunks\":3}}\n",
+                serde_json::to_string(&hist_rec("a", 1)).unwrap()
+            ),
+        )
+        .unwrap();
+        let records = read_history_records(&file);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, "a");
+        assert_eq!(records[1].chunks, 3);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// 停止服务：杀掉驻留 worker 并置为未运行；幂等（无 worker 再停返回 false）。
     /// 期间若 worker 已死亡（如空闲自退），停止返回 false 但仍清理队列。
     #[test]
@@ -1682,7 +2449,8 @@ for line in sys.stdin:
         let tmp = std::env::temp_dir().join("dsh-tts-stop-test");
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg = stub_cfg(&python, &tmp, "ok");
-        let inner = spawn_worker_with(&cfg, &tmp.join("stub_ok.py")).expect("spawn stub worker");
+        let inner = spawn_worker_with(&cfg, &tmp.join("stub_ok.py"), &tmp.join("hf-home"))
+            .expect("spawn stub worker");
         *WORKER.lock().unwrap() =
             Some(WorkerEntry { key: cfg.worker_key(), inner: inner.clone() });
         inner

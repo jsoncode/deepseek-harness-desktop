@@ -1620,6 +1620,14 @@ html[data-theme="light"] .mk-op-banner {
   pointer-events: none;
 }
 
+/* Home 入口按钮内的应用 logo（替代原 Home 图标）：略小于品牌区 logo，与按钮内图标观感一致 */
+.titlebar-home-logo {
+  width: 16px;
+  height: 16px;
+  display: block;
+  pointer-events: none;
+}
+
 .titlebar-name {
   font-size: 13px;
   font-weight: 600;
@@ -2323,6 +2331,83 @@ html[data-theme="light"] .pm-detail-desc {
   padding: 10px 0 4px;
   font-size: 13px;
   color: var(--text-2);
+}
+
+/* --------------------------------------------------------------------------
+   语音生成历史（TtsHistory，/tts-studio/history）
+   -------------------------------------------------------------------------- */
+
+/* 列表：纵排卡片，与设置卡片同视觉语言 */
+.tts-hist-list {
+  display: grid;
+  gap: 10px;
+}
+
+/* 单条记录：左信息（来源/时间/文本/文件名）+ 右操作按钮组 */
+.tts-hist-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+}
+
+.tts-hist-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+/* 头行：来源标签 + 时间（时间贴右） */
+.tts-hist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tts-hist-time {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+/* 合成文本：最多两行，超出省略（完整文本见 title 悬停） */
+.tts-hist-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-1);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* 音频文件名：小字弱化，不换行（完整路径见 title 悬停） */
+.tts-hist-file {
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 操作按钮组：纵排三枚（播放/打开文件夹/删除），贴右不压缩信息区 */
+.tts-hist-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.tts-hist-actions .ant-btn {
+  justify-content: flex-start;
 }
 
 /* --------------------------------------------------------------------------

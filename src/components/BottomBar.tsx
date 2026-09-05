@@ -1,15 +1,16 @@
 import { Popconfirm, Tooltip } from "antd";
-import { HomeOutlined, LogoutOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { HomeOutlined, LogoutOutlined, ReloadOutlined, SettingOutlined, SoundOutlined } from "@ant-design/icons";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router";
+import TtsModal from "./TtsModal";
 import { tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /**
  * 底部导航条：作为 .app-shell（flex 纵向布局）的最后一个元素，
  * 占用页面布局空间并固定在窗口最底部。
- * 左侧集中启动页入口与服务级操作：启动页（检查页）/ 停止服务 / 重启服务；
- * 右侧为设置入口（插件管理、通知管理、主题设置等已迁入设置页）。
+ * 左侧集中启动页入口与服务级操作：启动页（检查页）/ 语音合成弹框 / 停止服务 /
+ * 重启服务；右侧为设置入口（插件管理、通知管理、主题设置等已迁入设置页）。
  */
 export default function BottomBar() {
   const navigate = useNavigate();
@@ -20,6 +21,8 @@ export default function BottomBar() {
   const startFlow = useAppStore((s) => s.startFlow);
   const prepareLogSessionTitle = useAppStore((s) => s.prepareLogSessionTitle);
   const [restarting, setRestarting] = useState(false);
+  // 语音合成弹框开关：入口在左侧「启动页」之后，弹框内嵌长文本合成工作台
+  const [ttsOpen, setTtsOpen] = useState(false);
 
   // 设置入口激活态：当前已在设置页
   const inSettings = location.pathname === "/settings";
@@ -71,6 +74,19 @@ export default function BottomBar() {
             onClick={() => navigate("/")}
           >
             <HomeOutlined />
+          </button>
+        </Tooltip>
+
+        {/* 语音合成入口：弹框内嵌长文本合成工作台（快速合成 / 试听 / 导出 WAV） */}
+        <Tooltip title="语音合成" placement="top">
+          <button
+            type="button"
+            className={"icon-btn" + (ttsOpen ? " active" : "")}
+            aria-label="语音合成"
+            aria-pressed={ttsOpen}
+            onClick={() => setTtsOpen(true)}
+          >
+            <SoundOutlined />
           </button>
         </Tooltip>
 
@@ -154,6 +170,9 @@ export default function BottomBar() {
           </button>
         </Tooltip>
       </div>
+
+      {/* 语音合成弹框：常挂载（关闭不销毁），后台合成的分段进度在重开时仍可见 */}
+      <TtsModal open={ttsOpen} onClose={() => setTtsOpen(false)} />
     </footer>
   );
 }

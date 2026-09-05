@@ -3,11 +3,16 @@
 协议（每行一个 JSON 对象，UTF-8）：
 - 启动后加载模型，成功输出 {"event": "ready", "device": ..., "sample_rate": ...}，
   加载失败输出 {"event": "fatal", "error": ...} 后退出（由宿主决定是否重启）。
-- 请求 {"id": ..., "text": ..., "output": ..., "params": {...}（可选）}：合成 44.1kHz
+- 请求 {"id": ..., "text": ..., "output": ..., "params": {...}（可选），
+  "reference_audio": ...（可选）, "reference_text": ...（可选）}：合成 44.1kHz
   WAV 写入 output，回 {"id": ..., "ok": true} 或 {"id": ..., "ok": false, "error": ...}。
   params 支持 temperature / top_p / top_k / seed / max_new_tokens / greedy（与官方
   audio8_tts_infer.py 参数同名同义），缺省用下方常量（原默认行为）。按请求携带：
   改参数无需重启 worker 重载模型。
+  reference_audio（参考音频路径）与 reference_text（参考音频准确原文）同时给出时
+  走 zero-shot 音色克隆（官方同名参数语义：processor 注入参考 codec 帧条件），
+  缺省走无参考默认音色路径；参考文本经 clean_text 清洗，参考文本不受目标文本的
+  150 字截断限制。
   单条失败不影响常驻；模型目录/参数合法性由宿主保证有效。
 - 空闲超过 10 分钟自动退出释放内存（宿主下次请求会重新拉起）。
 
@@ -103,7 +108,23 @@ def main() -> None:
             text = clean_text(req["text"])
             if len(text) > MAX_TEXT_CHARS:
                 text = text[:MAX_TEXT_CHARS]
-            inputs = processor(text=[text], return_tensors="pt")
+            processor_kwargs: dict
+            ref_audio = req.get("reference_audio") or None
+            ref_text = req.get("reference_text") or None
+            if bool(ref_audio) != bool(ref_text):
+                raise ValueError("reference_audio and reference_text must be provided together")
+            if ref_audio is not None:
+                # 与官方 audio8_tts_infer.py 同构：参考音频路径 + 准确原文，
+                # processor 注入参考 codec 帧条件实现 zero-shot 音色克隆
+                processor_kwargs = {
+                    "text": [text],
+                    "reference_audio": [ref_audio],
+                    "reference_text": [clean_text(ref_text)],
+                    "return_tensors": "pt",
+                }
+            else:
+                processor_kwargs = {"text": [text], "return_tensors": "pt"}
+            inputs = processor(**processor_kwargs)
             inputs = {k: v.to(device) for k, v in inputs.items()}
             generator = torch.Generator(device=device).manual_seed(seed)
             gen_kwargs: dict = {

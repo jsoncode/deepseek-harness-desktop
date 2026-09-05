@@ -89,11 +89,15 @@ pub struct NotifyMessage {
     pub session_title: String,
     /// 标题（"更新任务清单" / "对话结束"）
     pub title: &'static str,
-    /// 描述
+    /// 描述：todo 为「N项已完成 · N项进行中 · N项待处理」，turnEnd 为会话名
+    /// （「对话已结束」语义由 title 承担，不再重复拼接）
     pub desc: String,
     /// 需求的 `{标题}：{描述}`
     pub summary: String,
-    /// toast 第二行：todo 带会话标题（多会话并发时用于区分），turnEnd 带结束原因
+    /// toast 第二行（描述行）：todo = 会话标题 · HH:MM:SS（多会话并发时用于区分），
+    /// turnEnd = HH:MM:SS（原「原因：…」已按需求移除）。时刻只进这一行：
+    /// 标题行（summary）与语音字段（title/desc/summary）都不含，
+    /// 语音通道不消费 body，时间因此不会被念出来。
     pub body: String,
     pub ts: i64,
 }
@@ -611,12 +615,8 @@ fn handle_event(sid: &str, event: &Value, notes: &mut Notes) -> Option<NotifyMes
             Some(todo_message(sid, note.title.as_deref(), counts))
         }
         "turn/end" => {
-            let reason = event
-                .pointer("/data/reason/kind")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             let title = notes.get(sid).and_then(|n| n.title.as_deref());
-            Some(turn_end_message(sid, title, reason))
+            Some(turn_end_message(sid, title))
         }
         // assistant/chunk、tool/call、approval/* … 一律不推，这就是需求的「过滤」
         _ => None,
@@ -651,32 +651,19 @@ fn count_todos(todos: &[Value]) -> TodoCounts {
     c
 }
 
-/// `{num} 已完成 · {num} 进行中 · {num} 待处理`，零值段省略、以间隔号连接
+/// `{num}项已完成 · {num}项进行中 · {num}项待处理`，零值段省略、以间隔号连接
 fn todo_desc(done: u32, active: u32, pending: u32) -> String {
     let mut parts: Vec<String> = Vec::new();
     if done > 0 {
-        parts.push(format!("{done} 已完成"));
+        parts.push(format!("{done}项已完成"));
     }
     if active > 0 {
-        parts.push(format!("{active} 进行中"));
+        parts.push(format!("{active}项进行中"));
     }
     if pending > 0 {
-        parts.push(format!("{pending} 待处理"));
+        parts.push(format!("{pending}项待处理"));
     }
     parts.join(" · ")
-}
-
-/// `turn/end` 的结束原因 → 中文
-fn reason_label(kind: &str) -> &'static str {
-    match kind {
-        "completed" => "正常完成",
-        "aborted" => "已中断",
-        "blocked" => "被阻塞",
-        "error" => "运行出错",
-        "max-tokens" => "达到输出上限",
-        "interrupted" => "被重启中断",
-        _ => "未知原因",
-    }
 }
 
 fn todo_message(sid: &str, title: Option<&str>, c: TodoCounts) -> NotifyMessage {
@@ -686,24 +673,26 @@ fn todo_message(sid: &str, title: Option<&str>, c: TodoCounts) -> NotifyMessage 
         session_id: sid.to_string(),
         session_title: title.unwrap_or(UNTITLED).to_string(),
         title: TITLE_TODO,
-        body: title.unwrap_or(UNTITLED).to_string(),
+        // 描述行 = 会话标题 + 到达时刻的时分秒（语音不读本行，见 NotifyMessage::body 文档）
+        body: format!("{} · {}", title.unwrap_or(UNTITLED), notify::now_hms()),
         summary: format!("{TITLE_TODO}：{desc}"),
         desc,
         ts: notify::now_ms(),
     }
 }
 
-fn turn_end_message(sid: &str, title: Option<&str>, reason: &str) -> NotifyMessage {
+fn turn_end_message(sid: &str, title: Option<&str>) -> NotifyMessage {
     let session_title = title.unwrap_or(UNTITLED);
-    let desc = format!("{session_title} 对话已结束");
     NotifyMessage {
         kind: KIND_TURN_END,
         session_id: sid.to_string(),
         session_title: session_title.to_string(),
         title: TITLE_TURN_END,
-        body: format!("原因：{}", reason_label(reason)),
-        summary: format!("{TITLE_TURN_END}：{desc}"),
-        desc,
+        // 描述行只带到达时刻：结束原因不再上 toast（「原因：…」按需求移除）
+        body: notify::now_hms(),
+        summary: format!("{TITLE_TURN_END}：{session_title}"),
+        // desc 不再拼「对话已结束」：title（对话结束）已表达该语义，避免重复
+        desc: session_title.to_string(),
         ts: notify::now_ms(),
     }
 }
@@ -744,12 +733,20 @@ mod tests {
         )
     }
 
+    /// 校验 `HH:MM:SS` 形态（描述行时间尾缀的测试断言用）
+    fn is_hms(s: &str) -> bool {
+        let p: Vec<&str> = s.split(':').collect();
+        p.len() == 3
+            && p.iter()
+                .all(|x| x.len() == 2 && x.bytes().all(|b| b.is_ascii_digit()))
+    }
+
     #[test]
     fn todo_desc_省略零值段并用间隔号连接() {
-        assert_eq!(todo_desc(3, 1, 2), "3 已完成 · 1 进行中 · 2 待处理");
-        assert_eq!(todo_desc(0, 1, 0), "1 进行中");
-        assert_eq!(todo_desc(2, 0, 0), "2 已完成");
-        assert_eq!(todo_desc(0, 0, 4), "4 待处理");
+        assert_eq!(todo_desc(3, 1, 2), "3项已完成 · 1项进行中 · 2项待处理");
+        assert_eq!(todo_desc(0, 1, 0), "1项进行中");
+        assert_eq!(todo_desc(2, 0, 0), "2项已完成");
+        assert_eq!(todo_desc(0, 0, 4), "4项待处理");
         assert_eq!(todo_desc(0, 0, 0), "");
     }
 
@@ -804,8 +801,11 @@ mod tests {
         let msg = extract_mux(&frame, &mut live, &mut notes).expect("应产生一条推送");
         assert_eq!(msg.kind, "todo");
         assert_eq!(msg.session_id, "session-x");
-        assert_eq!(msg.summary, "更新任务清单：1 已完成 · 1 进行中 · 1 待处理");
-        assert_eq!(msg.body, "未命名对话");
+        assert_eq!(msg.summary, "更新任务清单：1项已完成 · 1项进行中 · 1项待处理");
+        // 描述行 = 会话标题 + 「· HH:MM:SS」时间尾缀
+        let (base, hms) = msg.body.rsplit_once(" · ").expect("body 应带时间尾缀");
+        assert_eq!(base, "未命名对话");
+        assert!(is_hms(hms), "尾缀应为 HH:MM:SS: {hms}");
     }
 
     /// 计数未变化时不重复推送；计数变了才推
@@ -831,7 +831,7 @@ mod tests {
             serde_json::json!({ "type": "todo/write", "seq": 3, "time": 0, "data": { "todos": todos(&[("a", "completed"), ("b", "completed")]) } }),
         );
         let msg = extract_mux(&f3, &mut live, &mut notes).expect("计数变化应推送");
-        assert_eq!(msg.summary, "更新任务清单：2 已完成");
+        assert_eq!(msg.summary, "更新任务清单：2项已完成");
     }
 
     #[test]
@@ -846,10 +846,11 @@ mod tests {
     }
 
     #[test]
-    fn turn_end_渲染结束原因() {
+    fn turn_end_描述行只带时刻() {
         let mut notes = Notes::new();
         let mut live = open_live();
         merge_title(&mut notes, "s1", Some("修 Bug".into()), true);
+        // 帧里仍携带 reason：渲染端不再消费（「原因：…」已按需求从文案移除）
         let frame = follow_event(
             "s1",
             serde_json::json!({ "type": "turn/end", "seq": 1, "time": 0, "data": { "turn": 3, "reason": { "kind": "completed" } } }),
@@ -857,8 +858,45 @@ mod tests {
         let msg = extract_mux(&frame, &mut live, &mut notes).expect("应推送 turn/end");
         assert_eq!(msg.kind, "turnEnd");
         assert_eq!(msg.session_title, "修 Bug");
-        assert_eq!(msg.body, "原因：正常完成");
-        assert_eq!(msg.summary, "对话结束：修 Bug 对话已结束");
+        // desc 不再拼「对话已结束」（title 已表达该语义）
+        assert_eq!(msg.desc, "修 Bug");
+        assert_eq!(msg.summary, "对话结束：修 Bug");
+        // body 只剩到达时刻的时分秒
+        assert!(is_hms(&msg.body), "body 应只剩 HH:MM:SS: {}", msg.body);
+    }
+
+    /// 时分秒只出现在描述行（body）：标题行（summary）、标题与描述字段
+    /// （title/desc）——也就是语音通道可能朗读的全部内容——都不得出现时间。
+    /// 锁死「时间只进文字版、不被语音念出来」这条需求边界。
+    #[test]
+    fn 时分秒只进描述行body() {
+        let msgs = [
+            todo_message(
+                "s1",
+                Some("会话A"),
+                TodoCounts {
+                    done: 2,
+                    active: 1,
+                    pending: 1,
+                },
+            ),
+            turn_end_message("s1", Some("会话A")),
+        ];
+        for msg in &msgs {
+            // todo 的 body = 会话名 · HH:MM:SS；turnEnd 的 body = 纯 HH:MM:SS
+            let hms = match msg.body.rsplit_once(" · ") {
+                Some((_, hms)) => hms,
+                None => msg.body.as_str(),
+            };
+            assert!(is_hms(hms), "描述行应含 HH:MM:SS: {}", msg.body);
+            assert!(!msg.title.contains(hms), "title 不得出现时间: {}", msg.title);
+            assert!(!msg.desc.contains(hms), "desc 不得出现时间: {}", msg.desc);
+            assert!(
+                !msg.summary.contains(hms),
+                "summary（toast 标题行/语音 summary 模式）不得出现时间: {}",
+                msg.summary
+            );
+        }
     }
 
     #[test]

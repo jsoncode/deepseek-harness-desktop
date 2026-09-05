@@ -19,6 +19,7 @@ export interface NotifyMessage {
   desc: string;
   /** 需求的 `{标题}：{描述}`，与系统通知同源 */
   summary: string;
+  /** toast 描述行（第二行）：末尾带「· HH:MM:SS」时间尾缀；语音通道不消费本字段 */
   body: string;
   ts: number;
 }

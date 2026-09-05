@@ -29,6 +29,8 @@ const VOICE_DEFAULT: VoiceConfig = {
   pythonCmd: "python",
   repoDir: "",
   modelDir: "",
+  refAudio: "",
+  refText: "",
   ...VOICE_SYNTH_DEFAULTS,
 };
 
@@ -151,4 +153,19 @@ if (typeof window !== "undefined") {
       /* ignore */
     }
   });
+}
+
+/**
+ * 应用启动时显式回灌全部推送相关配置（幂等）。
+ *
+ * 必须由 App 挂载时调用，不能依赖 store 创建时的同步副作用：本模块历史上只被
+ * 「设置→通知管理」与语音工具窗口引用——应用重启后用户不打开设置页的话，
+ * Rust 侧语音配置停留在默认值（enabled=false），所有通知的语音都被静默跳过
+ * （「通知弹了但没有声音」的实测根因）。App.tsx 引入本函数后，配置在启动即回灌。
+ */
+export function initNotifySync(): void {
+  const s = useNotifyStore.getState();
+  sync(s.mode);
+  syncStyle(s.style);
+  syncVoice(s.voice);
 }

@@ -1,6 +1,6 @@
 import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
-import { CopyOutlined, ExportOutlined, HomeOutlined, SyncOutlined } from "@ant-design/icons";
+import { CopyOutlined, ExportOutlined, SyncOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import WindowControls from "./WindowControls";
@@ -67,7 +67,7 @@ export default function TitleBar() {
             aria-label="首页"
             onClick={() => navigate(phase === "running" ? "/preview" : "/")}
           >
-            <HomeOutlined />
+            <img src={logo} alt="" draggable={false} className="titlebar-home-logo" />
           </button>
         </Tooltip>
         <div className="url-pill">

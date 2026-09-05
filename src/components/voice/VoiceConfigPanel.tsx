@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { App as AntApp } from "antd";
+import { FolderOpenOutlined } from "@ant-design/icons";
 import { Button, Collapse, Input, InputNumber, Segmented, Space, Typography } from "antd";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useNotifyStore, VOICE_SYNTH_DEFAULTS } from "../../store/useNotifyStore";
 import {
   api,
   EVENTS,
   onEvent,
+  tauri,
   type LogLine,
   type NotifyVoicePayload,
   type VoiceConfig,
@@ -15,10 +18,11 @@ import {
 const { Text } = Typography;
 
 /**
- * 语音配置面板（语音合成工具窗口内）：Audio8 路径配置、环境自检、依赖一键安装、
- * 试听与停止服务、合成参数（采样模式 / temperature / top_p / top_k / seed /
- * max_new_tokens）、首次使用引导。从设置页「通知管理」整体迁出——配置与验证都
- * 集中在工具窗口，主窗口只留总开关与入口。
+ * 语音配置面板（语音合成工具窗口内）：卡片标题行（含「自动配置路径」）、Audio8
+ * 路径配置（仓库目录旁「一键克隆」、模型目录旁「一键下载模型」）、环境自检、
+ * 依赖一键安装、试听与停止服务、合成参数（采样模式 / temperature / top_p / top_k /
+ * seed / max_new_tokens）、首次使用引导。从设置页「通知管理」整体迁出——配置与
+ * 验证都集中在工具窗口，主窗口只留总开关与入口。
  * 播报状态事件（EVENTS.notifyVoice）带 Rust 侧 worker 实时驻留标记（running），
  * 停止服务按钮据此保持新鲜；事件只在播报时来，另有 20s 轮询兜底。
  */
@@ -31,6 +35,8 @@ export default function VoiceConfigPanel() {
   const [pythonDraft, setPythonDraft] = useState(voice.pythonCmd);
   const [repoDraft, setRepoDraft] = useState(voice.repoDir);
   const [modelDraft, setModelDraft] = useState(voice.modelDir);
+  const [refAudioDraft, setRefAudioDraft] = useState(voice.refAudio);
+  const [refTextDraft, setRefTextDraft] = useState(voice.refText);
 
   const [env, setEnv] = useState<VoiceEnvReport | null>(null);
   const [checking, setChecking] = useState(false);
@@ -40,6 +46,9 @@ export default function VoiceConfigPanel() {
   const [installing, setInstalling] = useState(false);
   const [installTail, setInstallTail] = useState<string[]>([]);
   const [serviceRunning, setServiceRunning] = useState(false);
+  const [autoSettingUp, setAutoSettingUp] = useState(false);
+  const [cloning, setCloning] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   // runEnvCheck 的 ref：安装结束事件回调（挂载时订阅）里需要触发最新版本的自检
   const runEnvCheckRef = useRef<() => void>(() => {});
@@ -53,7 +62,8 @@ export default function VoiceConfigPanel() {
       setVoiceState(p.state);
       setVoiceError(p.error);
       setServiceRunning(p.running);
-      if (p.state === "done" || p.state === "error") setTesting(false);
+      // skipped（播报被跳过）同样终止试听等待态，原因由 statusText 展示
+      if (p.state === "done" || p.state === "error" || p.state === "skipped") setTesting(false);
     }).then((u) => {
       unbind = u;
     });
@@ -78,7 +88,9 @@ export default function VoiceConfigPanel() {
     setPythonDraft(voice.pythonCmd);
     setRepoDraft(voice.repoDir);
     setModelDraft(voice.modelDir);
-  }, [voice.pythonCmd, voice.repoDir, voice.modelDir]);
+    setRefAudioDraft(voice.refAudio);
+    setRefTextDraft(voice.refText);
+  }, [voice.pythonCmd, voice.repoDir, voice.modelDir, voice.refAudio, voice.refText]);
 
   const commitVoice = (patch: Partial<typeof voice>) => setVoice(patch);
 
@@ -142,6 +154,66 @@ export default function VoiceConfigPanel() {
     }
   };
 
+  // 自动配置：若 repoDir / modelDir 为空，自动克隆到 app_data/tts/
+  const runAutoSetup = async () => {
+    if (autoSettingUp) return;
+    setAutoSettingUp(true);
+    try {
+      const res = await api.ttsAutoSetup();
+      // 自动回填到配置
+      commitVoice({ repoDir: res.repoDir, modelDir: res.modelDir });
+      message.success("自动配置完成：仓库与模型已就位");
+      // 触发一次自检
+      runEnvCheckRef.current();
+    } catch (e) {
+      message.error(`自动配置失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setAutoSettingUp(false);
+    }
+  };
+
+  // 一键克隆仓库：目标 = 仓库输入框路径（留空则 app_data/tts/Audio8_TTS）；
+  // 已存在跳过；完成回填输入框（草稿经 store 同步 useEffect 跟进）并重跑自检
+  const runCloneRepo = async () => {
+    if (cloning) return;
+    setCloning(true);
+    try {
+      const res = await api.ttsCloneRepo(repoDraft.trim() || undefined);
+      commitVoice({ repoDir: res.repoDir });
+      if (res.skipped) {
+        message.info("仓库目录已存在，无需重复克隆");
+      } else {
+        message.success("Audio8_TTS 仓库克隆完成，正在重新自检…");
+        runEnvCheckRef.current();
+      }
+    } catch (e) {
+      message.error(`一键克隆失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCloning(false);
+    }
+  };
+
+  // 一键下载模型：目标 = 模型输入框路径（留空则 app_data/tts/Audio8-TTS-Preview-0.1b）；
+  // ModelScope 优先、HF 回退，已存在跳过；完成回填输入框并重跑自检
+  const runDownloadModel = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const res = await api.ttsDownloadModel(modelDraft.trim() || undefined);
+      commitVoice({ modelDir: res.modelDir });
+      if (res.skipped) {
+        message.info("模型目录已存在，无需重复下载");
+      } else {
+        message.success("模型下载完成，正在重新自检…");
+        runEnvCheckRef.current();
+      }
+    } catch (e) {
+      message.error(`一键下载模型失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const onStopService = async () => {
     try {
       const stopped = await api.ttsStopVoiceService();
@@ -156,16 +228,47 @@ export default function VoiceConfigPanel() {
     }
   };
 
+  // 系统文件对话框选择参考音频：免去手动敲绝对路径。选中即写入草稿并按失焦同
+  // 一路径提交；参考原文为空时提示补齐（Rust 侧要求两者成对出现才生效）。
+  // 浏览器预览模式无 Tauri 运行时，按钮禁用，这里只是兜底
+  const pickRefAudio = async () => {
+    if (!tauri) return;
+    try {
+      const picked = await open({
+        title: "选择参考音频",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "音频文件", extensions: ["wav", "flac", "ogg", "mp3"] },
+          { name: "所有文件", extensions: ["*"] },
+        ],
+      });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path || !path.trim()) return;
+      setRefAudioDraft(path);
+      commitVoice({ refAudio: path });
+      if (!refTextDraft.trim()) {
+        message.warning("已选择参考音频，请再填写与录音内容一致的参考原文（两者成对才生效）");
+      }
+    } catch (e) {
+      message.error(`选择文件失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const statusText =
-    voiceError != null
-      ? `失败：${voiceError}`
-      : voiceState === "generating"
-        ? "正在生成语音…（首次需加载模型，可能 1~2 分钟）"
-        : voiceState === "playing"
-          ? "正在播放…"
-          : voiceState === "done"
-            ? "播报完成"
-            : null;
+    // skipped：通知到达但被跳过（总开关未开 / 路径无效 / 自检通知），原因在 error 字段。
+    // 必须先于 voiceError 判断：skipped 的原因不等于「失败」
+    voiceState === "skipped"
+      ? `已跳过播报：${voiceError ?? "条件不满足"}`
+      : voiceError != null
+        ? `失败：${voiceError}`
+        : voiceState === "generating"
+          ? "正在生成语音…（首次需加载模型，可能 1~2 分钟）"
+          : voiceState === "playing"
+            ? "正在播放…"
+            : voiceState === "done"
+              ? "播报完成"
+              : null;
 
   const envRow = (ok: boolean, label: string, hint: string, err: string | null) => (
     <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
@@ -181,6 +284,21 @@ export default function VoiceConfigPanel() {
 
   return (
     <div style={{ display: "grid", gap: 10 }}>
+      {/* 卡片标题行：标题后跟「自动配置路径」（一键拉齐仓库与模型），与 TtsStudio 的
+          卡片结构对齐——标题由本面板渲染，状态与处理器就近维护 */}
+      <div className="settings-card-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span>语音配置</span>
+        <Button
+          size="small"
+          type="dashed"
+          loading={autoSettingUp}
+          disabled={cloning || downloading}
+          onClick={runAutoSetup}
+          title="若未配置仓库/模型路径，自动克隆 Audio8_TTS 及模型到应用数据目录"
+        >
+          自动配置路径
+        </Button>
+      </div>
       <p className="settings-desc">
         通知朗读与长文本合成共用这套配置：Python 解释器需已安装 torch / transformers 等
         Audio8 依赖；有 NVIDIA 显卡时自动用 GPU（CUDA 版 torch），否则走 CPU。
@@ -198,25 +316,85 @@ export default function VoiceConfigPanel() {
       </div>
       <div>
         <p className="settings-desc">Audio8_TTS 仓库目录（含 audio8_tts_infer.py / audio8_tts_data.py）：</p>
-        <Input
-          size="small"
-          value={repoDraft}
-          placeholder="例如 D:\\workspace\\custom\\Audio8_TTS"
-          onChange={(e) => setRepoDraft(e.target.value)}
-          onBlur={() => commitVoice({ repoDir: repoDraft.trim() })}
-          onPressEnter={() => commitVoice({ repoDir: repoDraft.trim() })}
-        />
+        <Space.Compact style={{ width: "100%" }}>
+          <Input
+            size="small"
+            value={repoDraft}
+            placeholder="例如 D:\\workspace\\custom\\Audio8_TTS"
+            onChange={(e) => setRepoDraft(e.target.value)}
+            onBlur={() => commitVoice({ repoDir: repoDraft.trim() })}
+            onPressEnter={() => commitVoice({ repoDir: repoDraft.trim() })}
+          />
+          <Button
+            size="small"
+            type="dashed"
+            loading={cloning}
+            disabled={autoSettingUp}
+            title="克隆 Audio8_TTS 仓库到上方路径（留空则用应用数据目录 tts/Audio8_TTS）；目录已存在则跳过"
+            onClick={() => void runCloneRepo()}
+          >
+            一键克隆
+          </Button>
+        </Space.Compact>
       </div>
       <div>
         <p className="settings-desc">模型 checkpoint 目录（完整下载，含 config.json / tokenizer / codec.pth）：</p>
-        <Input
-          size="small"
-          value={modelDraft}
-          placeholder="例如 D:\\workspace\\custom\\Audio8-TTS-Preview-0.1b"
-          onChange={(e) => setModelDraft(e.target.value)}
-          onBlur={() => commitVoice({ modelDir: modelDraft.trim() })}
-          onPressEnter={() => commitVoice({ modelDir: modelDraft.trim() })}
-        />
+        <Space.Compact style={{ width: "100%" }}>
+          <Input
+            size="small"
+            value={modelDraft}
+            placeholder="例如 D:\\workspace\\custom\\Audio8-TTS-Preview-0.1b"
+            onChange={(e) => setModelDraft(e.target.value)}
+            onBlur={() => commitVoice({ modelDir: modelDraft.trim() })}
+            onPressEnter={() => commitVoice({ modelDir: modelDraft.trim() })}
+          />
+          <Button
+            size="small"
+            type="dashed"
+            loading={downloading}
+            disabled={autoSettingUp}
+            title="下载模型 checkpoint 到上方路径（留空则用应用数据目录 tts/Audio8-TTS-Preview-0.1b）；ModelScope 优先、HF 回退，目录已存在则跳过"
+            onClick={() => void runDownloadModel()}
+          >
+            一键下载模型
+          </Button>
+        </Space.Compact>
+      </div>
+      <div>
+        <p className="settings-desc">
+          参考音频（zero-shot 音色克隆，可选）：念一句语料录音，之后所有播报/合成都模仿该音色；
+          与参考原文必须成对填写，都空则用模型默认音色
+        </p>
+        <Space direction="vertical" style={{ width: "100%" }} size={6}>
+          <Space.Compact style={{ width: "100%" }}>
+            <Input
+              size="small"
+              value={refAudioDraft}
+              placeholder='参考音频绝对路径，例如 "D:\\voices\\ref.wav"（建议 5~15 秒、安静环境、44.1kHz；可点「选择文件」）'
+              onChange={(e) => setRefAudioDraft(e.target.value)}
+              onBlur={() => commitVoice({ refAudio: refAudioDraft.trim() })}
+              onPressEnter={() => commitVoice({ refAudio: refAudioDraft.trim() })}
+            />
+            <Button
+              size="small"
+              icon={<FolderOpenOutlined />}
+              title={tauri ? "在系统中选择参考音频文件" : "浏览器预览模式不可用"}
+              disabled={!tauri}
+              onClick={() => void pickRefAudio()}
+            >
+              选择文件
+            </Button>
+          </Space.Compact>
+          <Input.TextArea
+            size="small"
+            value={refTextDraft}
+            placeholder="参考音频的准确原文（转写不准会降低音色相似度与稳定性）"
+            autoSize={{ minRows: 1, maxRows: 3 }}
+            onChange={(e) => setRefTextDraft(e.target.value)}
+            onBlur={() => commitVoice({ refText: refTextDraft.trim() })}
+            onPressEnter={() => commitVoice({ refText: refTextDraft.trim() })}
+          />
+        </Space>
       </div>
       <Space wrap>
         <Button size="small" loading={checking} onClick={runEnvCheck}>
@@ -388,13 +566,8 @@ function SynthParams({
           onChange={(v) => commitVoice({ greedy: v === "greedy" })}
         />
       </Space>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
-          gap: 8,
-        }}
-      >
+      {/* 参数纵向布局：每行一个字段 */}
+      <div style={{ display: "grid", gap: 10 }}>
         {field(
           "temperature（随机性 0.05~2）：",
           <InputNumber

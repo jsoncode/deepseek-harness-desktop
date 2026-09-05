@@ -116,9 +116,10 @@ export interface NotifyActivatePayload {
   sessionId: string | null;
 }
 
-/** 语音播报状态事件负载：与 Rust `tts.rs` emit 的 json 同形 */
+/** 语音播报状态事件负载：与 Rust `tts.rs` emit 的 json 同形。
+ *  skipped：通知到达但语音被跳过（总开关未开 / 路径无效 / 自检通知），error 为原因 */
 export interface NotifyVoicePayload {
-  state: "generating" | "playing" | "done" | "error";
+  state: "generating" | "playing" | "done" | "error" | "skipped";
   text: string | null;
   error: string | null;
   /** 事件发出时 worker 是否驻留内存（命中缓存直接播放时为 false：不走合成、不起 worker） */
@@ -136,6 +137,10 @@ export interface VoiceConfig {
   repoDir: string;
   /** 完整模型 checkpoint 目录（config.json + tokenizer + codec.pth） */
   modelDir: string;
+  /** 参考音频路径（zero-shot 音色克隆）：与 refText 成对填写才生效，都空走默认音色 */
+  refAudio: string;
+  /** 参考音频的准确原文（与录音内容一致，转写不准会降低音色相似度） */
+  refText: string;
   /** 采样温度（>0）：越高越随机，越低越平稳 */
   temperature: number;
   /** nucleus 采样概率阈值（0 < topP ≤ 1） */
@@ -171,6 +176,23 @@ export interface VoiceEnvReport {
 export interface TtsSynthProgress {
   current: number;
   total: number;
+}
+
+/** 语音生成历史条目（与 Rust `tts::VoiceHistoryEntry` 同形） */
+export interface VoiceHistoryEntry {
+  id: string;
+  /** 生成完成时刻（unix 毫秒） */
+  tsMs: number;
+  /** 合成的文本（超长截断） */
+  text: string;
+  /** WAV 文件绝对路径 */
+  path: string;
+  /** 来源："notify"（通知播报）| "test"（试听）| "studio"（长文本合成） */
+  source: "notify" | "test" | "studio";
+  /** 分段数（长文本合成为段数；单段来源恒为 1） */
+  chunks: number;
+  /** WAV 文件当前是否还存在（缓存 LRU/手动清理可能已删；false 时不可播放） */
+  exists: boolean;
 }
 
 /** 浏览器预览模式下的统一提示 */
@@ -247,8 +269,29 @@ export const api = {
     requireTauri(() => invoke<boolean>("tts_stop_voice_service")),
   /** 语音 worker 是否驻留运行（true = 模型已加载、占着内存） */
   ttsVoiceStatus: () => requireTauri(() => invoke<boolean>("tts_voice_status")),
-  /** 打开语音合成工具独立窗口（已开则聚焦）：长文本合成 + 导出 + 完整配置 */
-  ttsOpenStudio: () => requireTauri(() => invoke<void>("tts_open_studio")),
+  /** 打开语音合成工具独立窗口（已开则聚焦并切到目标页）：长文本合成 + 导出 + 完整配置。
+   *  section：省略/"synth" → 合成页；"history" → 生成历史页 */
+  ttsOpenStudio: (section?: "synth" | "history") =>
+    requireTauri(() => invoke<void>("tts_open_studio", { section: section ?? null })),
+  /** 自动配置 Audio8_TTS 仓库和模型（若路径为空则克隆到 app_data/tts/） */
+  ttsAutoSetup: () =>
+    requireTauri(() => invoke<{ repoDir: string; modelDir: string; actions: string[] }>("tts_auto_setup")),
+  /** 一键克隆 Audio8_TTS 仓库：target 省略/空 → app_data/tts/Audio8_TTS；
+   *  填了路径 → 克隆到该路径；目录已存在时 skipped=true 直接返回 */
+  ttsCloneRepo: (target?: string) =>
+    requireTauri(() =>
+      invoke<{ repoDir: string; skipped: boolean; actions: string[] }>("tts_clone_repo", {
+        target: target ?? null,
+      }),
+    ),
+  /** 一键下载模型 checkpoint（ModelScope 优先、HF 回退）：语义同 ttsCloneRepo，
+   *  target 省略/空 → app_data/tts/Audio8-TTS-Preview-0.1b */
+  ttsDownloadModel: (target?: string) =>
+    requireTauri(() =>
+      invoke<{ modelDir: string; skipped: boolean; actions: string[] }>("tts_download_model", {
+        target: target ?? null,
+      }),
+    ),
   /** 长文本分段合成 → 拼接导出（app_data/tts/exports/tts-<ts>.wav）；
    *  进度经 EVENTS.ttsSynthProgress 逐段推送；命令在全部完成后返回导出文件绝对路径。
    *  每段独立复用文本缓存；首次调用会拉起 worker 加载模型（30~90s） */
@@ -260,6 +303,12 @@ export const api = {
     requireTauri(() => invoke<void>("tts_export_wav", { src, dest })),
   /** 在文件管理器中打开目录 */
   ttsOpenPath: (path: string) => requireTauri(() => invoke<void>("tts_open_path", { path })),
+  /** 语音生成历史列表（按时间倒序；exists=false 表示音频文件已缺失，不可播放） */
+  ttsHistoryList: () =>
+    requireTauri(() => invoke<VoiceHistoryEntry[]>("tts_history_list")),
+  /** 删除一条历史记录（无其他记录引用同一文件时连 WAV 一起删除） */
+  ttsHistoryDelete: (id: string) =>
+    requireTauri(() => invoke<void>("tts_history_delete", { id })),
   /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
   httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
   /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */

@@ -12,7 +12,9 @@
 //! 两种实现都使用 Windows Reminder 场景（`scenario="reminder"`）：toast 预展开
 //! 并保持显示在屏幕右下角，直到用户点击/关闭，不会几秒后自动消失（见
 //! `legacy_toast` 的 `Urgency::Critical` 与 `clickable_toast` 的
-//! `Scenario::Reminder`）。
+//! `Scenario::Reminder`）。Reminder 常驻意味着通知会在屏幕/通知中心累积，
+//! 因此投递新 toast 前统一走 [`clear_stale_toasts`] 按本应用 AUMID 清掉旧
+//! 驻留——**同一时刻至多只有最新一条本应用通知**（不影响其他应用的通知）。
 //!
 //! **语音播放**已接入：`tts::VoiceChannel` 实现了 [`NotifyChannel`] 并在 [`CHANNELS`]
 //! 表中——deliver 只入队立即返回，由常驻 Python worker（Audio8 TTS，见 `tts.rs`）
@@ -97,6 +99,10 @@ impl NotifyChannel for ToastChannel {
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
         #[cfg(windows)]
         {
+            // 只保留一条驻留：Reminder 场景的 toast 会一直留在屏幕/通知中心，
+            // 连续事件（多会话 todo/turn-end）会堆出一摞。弹新 toast 前先清掉
+            // 本应用旧驻留，屏幕与通知中心永远只有最新一条
+            clear_stale_toasts();
             match toast_style(app) {
                 ToastStyle::Legacy => legacy_toast(app, msg, self.name()),
                 ToastStyle::Clickable => clickable_toast(app, msg, self.name()),
@@ -106,6 +112,26 @@ impl NotifyChannel for ToastChannel {
         {
             let _ = (app, msg);
         }
+    }
+}
+
+/// 按本应用 AUMID 清空此前驻留的系统通知（ToastNotificationHistory.ClearWithId，
+/// Windows 10+；仅影响 APP_ID 对应的通知，不碰其他应用）。fork 未暴露历史接口，
+/// 直接走 windows crate。任何失败只打日志：清不掉就退回旧行为（允许累积），
+/// 不能因此阻断本次投递。
+#[cfg(windows)]
+fn clear_stale_toasts() {
+    use windows::core::HSTRING;
+    use windows::UI::Notifications::ToastNotificationManager;
+    let history = match ToastNotificationManager::History() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[notify] 获取通知历史接口失败（跳过旧驻留清理）: {e}");
+            return;
+        }
+    };
+    if let Err(e) = history.ClearWithId(&HSTRING::from(APP_ID)) {
+        eprintln!("[notify] 清理旧驻留通知失败（忽略，不影响本次投递）: {e}");
     }
 }
 
@@ -228,7 +254,7 @@ pub fn push_sample(app: &AppHandle) {
         title: "系统推送",
         desc: "已开启，任务进展会在这里提醒你".into(),
         summary: "系统推送：已开启，任务进展会在这里提醒你".into(),
-        body: "dsh 会话更新任务清单或结束对话时会弹出这样的通知".into(),
+        body: format!("dsh 会话更新任务清单或结束对话时会弹出这样的通知 · {}", now_hms()),
         ts: now_ms(),
     };
     for ch in channels() {
@@ -241,6 +267,13 @@ pub(crate) fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 当前本地时间的 `HH:MM:SS`。只拼进 toast 的描述行（`NotifyMessage::body`）：
+/// 标题行（summary）与语音字段（title/desc/summary，见 tts.rs 的 `speak_text`）
+/// 都不含它——时间只进文字版，不被语音念出来。用 chrono 的 Local 取本机时区。
+pub(crate) fn now_hms() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 #[cfg(test)]
@@ -272,5 +305,14 @@ mod tests {
     fn 打开按钮只在有会话时出现() {
         assert_eq!(open_button("session-1"), Some(("打开对话", "session-1")));
         assert_eq!(open_button(""), None);
+    }
+
+    /// 旧驻留清理冒烟：WinRT 历史接口在本机可调用（Ok 或可忽略错误均可，
+    /// 唯一不许发生的是 panic）；顺带验证 AUMID 与 fork 展示 toast 用的 id 一致
+    #[cfg(windows)]
+    #[test]
+    fn 清理旧驻留通知_不panic() {
+        clear_stale_toasts();
+        clear_stale_toasts(); // 幂等：重复调用同样安全
     }
 }
