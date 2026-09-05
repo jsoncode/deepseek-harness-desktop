@@ -674,6 +674,10 @@ fn rewrite_request_head(
 ///   代理直连上游：无 Cookie 必然 401）；
 /// - 去掉上游的 connection/keep-alive 并强制 `Connection: close`：代理按
 ///   “一次 TCP 连接只服务一个请求”实现，浏览器看到 close 后自会开新连接复用。
+/// - 剥掉上游 `Permissions-Policy` / `Feature-Policy`：上游若下发
+///   `Permissions-Policy: microphone=()` 会在 iframe 文档层把权限申请拦死
+///   （比 WebView2 的权限弹窗更早），内嵌页将永远无法发起申请；剥掉后回落
+///   浏览器默认策略（self 可用），跨源委托由 Preview.tsx 的 allow 属性决定。
 fn rewrite_response_head(head: &[u8], upstream_authority: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(head.len() + 32);
     let text = String::from_utf8_lossy(head);
@@ -691,6 +695,8 @@ fn rewrite_response_head(head: &[u8], upstream_authority: &str) -> Vec<u8> {
         if lower.starts_with("set-cookie:")
             || lower.starts_with("connection:")
             || lower.starts_with("keep-alive:")
+            || lower.starts_with("permissions-policy:")
+            || lower.starts_with("feature-policy:")
         {
             continue;
         }
@@ -771,6 +777,20 @@ mod tests {
         assert!(!s.contains("Set-Cookie"));
         assert!(s.contains("Location: /login\r\n"));
         assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    /// 上游的权限策略头必须剥掉：`Permissions-Policy: microphone=()` 会在 iframe
+    /// 文档层把权限申请拦死，内嵌页将永远无法发起申请（WebView2 弹窗也无从谈起）。
+    #[test]
+    fn 响应头剥权限策略头() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nPermissions-Policy: microphone=(), camera=()\r\nFeature-Policy: microphone 'none'\r\nContent-Length: 0\r\n\r\n";
+        let out = rewrite_response_head(head, "127.0.0.1:3080");
+        let s = String::from_utf8(out).unwrap();
+        let lower = s.to_ascii_lowercase();
+        assert!(!lower.contains("permissions-policy"), "{s}");
+        assert!(!lower.contains("feature-policy"), "{s}");
+        // 其余头原样保留
+        assert!(lower.contains("content-type: text/html"));
     }
 
     #[test]

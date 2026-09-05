@@ -214,6 +214,10 @@ export default function Preview() {
     <div className="page preview">
       <div className="preview-frame">
         {iframeUrl ? (
+          // allow：跨源 iframe 的权限委托清单——麦克风/摄像头/地理位置等高级授权
+          // 必须在这里声明，配合 Rust 侧的 PermissionRequested 弹窗（permissions.rs）
+          // 与代理剥 Permissions-Policy（proxy.rs），网页的权限申请才能到达用户。
+          // sandbox 未加 allow-presentation 等无关项，最小够用即可。
           <iframe
             key={`${iframeUrl}|${reloadKey}`}
             ref={iframeRef}
@@ -228,7 +232,7 @@ export default function Preview() {
               border: "none",
               background: "#fff",
             }}
-            allow="clipboard-read; clipboard-write; fullscreen"
+            allow="microphone; camera; geolocation; midi; clipboard-read; clipboard-write; display-capture; fullscreen; autoplay; encrypted-media; screen-wake-lock; window-management"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"
           />
         ) : null}

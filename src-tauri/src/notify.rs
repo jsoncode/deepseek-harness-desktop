@@ -20,6 +20,10 @@
 //! 表中——deliver 只入队立即返回，由常驻 Python worker（Audio8 TTS，见 `tts.rs`）
 //! 合成后用 rodio 播放；上游（`session_events` 的订阅 / 过滤 / 渲染）零改动。前端那半边
 //! 的同名扩展点在 `src/lib/notify.ts`，两边通过 `dispatch` 里的一次 `emit` 对齐。
+//!
+//! **游戏模式静音**：前台运行全屏应用（游戏/放映）时弹框推送自动暂停（见
+//! [`fullscreen_app_running`]），语音通道与前端 emit 不受影响——dispatch 照常
+//! 走全部通道，只有 ToastChannel 静默跳过，退出全屏后自动恢复。
 
 use crate::dsh;
 use crate::session_events::NotifyMessage;
@@ -99,6 +103,11 @@ impl NotifyChannel for ToastChannel {
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
         #[cfg(windows)]
         {
+            // 游戏模式（前台全屏应用）静音弹框：连旧驻留清理一起跳过，通知中心
+            // 保持原样；dispatch 照常走语音通道与前端 emit——「只保留语音播放」。
+            if fullscreen_app_running() {
+                return;
+            }
             // 只保留一条驻留：Reminder 场景的 toast 会一直留在屏幕/通知中心，
             // 连续事件（多会话 todo/turn-end）会堆出一摞。弹新 toast 前先清掉
             // 本应用旧驻留，屏幕与通知中心永远只有最新一条
@@ -112,6 +121,43 @@ impl NotifyChannel for ToastChannel {
         {
             let _ = (app, msg);
         }
+    }
+}
+
+/// 前台是否运行着全屏应用（游戏 / 放映）：视为「游戏模式」，弹框推送静音、
+/// 只保留语音播报。判定：前台窗口的矩形恰好覆盖其所在显示器的完整矩形
+/// （rcMonitor）——独占全屏与无边框全屏都命中；最大化窗口的矩形是工作区
+/// （不含任务栏），不会误判；桌面态（前台是 Progman）经 GetShellWindow 排除。
+/// 任何 API 失败都按「不在游戏模式」处理：宁可多弹一条，不能因此漏报。
+#[cfg(windows)]
+fn fullscreen_app_running() -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetShellWindow, GetWindowRect,
+    };
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() || hwnd == GetShellWindow() {
+            return false;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return false;
+        }
+        let mut mi = MONITORINFO::default();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            return false;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        rect == mi.rcMonitor
     }
 }
 
@@ -314,5 +360,14 @@ mod tests {
     fn 清理旧驻留通知_不panic() {
         clear_stale_toasts();
         clear_stale_toasts(); // 幂等：重复调用同样安全
+    }
+
+    /// 游戏模式判定冒烟：前台窗口 / 显示器枚举在本机可调用（true/false 均合法，
+    /// 唯一不许发生的是 panic）。开发机前台多半是编辑器/终端（非全屏），期望
+    /// false，但不硬断言——万一测试跑在全屏终端里也不该失败。
+    #[cfg(windows)]
+    #[test]
+    fn 游戏模式判定_不panic() {
+        let _ = fullscreen_app_running();
     }
 }

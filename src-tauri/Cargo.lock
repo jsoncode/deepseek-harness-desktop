@@ -799,6 +799,7 @@ dependencies = [
  "tauri-winrt-notification",
  "tungstenite",
  "ureq",
+ "webview2-com",
  "windows 0.61.3",
 ]
 

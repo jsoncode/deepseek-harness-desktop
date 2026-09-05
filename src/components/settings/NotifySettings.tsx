@@ -68,6 +68,12 @@ export default function NotifySettings() {
               onChange={(v) => setStyle(v)}
             />
           </div>
+          <p className="settings-desc">
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              游戏模式：前台运行全屏应用（游戏/放映）时自动暂停弹框推送，仅保留语音播报，
+              退出全屏后恢复。
+            </Text>
+          </p>
         </div>
 
         <div className="settings-card">

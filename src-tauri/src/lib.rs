@@ -2,6 +2,7 @@ mod credentials;
 mod dsh;
 mod logs;
 mod notify;
+mod permissions;
 mod proxy;
 mod session_events;
 mod tts;
@@ -386,6 +387,12 @@ pub fn run() {
                 .initialization_script_for_all_frames(THEME_SYNC_BRIDGE)
                 .initialization_script_for_all_frames(SESSION_OPEN_BRIDGE)
                 .build()?;
+
+            // 内嵌服务的 Web 权限申请（麦克风/摄像头/剪贴板等）：wry 只自动放行
+            // 剪贴板读取，其余走 WebView2 默认行为（静默拒绝），页面永远申请不到。
+            // 补挂 PermissionRequested 处理器，任何申请都弹「允许/拒绝」对话框。
+            // 必须在主窗口构建后调用（with_webview 需要已创建的 webview）。
+            permissions::register(app.handle());
 
             // 托盘悬浮提示应用名：优先 tauri.conf.json 的 productName，
             // 回退包名。运行期不变，取一次即可。
