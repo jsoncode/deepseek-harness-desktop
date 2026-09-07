@@ -3,6 +3,7 @@
   "identifier": "preview-remote",
   "description": "内嵌宿主的 preview 子 webview（远程源）：仅放行桥接上报命令，其余命令一概不可达",
   "webviews": ["preview"],
+  "local": false,
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

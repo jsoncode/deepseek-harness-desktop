@@ -1,0 +1,59 @@
+# 应用自定义权限：本地窗口（main / tts-studio）对应用自有命令的放行清单。
+# 一旦 src-tauri/permissions 下存在任何自定义权限，Tauri 即判定"应用已定义 ACL"，
+# 此后本地窗口的 invoke 也走严格校验（has_app_acl 分支），未列出的应用命令一律
+# 报 "<cmd> not allowed. Command found"（tauri webview/mod.rs 的 ACL 检查）。
+# 因此新增 #[tauri::command] 后必须同步追加到下面的 commands.allow，
+# 清单须与 lib.rs generate_handler! 保持一致（不含 preview_bridge_report，
+# 该命令仅经 allow-bridge-report 授予远程 preview 子 webview）。
+
+[[permission]]
+identifier = "allow-app-commands"
+description = "允许本地窗口调用应用自有命令（dsh/tts/credentials/logs/preview 窗口管理）"
+commands.allow = [
+  "app_status",
+  "check_tool",
+  "probe_service",
+  "install_dsh",
+  "install_env_tool",
+  "refresh_search_path",
+  "start_dsh_web",
+  "stop_dsh_web",
+  "open_in_browser",
+  "remove_plugin",
+  "run_plugin_op",
+  "cancel_plugin_op",
+  "check_plugin_updates",
+  "set_notify_enabled",
+  "set_notify_style",
+  "http_get_json",
+  "set_voice_config",
+  "tts_builtin_voices",
+  "tts_env_check",
+  "tts_install_voice_deps",
+  "tts_speak_test",
+  "tts_stop_voice_service",
+  "tts_voice_status",
+  "tts_open_studio",
+  "tts_auto_setup",
+  "tts_clone_repo",
+  "tts_download_model",
+  "tts_synthesize",
+  "tts_play_file",
+  "tts_export_wav",
+  "tts_open_path",
+  "tts_history_list",
+  "tts_history_delete",
+  "check_credentials_compat",
+  "fix_credentials",
+  "log_start_session",
+  "log_append",
+  "log_set_status",
+  "log_sessions",
+  "log_content",
+  "log_clear",
+  "preview_native_supported",
+  "preview_show",
+  "preview_resize",
+  "preview_hide",
+  "preview_open_session",
+]

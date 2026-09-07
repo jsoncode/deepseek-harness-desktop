@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:window:allow-is-maximized",
     "snap-layout:default",
-    "dialog:default"
+    "dialog:default",
+    "allow-app-commands"
   ]
 }
