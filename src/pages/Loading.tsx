@@ -11,7 +11,29 @@ import { useAppStore } from "../store/useAppStore";
  * 全屏展示各阶段（检测环境 → 安装依赖 → 启动服务）的 loading；
  * 服务就绪（running）即刻进入预览页，失败则给出重试入口。
  * 文案不出现「重启」字样——启动与重启共用本页，进度由阶段文案表达。
+ * 应用打开时壳层会直接跳转本页（App.tsx 一次性重定向），挂载后自动续接启动链。
  */
+
+/** 自动启动标记：应用打开后的自动启动链只执行一次
+ *  （本组件随导航反复重挂载，模块级标记防重复触发） */
+let autoStarted = false;
+
+/** 按当前环境状态选择启动链：环境缺失/损坏（node/pnpm/dsh 或 pnpm 11）走一键
+ *  安装链，否则走常规启动链。自动启动与手动重试共用同一判定。 */
+function startChain() {
+  const s = useAppStore.getState();
+  // dsh 已安装但读不出版本 = 安装损坏（与启动页/后端完整性校验一致）→ 走一键安装链重装；
+  // 正常安装的 dsh 走常规启动链（启动链绝不自动重装/更新，避免覆盖现有版本）
+  const needsInstall = !(
+    meetsNodeRequirement(s.nodeVersion) &&
+    Boolean(s.pnpmPath) &&
+    s.dshInstalled &&
+    Boolean(s.dshVersion) &&
+    pnpmMajorOf(s.pnpmVersion) < 11
+  );
+  void (needsInstall ? s.installEnvAndStart() : s.startFlow());
+}
+
 export default function Loading() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -45,6 +67,24 @@ export default function Loading() {
   const failed = phase === "error" || (seenBusy.current && phase === "stopped" && !firstStop);
   if (phase === "installing" || phase === "starting") seenBusy.current = true;
 
+  // 应用打开后的自动启动（一次性）：先完成环境检测初始化，服务已在运行/
+  // 启动中则交给上方 phase 联动跳转，否则按环境状态自动续接启动链
+  useEffect(() => {
+    if (autoStarted || !tauri) {
+      autoStarted = true;
+      return;
+    }
+    autoStarted = true;
+    void useAppStore
+      .getState()
+      .init()
+      .then(() => {
+        const s = useAppStore.getState();
+        if (s.phase === "running" || s.phase === "starting" || s.phase === "installing") return;
+        startChain();
+      });
+  }, []);
+
   // 重试：环境依赖缺失（node/pnpm/dsh 或 pnpm 11）时走一键安装链，否则走常规启动链
   const retry = () => {
     seenBusy.current = false;
@@ -52,18 +92,7 @@ export default function Loading() {
       navigate("/");
       return;
     }
-    const s = useAppStore.getState();
-    // dsh 已安装但读不出版本 = 安装损坏（与启动页/后端完整性校验一致）→ 走一键安装链重装；
-    // 正常安装的 dsh 走常规启动链（启动链绝不自动重装/更新，避免覆盖现有版本）
-    const needsInstall =
-      !(
-        meetsNodeRequirement(s.nodeVersion) &&
-        Boolean(s.pnpmPath) &&
-        s.dshInstalled &&
-        Boolean(s.dshVersion) &&
-        pnpmMajorOf(s.pnpmVersion) < 11
-      );
-    void (needsInstall ? s.installEnvAndStart() : s.startFlow());
+    startChain();
   };
 
   const title = "正在启动服务…";

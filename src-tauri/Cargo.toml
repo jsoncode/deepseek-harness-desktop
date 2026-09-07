@@ -14,9 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# 预览承载不再依赖多 webview：宿主经本地反向代理（proxy.rs）认证终结后以普通
-# DOM iframe 嵌入，无需 tauri 的 unstable 多 webview API（Window::add_child）。
-tauri = { version = "2", features = ["tray-icon"] }
+# 预览承载改回原生子 webview（preview.rs）：Window::add_child 属 unstable API，
+# 需显式开启该 feature。宿主页作为子 webview 的顶层文档直接加载，认证链路与
+# 系统浏览器一致，不再经本地反向代理转手。
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-snap-layout = "1"
 serde = { version = "1", features = ["derive"] }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { App as AntApp } from "antd";
-import { Button, Popconfirm, Space, Tag, Typography } from "antd";
+import { Button, Space, Tag, Typography } from "antd";
 import {
   ArrowLeftOutlined,
   DeleteOutlined,
@@ -11,7 +11,7 @@ import {
   SoundOutlined,
 } from "@ant-design/icons";
 import { dirOf } from "../components/voice/TtsSynthWorkbench";
-import { api, type VoiceHistoryEntry } from "../lib/tauri";
+import { api, nativeConfirm, type VoiceHistoryEntry } from "../lib/tauri";
 
 const { Text } = Typography;
 
@@ -178,19 +178,26 @@ export default function TtsHistory() {
                     >
                       打开文件夹
                     </Button>
-                    <Popconfirm
-                      title="删除这条记录？"
-                      description="无其他记录引用同一文件时，WAV 音频会一并删除。"
-                      okText="删除"
-                      cancelText="取消"
-                      okButtonProps={{ danger: true }}
-                      placement="topRight"
-                      onConfirm={() => void onDelete(item)}
+                    <Button
+                      size="small"
+                      danger
+                      ghost
+                      icon={<DeleteOutlined />}
+                      loading={deletingId === item.id}
+                      onClick={() => {
+                        // 原生确认框替代 Popconfirm（语音工具窗口无原生子 webview，
+                        // 统一确认交互，与主窗口各处一致）
+                        void nativeConfirm(
+                          "确定要删除这条记录吗？无其他记录引用同一文件时，WAV 音频会一并删除。",
+                          "删除记录",
+                          "删除",
+                        ).then((ok) => {
+                          if (ok) onDelete(item);
+                        });
+                      }}
                     >
-                      <Button size="small" danger ghost icon={<DeleteOutlined />} loading={deletingId === item.id}>
-                        删除
-                      </Button>
-                    </Popconfirm>
+                      删除
+                    </Button>
                   </div>
                 </div>
               );

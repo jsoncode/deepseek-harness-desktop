@@ -8,8 +8,9 @@ import { useUiStore } from "../store/useUiStore";
  * 系统通知点击处理器（挂在 HashRouter 内、任何路由下都保持挂载）：
  * 用户点击 toast 的「打开对话」后，Rust 侧 emit `dsh://notify-activate`
  * （窗口已由 Rust 恢复到前台）。这里把会话 id 暂存进 useUiStore 并切到预览页；
- * Preview 负责在 iframe 就绪后把它 postMessage 给预览 iframe
- * （SESSION_OPEN_BRIDGE），由其在 dsh web 内打开对应会话的对话框。
+ * Preview 负责通过 previewOpenSession 让子 webview 执行注入的
+ * __dshDesktopOpenSession（SESSION_OPEN_BRIDGE），由其在 dsh web 内打开对应
+ * 会话的对话框，完成回执经 dsh://preview-session-acked 清空暂存。
  *
  * 点到 toast 正文（sessionId 为 null）只回预览页，不指定会话。
  */

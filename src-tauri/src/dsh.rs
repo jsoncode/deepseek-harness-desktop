@@ -22,8 +22,6 @@ pub const ENV_INSTALL_EXIT_EVENT: &str = "dsh://env-install-exit";
 pub const WEB_LOG_EVENT: &str = "dsh://web-log";
 pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
-pub const PLUGIN_INSTALL_LOG_EVENT: &str = "dsh://plugin-install-log";
-pub const PLUGIN_INSTALL_EXIT_EVENT: &str = "dsh://plugin-install-exit";
 pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
 pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
 /// 会话事件推送的多通道投递负载（见 `session_events::NotifyMessage`）
@@ -1596,6 +1594,26 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     // 新子进程 → 重置上一轮的探测结果，避免误用外部实例/旧 URL
     *state.detected_url.lock().unwrap() = None;
     state.pending_urls.lock().unwrap().clear();
+    // 启动前清理卸载插件的残留依赖（见 remove_plugin / prune_pending_plugin_deps）：
+    // 卸载只移除 bundles 并登记 pendingRemovals，dsh 启动时按 bundles 自动加载插件；
+    // 启动链不再执行 pnpm install，这里负责把 package.json 的 dependencies 一并清干净
+    if let Some(path) = profile_package_json() {
+        match prune_pending_plugin_deps(&path) {
+            Ok(true) => emit_log(
+                &app,
+                WEB_LOG_EVENT,
+                "system",
+                "已清理卸载插件的残留依赖（package.json；模块目录随下次插件安装同步清理）",
+            ),
+            Ok(false) => {}
+            Err(e) => emit_log(
+                &app,
+                WEB_LOG_EVENT,
+                "error",
+                &format!("清理卸载插件的残留依赖失败: {e}"),
+            ),
+        }
+    }
     let dsh = resolve_dsh().ok_or("未找到 dsh，请先执行全局安装 @deepseek-ai/dsh")?;
     // 启动前完整性校验：命令入口存在但读不出版本 = 安装已损坏（全局目录被清理、
     // 路径失效、shim 悬空等）。直接返回可操作的错误而非用崩溃堆栈糊弄用户。
@@ -2097,8 +2115,8 @@ fn read_profile_plugins() -> (bool, Vec<String>) {
 
 /// 从 profile package.json 卸载插件：仅从 bundles 数组移除该名字，并把名字登记到
 /// dsh.profile.pendingRemovals；dependencies 键保留不动——真正的依赖移除推迟到
-/// 下次启动（install_plugins 在 pnpm install 前清理登记表，见
-/// prune_pending_plugin_deps），避免服务运行中直接卸载模块导致服务崩溃。
+/// 下次启动（start_dsh_web 启动前清理登记表，见 prune_pending_plugin_deps），
+/// 避免服务运行中直接卸载模块导致服务崩溃。
 /// 写回时保持键顺序（preserve_order）与两空格缩进
 #[tauri::command]
 pub fn remove_plugin(name: String) -> Result<(), String> {
@@ -2302,76 +2320,6 @@ pub fn check_plugin_updates() -> Result<Vec<PluginVersionInfo>, String> {
             }
         })
         .collect())
-}
-
-/// 在 profile 目录执行 pnpm install（幂等，无变化秒级完成）；
-/// 目录或 package.json 不存在时直接成功（首次运行尚未生成 profile）。
-/// 输出经 plugin-install-log 流式转发，退出码经 plugin-install-exit 通知前端续接。
-#[tauri::command]
-pub fn install_plugins(app: AppHandle) -> Result<(), String> {
-    let Some(dir) = profile_dir() else {
-        return Ok(());
-    };
-    let path = dir.join("package.json");
-    if !path.is_file() {
-        return Ok(());
-    }
-    // 启动时清理卸载残留（见 remove_plugin）：卸载只移除 bundles 并登记
-    // pendingRemovals，此刻服务未运行，从 package.json 移除依赖是安全的，
-    // 随后的 pnpm install 会顺带卸载 node_modules 中的旧包
-    match prune_pending_plugin_deps(&path) {
-        Ok(true) => {
-            emit_log(
-                &app,
-                PLUGIN_INSTALL_LOG_EVENT,
-                "system",
-                "已清理卸载插件的残留依赖（pnpm install 将同步卸载对应模块）",
-            );
-        }
-        Ok(false) => {}
-        Err(e) => {
-            emit_log(
-                &app,
-                PLUGIN_INSTALL_LOG_EVENT,
-                "error",
-                &format!("清理卸载插件的残留依赖失败: {e}"),
-            );
-        }
-    }
-    let pnpm =
-        resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
-    log_npm_mirror(&app, PLUGIN_INSTALL_LOG_EVENT);
-    emit_log(
-        &app,
-        PLUGIN_INSTALL_LOG_EVENT,
-        "system",
-        &format!("$ pnpm install（{}）", dir.display()),
-    );
-    let child = hide_window(
-        Command::new(&pnpm)
-            .arg("install")
-            // 切换 pnpm 大版本（如 11→10）后旧 node_modules 布局不兼容需清除重建，
-            // 无 TTY 时会因确认提示直接失败（ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY），
-            // 显式关闭清除确认，让 pnpm 直接重建
-            .arg("--config.confirm-modules-purge=false")
-            .current_dir(&dir)
-            .args(npm_mirror_args())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null()),
-    )
-    .spawn()
-    .map_err(|e| format!("启动 pnpm install 失败: {e}"))?;
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        pump_process(
-            &app2,
-            child,
-            PLUGIN_INSTALL_LOG_EVENT,
-            PLUGIN_INSTALL_EXIT_EVENT,
-        );
-    });
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

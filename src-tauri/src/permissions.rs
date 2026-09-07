@@ -4,15 +4,16 @@
 //! `webview2/mod.rs` 的 `if attributes.clipboard` 分支），其余权限请求走 WebView2
 //! 默认行为——**静默拒绝**，内嵌网页永远申请不到麦克风等高级授权。
 //!
-//! 本模块给主窗口的 WebView2 补挂 `PermissionRequested` 处理器：任何权限申请都
-//! 弹原生「允许 / 拒绝」对话框，由用户现场决定。申请能到达这里的前提由另外两半
-//! 保证：Preview.tsx 的 iframe `allow` 属性（跨源权限委托）与 proxy.rs 剥掉上游
-//! `Permissions-Policy` 响应头（避免文档层策略把申请拦死）。
+//! 本模块给承载宿主页的 WebView2 补挂 `PermissionRequested` 处理器：任何权限申请
+//! 都弹原生「允许 / 拒绝」对话框，由用户现场决定。申请能到达 WebView2 的前提由
+//! Preview.tsx 的 iframe `allow` 属性（浏览器回退路径的跨源权限委托）保证；原生子
+//! webview 路径（preview.rs）下宿主页是顶层文档，不存在文档层权限委托的问题。
 //!
 //! 平台范围：仅 Windows 需要——macOS 上 wry 的 WKUIDelegate 已自动 Grant 媒体
 //! 采集权限（见 wry `wry_web_view_ui_delegate.rs`），Linux 非本应用目标平台。
-//! 只注册主窗口：内嵌服务只经 Preview 的 iframe 渲染在主窗口里；tts-studio 等
-//! 纯 UI 窗口不承载服务内容，无需处理。
+//! 注册点：主窗口（setup 后 `register`，覆盖浏览器回退 iframe）与 preview 子
+//! webview（preview.rs 创建后 `attach_platform`）。tts-studio 等纯 UI 窗口不承载
+//! 服务内容，无需处理。
 
 /// 给主窗口 WebView2 注册权限申请处理器。在 setup（主窗口构建完成）后调用一次。
 #[cfg(windows)]
@@ -36,6 +37,13 @@ pub fn register(app: &tauri::AppHandle) {
 /// 非 Windows：无需处理（macOS 由 wry 自动 Grant 媒体权限；Linux 非目标平台）。
 #[cfg(not(windows))]
 pub fn register(_app: &tauri::AppHandle) {}
+
+/// 给任意已创建的 webview（主窗口或 preview 子 webview）挂权限申请处理器。
+/// 仅 Windows 有实现；其他平台为 no-op（调用方无需再判平台）。
+#[cfg(windows)]
+pub fn attach_platform(webview: &tauri::webview::PlatformWebview) -> Result<(), String> {
+    attach_permission_handler(webview)
+}
 
 /// 挂 `PermissionRequested` 事件：整 webview 生效（含 Preview 的跨源 iframe）。
 /// 事件在 UI 线程触发，对话框在处理器内同步弹出（MessageBox 自带模态消息泵，

@@ -1,4 +1,3 @@
-import { Tooltip } from "antd";
 import { App as AntApp } from "antd";
 import { CopyOutlined, ExportOutlined, SyncOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router";
@@ -46,30 +45,28 @@ export default function TitleBar() {
       <div className="titlebar-left">
         <img src={logo} alt="Harness" draggable={false} className="titlebar-logo" />
         <span className="titlebar-name">DeepSeek Harness Desktop</span>
-        <Tooltip title="关于本应用">
-          <button
+        <button
             type="button"
             className="titlebar-version"
+            title="关于本应用"
             aria-label="关于本应用"
             onClick={() => navigate("/settings?section=about")}
           >
             {__APP_VERSION__}
-          </button>
-        </Tooltip>
+        </button>
       </div>
 
       <div className="titlebar-center">
         {/* Home 入口：服务已启动 → 服务内（预览页）；未启动 → 预检页（启动页） */}
-        <Tooltip title={phase === "running" ? "进入应用" : "返回启动页"}>
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="首页"
-            onClick={() => navigate(phase === "running" ? "/preview" : "/")}
-          >
-            <img src={logo} alt="" draggable={false} className="titlebar-home-logo" />
-          </button>
-        </Tooltip>
+        <button
+          type="button"
+          className="icon-btn"
+          title={phase === "running" ? "进入应用" : "返回启动页"}
+          aria-label="首页"
+          onClick={() => navigate(phase === "running" ? "/preview" : "/")}
+        >
+          <img src={logo} alt="" draggable={false} className="titlebar-home-logo" />
+        </button>
         <div className="url-pill">
           <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
           {/* 地址栏展示带 token 的完整地址时对 token 打码；复制/浏览器打开仍用真实地址 */}
@@ -77,31 +74,26 @@ export default function TitleBar() {
             {url ? maskServiceUrl(url) : "未检测到服务"}
           </span>
         </div>
-        <Tooltip title="刷新（当前页面与环境状态）">
-          <button className="icon-btn" type="button" aria-label="刷新" onClick={handleRefresh}>
-            <SyncOutlined />
-          </button>
-        </Tooltip>
-        <Tooltip title="复制地址">
-          <button className="icon-btn" type="button" aria-label="复制地址" onClick={() => void copyUrl()}>
-            <CopyOutlined />
-          </button>
-        </Tooltip>
-        <Tooltip title="在浏览器中打开">
-          <button
-            className="icon-btn"
-            type="button"
-            aria-label="在浏览器中打开"
-            onClick={() => {
-              if (url)
-                void api.openInBrowser(url).catch((e) =>
-                  message.error(String(e instanceof Error ? e.message : e)),
-                );
-            }}
-          >
-            <ExportOutlined />
-          </button>
-        </Tooltip>
+        <button className="icon-btn" type="button" title="刷新（当前页面与环境状态）" aria-label="刷新" onClick={handleRefresh}>
+          <SyncOutlined />
+        </button>
+        <button className="icon-btn" type="button" title="复制地址" aria-label="复制地址" onClick={() => void copyUrl()}>
+          <CopyOutlined />
+        </button>
+        <button
+          className="icon-btn"
+          type="button"
+          title="在浏览器中打开"
+          aria-label="在浏览器中打开"
+          onClick={() => {
+            if (url)
+              void api.openInBrowser(url).catch((e) =>
+                message.error(String(e instanceof Error ? e.message : e)),
+              );
+          }}
+        >
+          <ExportOutlined />
+        </button>
       </div>
 
       <div className="titlebar-right">

@@ -1,6 +1,7 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from "antd";
 import { useEffect, useLayoutEffect } from "react";
-import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
+import { HashRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
+import { tauri } from "./lib/tauri";
 import { useUiStore } from "./store/useUiStore";
 import BottomBar from "./components/BottomBar";
 import CredentialsFixModal from "./components/CredentialsFixModal";
@@ -76,7 +77,6 @@ export default function App() {
     >
       <AntApp>
         <div className="app-bg" />
-        <PluginFailureModal />
         <HashRouter>
           <Shell />
         </HashRouter>
@@ -85,6 +85,11 @@ export default function App() {
   );
 }
 
+/** 「打开软件直接进入启动页」的一次性标记：仅应用首挂载时的「/」生效，
+ *  之后「/」仍可由用户主动进入（如启动失败后的「返回启动页」）。
+ *  语音工具窗口打开时路由为 /tts-studio，条件不命中，不受影响。 */
+let autoStartRedirected = false;
+
 /**
  * 壳层分流：主窗口壳（TitleBar + 内容区 + BottomBar + 主窗口级弹窗）与
  * 独立工具窗口壳（语音合成工具：StudioTitleBar + 页面，无底部导航与凭据/
@@ -92,9 +97,18 @@ export default function App() {
  */
 function Shell() {
   const location = useLocation();
+  const navigate = useNavigate();
   // 全局刷新纪元：刷新按钮自增，作为内容区 key 使当前页面（启动页/终端页/服务预览页）
   // 整体重挂载——任何页面都能被刷新，而不止服务预览页
   const reloadKey = useUiStore((s) => s.reloadKey);
+
+  // 打开软件直接进入启动过渡页，由 Loading 页自动完成「检测环境 →（缺失才安装）
+  // → 启动」（见 Loading.tsx 模块级自动启动），不再停留在启动页等待手动操作
+  useEffect(() => {
+    if (!tauri || autoStartRedirected || location.pathname !== "/") return;
+    autoStartRedirected = true;
+    navigate("/loading", { replace: true });
+  }, [location.pathname, navigate]);
 
   if (location.pathname.startsWith("/tts-studio")) {
     return (
@@ -116,6 +130,8 @@ function Shell() {
       <CredentialsFixModal />
       {/* 系统通知点击：切预览页 + 暂存待打开会话（见组件注释） */}
       <NotifyActivateHandler />
+      {/* 插件加载失败弹框：需在 Router 内（弹框前要按当前路由离开预览页） */}
+      <PluginFailureModal />
       <div className="app-shell">
         <TitleBar />
         <div className="app-content" key={reloadKey}>

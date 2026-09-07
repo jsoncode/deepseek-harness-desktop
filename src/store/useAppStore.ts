@@ -75,7 +75,10 @@ interface AppStore {
   refreshStatus: () => Promise<void>;
   /** 单项环境检测结果写回：把启动页对应检查行从「检测中」点亮为结果 */
   applyEnvToolCheck: (tool: EnvTool, result: ToolCheck) => void;
-  ensurePluginsThenStart: () => Promise<void>;
+  /** 启动 dsh web 服务（starting → 事件驱动 running/error）。
+   *  启动链不再执行插件依赖安装（dsh 启动时按 bundles 自动加载已安装插件，
+   *  卸载残留由后端 start_dsh_web 启动前清理，见 dsh.rs prune_pending_plugin_deps） */
+  startService: () => Promise<void>;
   startFlow: () => Promise<void>;
   /** 一键安装缺失的环境依赖（node → pnpm → dsh）并自动启动服务。
    *  dsh 仅在缺失或安装损坏（读不出版本）时安装；已正常安装的 dsh 绝不在
@@ -102,7 +105,7 @@ interface AppStore {
   startPluginOp: (kind: PluginOpKind, name: string) => Promise<void>;
   refreshPluginVersions: () => Promise<void>;
   setPhase: (phase: Phase) => void;
-  /** 上报插件加载失败（由 Preview 页收到的 iframe postMessage 调用） */
+  /** 上报插件加载失败（由 Preview 页收到的子 webview 桥接事件调用） */
   reportPluginLoadError: (name: string, message: string) => void;
   clearPluginLoadError: () => void;
 }
@@ -254,7 +257,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (p.code === 0) {
         get().appendLog("success", "✅ @deepseek-ai/dsh 全局安装完成");
         set({ dshInstalled: true });
-        void get().ensurePluginsThenStart();
+        void get().startService();
       } else {
         get().appendLog("error", `❌ 安装失败（退出码 ${p.code}），请检查网络或 pnpm 配置`);
         set({ phase: "error", error: `安装失败，退出码 ${p.code}` });
@@ -272,26 +275,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       const r = envExitResolve;
       envExitResolve = null;
       r?.(p.code);
-    });
-
-    onEvent<LogLine>(EVENTS.pluginInstallLog, (p) => {
-      get().appendLog("system", p.line);
-    });
-
-    onEvent<ExitPayload>(EVENTS.pluginInstallExit, (p) => {
-      if (get().phase !== "installing") return; // 仅插件安装阶段生效
-      if (p.code === 0) {
-        get().appendLog("success", "✅ 插件依赖安装完成");
-        set({ phase: "starting" });
-        get().appendLog("system", "开始启动本地服务：dsh web …");
-        void api.startDshWeb().catch((e) => {
-          get().appendLog("error", `启动失败：${String(e)}`);
-          set({ phase: "error", error: String(e) });
-        });
-      } else {
-        get().appendLog("error", `❌ 插件依赖安装失败（退出码 ${p.code}）`);
-        set({ phase: "error", error: `插件依赖安装失败，退出码 ${p.code}` });
-      }
     });
 
     onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
@@ -687,26 +670,13 @@ export const useAppStore = create<AppStore>((set, get) => {
       r?.(ok);
     },
 
-    ensurePluginsThenStart: async () => {
-      const s = get();
-      // 浏览器预览或 profile 未生成（首次运行）：跳过插件安装直接启动
-      if (!tauri || !s.profileReady) {
-        set({ phase: "starting", error: null });
-        get().appendLog("system", "开始启动本地服务：dsh web …");
-        try {
-          await api.startDshWeb();
-        } catch (e) {
-          get().appendLog("error", `启动失败：${String(e)}`);
-          set({ phase: "error", error: String(e) });
-        }
-        return;
-      }
-      get().appendLog("system", "安装插件依赖：pnpm install …");
-      set({ phase: "installing", error: null });
+    startService: async () => {
+      set({ phase: "starting", error: null });
+      get().appendLog("system", "开始启动本地服务：dsh web …");
       try {
-        await api.installPlugins(); // 结果由 plugin-install-exit 事件驱动续接
+        await api.startDshWeb();
       } catch (e) {
-        get().appendLog("error", `插件依赖安装失败：${String(e)}`);
+        get().appendLog("error", `启动失败：${String(e)}`);
         set({ phase: "error", error: String(e) });
       }
     },
@@ -778,7 +748,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           );
         }
         get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");
-        void get().ensurePluginsThenStart();
+        void get().startService();
       } else {
         get().appendLog("system", "开始全局安装 @deepseek-ai/dsh@latest …");
         set({ phase: "installing" });
@@ -877,10 +847,10 @@ export const useAppStore = create<AppStore>((set, get) => {
           );
         }
 
-        // 环境全部就绪 → 直接进入现有启动链（含插件依赖与 dsh web 启动、自动打开）
+        // 环境全部就绪 → 直接进入现有启动链（含 dsh web 启动、自动打开）
         get().appendLog("success", "✅ 运行环境就绪");
         set({ envInstallTool: null });
-        void get().ensurePluginsThenStart();
+        void get().startService();
       } catch (e) {
         dropEnvExitWait();
         const msg = e instanceof Error ? e.message : String(e);

@@ -89,13 +89,17 @@ export const EVENTS = {
   installExit: "dsh://install-exit",
   envInstallLog: "dsh://env-install-log",
   envInstallExit: "dsh://env-install-exit",
-  pluginInstallLog: "dsh://plugin-install-log",
-  pluginInstallExit: "dsh://plugin-install-exit",
   pluginOpLog: "dsh://plugin-op-log",
   pluginOpExit: "dsh://plugin-op-exit",
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
+  /** preview 子 webview 桥接上报：宿主主题切换（dark 布尔，见 preview.rs THEME_SYNC_BRIDGE） */
+  previewTheme: "dsh://preview-theme",
+  /** preview 子 webview 桥接上报：插件加载失败（items = 失败插件名，见 PLUGIN_FAILURE_BRIDGE） */
+  previewPluginFailed: "dsh://preview-plugin-failed",
+  /** preview 子 webview 桥接上报：会话打开回执（重试看门狗用，见 SESSION_OPEN_BRIDGE） */
+  previewSessionAcked: "dsh://preview-session-acked",
   /** 会话事件推送的渲染结果（Rust 侧投递系统通知后，同一条再 emit 给前端，见 lib/notify.ts） */
   notifyMessage: "dsh://notify-message",
   /** 用户点击了系统通知（toast 激活，见 notify.rs 的 ActivatePayload）：
@@ -254,7 +258,6 @@ export const api = {
   stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
   removePlugin: (name: string) => requireTauri(() => invoke<void>("remove_plugin", { name })),
-  installPlugins: () => requireTauri(() => invoke<void>("install_plugins")),
   runPluginOp: (op: string, name: string) =>
     requireTauri(() => invoke<void>("run_plugin_op", { op, name })),
   cancelPluginOp: () => requireTauri(() => invoke<boolean>("cancel_plugin_op")),
@@ -351,11 +354,21 @@ export const api = {
     requireTauri(() => invoke<SessionLogEntry[]>("log_content", { id })),
   /** 清空全部日志会话 */
   logClear: () => requireTauri(() => invoke<void>("log_clear")),
-  /** 预览 iframe 的本地反向代理地址（origin 形态，如 `http://127.0.0.1:3090`）：
-   *  代理做认证终结（Rust 侧持有 dsh-auth Cookie 并注入转发请求），浏览器
-   *  无需 Cookie，打包正式版壳顶层 tauri://localhost 也能以普通 DOM iframe
-   *  同源内嵌宿主页。未启动成功返回 null（预览回退/提示，见 Preview.tsx） */
-  proxyBaseUrl: () => requireTauri(() => invoke<string | null>("proxy_base_url")),
+  // ---- preview 原生子 webview（直接加载宿主服务，替代 iframe + 反向代理方案）----
+  /** 当前平台是否支持原生子 webview 内嵌（Windows/macOS；不支持则走 iframe 回退） */
+  previewNativeSupported: () =>
+    requireTauri(() => invoke<boolean>("preview_native_supported")),
+  /** 在逻辑坐标 (x, y) 处显示（必要时创建）preview 子 webview 并加载宿主 URL */
+  previewShow: (url: string, x: number, y: number, width: number, height: number) =>
+    requireTauri(() => invoke<void>("preview_show", { url, x, y, width, height })),
+  /** 宿主面板尺寸/位置变化时同步子 webview 边界（逻辑坐标） */
+  previewResize: (x: number, y: number, width: number, height: number) =>
+    requireTauri(() => invoke<void>("preview_resize", { x, y, width, height })),
+  /** 离开预览页/应用最小化时隐藏子 webview（不销毁，保留登录态与页面状态） */
+  previewHide: () => requireTauri(() => invoke<void>("preview_hide")),
+  /** 让子 webview 执行 __dshDesktopOpenSession 打开指定会话对话框（通知直达） */
+  previewOpenSession: (sessionId: string) =>
+    requireTauri(() => invoke<void>("preview_open_session", { sessionId })),
 };
 
 export async function onEvent<T>(
@@ -364,4 +377,21 @@ export async function onEvent<T>(
 ): Promise<() => void> {
   if (!tauri) return () => undefined; // 浏览器预览：无事件源，静默跳过
   return listen<T>(event, (e) => handler(e.payload));
+}
+
+/** 原生确认对话框：Tauri 内走系统对话框（plugin-dialog），浏览器回退 window.confirm。
+ *  替代 antd Popconfirm —— 原生子 webview 之上的 DOM 层无法显示，气泡确认框不可用 */
+export async function nativeConfirm(
+  message: string,
+  title = "确认操作",
+  okLabel = "确定",
+  cancelLabel = "取消",
+): Promise<boolean> {
+  if (!tauri) return window.confirm(message);
+  try {
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    return await confirm(message, { title, okLabel, cancelLabel, kind: "warning" });
+  } catch {
+    return window.confirm(message);
+  }
 }

@@ -1,9 +1,9 @@
-import { App as AntApp, Popconfirm } from "antd";
+import { App as AntApp } from "antd";
 import { CopyOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AppModal from "../AppModal";
 import { MARK } from "../../lib/logFormat";
-import { api, tauri, type LogSessionMeta } from "../../lib/tauri";
+import { api, nativeConfirm, tauri, type LogSessionMeta } from "../../lib/tauri";
 import { useAppStore } from "../../store/useAppStore";
 
 /** 会话状态 → 徽标文案与样式类 */
@@ -157,19 +157,21 @@ export default function LogManagerSettings() {
                 <ReloadOutlined style={{ fontSize: 12 }} />
                 {loading ? "加载中…" : "刷新"}
               </button>
-              <Popconfirm
-                title="清空日志"
-                description="确定要删除全部日志记录吗？此操作不可恢复。"
-                okText="清空"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={() => void handleClear()}
+              <button
+                className="pm-btn danger"
+                type="button"
+                onClick={() => {
+                  // 原生确认框替代 Popconfirm（确认交互全应用统一走原生对话框）
+                  void nativeConfirm("确定要删除全部日志记录吗？此操作不可恢复。", "清空日志", "清空").then(
+                    (ok) => {
+                      if (ok) void handleClear();
+                    },
+                  );
+                }}
               >
-                <button className="pm-btn danger" type="button">
-                  <DeleteOutlined style={{ fontSize: 12 }} />
-                  清空日志
-                </button>
-              </Popconfirm>
+                <DeleteOutlined style={{ fontSize: 12 }} />
+                清空日志
+              </button>
             </>
           ) : null}
         </div>

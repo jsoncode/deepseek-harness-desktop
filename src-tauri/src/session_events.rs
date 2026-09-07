@@ -241,7 +241,7 @@ fn build_ws_request(uri: &str, cookie: &str) -> Option<tungstenite::handshake::c
 // ---------------------------------------------------------------------------
 
 /// dsh web 服务的 host + port（+ 启动日志里的 launch token）。
-/// pub(crate)：供 proxy.rs 复用同样的端点解析/认证交换逻辑。
+/// pub(crate)：供同模块的探测/订阅链路复用同一套端点解析。
 pub(crate) struct Endpoint {
     pub(crate) host: String,
     pub(crate) port: u16,
@@ -265,17 +265,6 @@ impl Endpoint {
                 port: dsh::service_port(),
                 token: None,
             })
-    }
-
-    /// 与 `of` 相同，但只有确实探测到 URL 时才返回 Some（无服务时不臆造默认端点）。
-    pub(crate) fn detected(app: &AppHandle) -> Option<Self> {
-        let detected = app
-            .state::<dsh::AppState>()
-            .detected_url
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        detected.as_deref().and_then(Self::parse)
     }
 
     /// 从 `http://host:port[/?token=...]` 取 host、port 与查询串里的 token。
@@ -338,7 +327,7 @@ impl Endpoint {
 /// 对 `/?token=...` 发一次 GET（不跟随 303），从响应头取 `Set-Cookie` 的首段。
 /// 该 Cookie 以 Host authority 绑定（实测 cookie 名为 `dsh-auth-<hash>`），
 /// 同一 authority 的 `/api` HTTP 与 WS 升级都带上它即可通过认证。
-/// pub(crate)：供 proxy.rs 做“认证终结”时复用。
+/// pub(crate)：模块内探测与订阅链路共用。
 pub(crate) fn fetch_session_cookie(ep: &Endpoint, token: &str) -> Option<String> {
     let mut stream = ep.connect_tcp()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));

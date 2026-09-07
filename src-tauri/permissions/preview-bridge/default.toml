@@ -1,0 +1,10 @@
+# 应用自定义权限：预览子 webview 的桥接上报通道。
+# 宿主页面是远程源（http://127.0.0.1:<port>），Tauri 默认禁止远程源调用应用命令；
+# capabilities/preview.json 经 remote.urls 白名单 + 本权限（应用 ACL 里以扁平
+# 标识符注册，不带命名空间前缀）放行唯一入口 preview_bridge_report
+# （主题同步 / 插件失败 / 会话回执三类事件的上报）。
+
+[[permission]]
+identifier = "allow-bridge-report"
+description = "允许内嵌宿主子 webview 上报桥接事件（主题/插件失败/会话回执）"
+commands.allow = ["preview_bridge_report"]
