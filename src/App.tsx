@@ -13,6 +13,7 @@ import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
 import TtsStudio from "./pages/TtsStudio";
 import TtsHistory from "./pages/TtsHistory";
+import KokoroStudio from "./pages/KokoroStudio";
 import { useThemeStore, EFFECTIVE_STORAGE_KEY } from "./store/useThemeStore";
 import { initNotifySync } from "./store/useNotifyStore";
 import { startNotifyListener } from "./lib/notify";
@@ -98,8 +99,9 @@ export default function App() {
 
 /**
  * 壳层分流：主窗口壳（TitleBar + 内容区 + BottomBar + 主窗口级弹窗）与
- * 独立工具窗口壳（语音合成工具/设置：StudioTitleBar + 页面，无底部导航与凭据/
- * 通知激活等主窗口专属弹窗）共用同一 bundle，经 hash 路由区分。
+ * 独立工具窗口壳（语音合成工具 / Kokoro 语音合成工具 / 设置：StudioTitleBar +
+ * 页面，无底部导航与凭据/通知激活等主窗口专属弹窗）共用同一 bundle，经 hash
+ * 路由区分。
  */
 function Shell() {
   const location = useLocation();
@@ -116,6 +118,24 @@ function Shell() {
             <Route path="/tts-studio" element={<TtsStudio />} />
             <Route path="/tts-studio/history" element={<TtsHistory />} />
             <Route path="*" element={<Navigate to="/tts-studio" replace />} />
+          </Routes>
+        </div>
+      </div>
+    );
+  }
+
+  // Kokoro 语音合成工具独立窗口壳：桌面端由 Rust tts_open_kokoro_studio 创建
+  // （index.html#/kokoro-studio），与 Audio8 的 /tts-studio 同构，仅配置面板换成
+  // Kokoro 字段；生成历史两引擎共用同一份记录（/kokoro-studio/history）
+  if (location.pathname.startsWith("/kokoro-studio")) {
+    return (
+      <div className="app-shell">
+        <StudioTitleBar title="Kokoro 语音合成工具" />
+        <div className="app-content">
+          <Routes>
+            <Route path="/kokoro-studio" element={<KokoroStudio />} />
+            <Route path="/kokoro-studio/history" element={<TtsHistory />} />
+            <Route path="*" element={<Navigate to="/kokoro-studio" replace />} />
           </Routes>
         </div>
       </div>

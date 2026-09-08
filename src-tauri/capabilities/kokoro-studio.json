@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "kokoro-studio",
-  "description": "Kokoro 语音合成工具窗口 capability：窗口操作（自绘标题栏拖拽/最小化/最大化/关闭）+ 对话框。与 tts-studio 同款——缺这份授权时右上角窗口控制按钮与标题栏拖拽全部无效",
+  "description": "Kokoro 语音合成工具窗口 capability：窗口操作（自绘标题栏拖拽/最小化/最大化/关闭）+ 对话框 + 应用自有命令（Kokoro 配置面板的探测/下载/克隆/依赖安装/音色列表等）。与 tts-studio 同款——缺这份授权时右上角窗口控制按钮与标题栏拖拽全部无效，且 invoke 一律报 \"<cmd> not allowed\"",
   "windows": ["kokoro-studio"],
   "permissions": [
     "core:default",
@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:window:allow-is-maximized",
     "snap-layout:default",
-    "dialog:default"
+    "dialog:default",
+    "allow-app-commands"
   ]
 }

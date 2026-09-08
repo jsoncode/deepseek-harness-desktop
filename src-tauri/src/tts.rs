@@ -493,20 +493,10 @@ impl crate::notify::NotifyChannel for VoiceChannel {
         // 严格校验路径：不仅检查空，还检查盘符根等无效路径（按引擎各查各的）。
         // 校验失败同样 emit skipped：历史上这里是纯静默 return，用户只会看到
         // 「通知弹了但没声音」，无从定位是路径配置问题
-        for (dir, label) in [
-            (&cfg.repo_dir, "Audio8 仓库目录"),
-            (&cfg.model_dir, "模型目录"),
-        ] {
-            if let Err(e) = validate_audio_path(dir, label) {
-                eprintln!("[tts] 语音播报跳过（{label} 无效）: {e}");
-                emit_voice(
-                    app,
-                    "skipped",
-                    Some(speak_text(msg, &cfg.speak_content)),
-                    Some(&e),
-                );
-                return;
-            }
+        if let Err(e) = validate_engine_paths(&cfg) {
+            eprintln!("[tts] 语音播报跳过（路径无效）: {e}");
+            emit_voice(app, "skipped", Some(speak_text(msg, &cfg.speak_content)), Some(&e));
+            return;
         }
         enqueue_job(SpeakJob {
             app: app.clone(),

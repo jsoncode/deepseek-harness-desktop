@@ -1951,10 +1951,17 @@ html[data-theme="light"] .pm-detail-desc {
   overflow-y: auto;
 }
 
-/* antd Menu 透明化融入玻璃面板（去掉默认白底与内联右边框） */
+/* antd Menu 与玻璃面板是同一个元素（ul 上同时挂着 .ant-menu 与 .settings-menu）：
+   antd 的默认底色、以及 inline 模式的内联右边框都要压掉，但面板自己的玻璃底色与
+   四边边框必须保住。历史写法只写 background: transparent，把 .settings-menu 的
+   面板底色一起清掉了（两条规则同元素，双类选择器优先级更高），左栏于是变成「裸
+   列表」——没有底色、右侧还留着 antd 的蓝色分隔线，与右侧 .settings-main 的玻璃
+   面板完全不对称。这里写回与 .settings-main 一致的底色与四边边框。
+   border 需 !important：antd 的 `.ant-menu-light.ant-menu-inline` 同样是双类
+   选择器，且其样式表注入在 global.css 之后，否则内联右边框会盖掉本面板边框。 */
 .settings-menu.ant-menu {
-  background: transparent;
-  border-inline-end: none !important;
+  background: var(--panel);
+  border: 1px solid var(--border) !important;
 }
 
 /* 右侧内容区：玻璃面板，导航条固定、内容区滚动 */

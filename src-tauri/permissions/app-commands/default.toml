@@ -1,4 +1,5 @@
-# 应用自定义权限：本地窗口（main / tts-studio）对应用自有命令的放行清单。
+# 应用自定义权限：本地窗口（main / tts-studio / kokoro-studio / settings）对应用
+# 自有命令的放行清单。
 # 一旦 src-tauri/permissions 下存在任何自定义权限，Tauri 即判定"应用已定义 ACL"，
 # 此后本地窗口的 invoke 也走严格校验（has_app_acl 分支），未列出的应用命令一律
 # 报 "<cmd> not allowed. Command found"（tauri webview/mod.rs 的 ACL 检查）。
@@ -35,9 +36,15 @@ commands.allow = [
   "tts_stop_voice_service",
   "tts_voice_status",
   "tts_open_studio",
+  "tts_open_kokoro_studio",
   "tts_auto_setup",
   "tts_clone_repo",
   "tts_download_model",
+  "tts_download_kokoro_model",
+  "tts_clone_kokoro_repo",
+  "tts_install_kokoro_deps",
+  "tts_kokoro_voices",
+  "tts_kokoro_autodetect",
   "tts_synthesize",
   "tts_play_file",
   "tts_export_wav",

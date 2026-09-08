@@ -2,9 +2,10 @@ import logo from "../assets/logo.svg";
 import WindowControls from "./WindowControls";
 
 /**
- * 独立工具窗口（语音合成/设置）的标题栏：复用主窗口 .titlebar 的拖拽区与布局样式，
- * 无地址栏与页面入口（工具窗口自洽）。WindowControls 内部用 getCurrentWindow()，
- * 天然作用于本窗口（最小化/最大化/关闭，含 Windows 11 磁吸布局命中区）。
+ * 独立工具窗口（语音合成 / Kokoro 语音合成 / 设置）的标题栏：复用主窗口 .titlebar
+ * 的拖拽区与布局样式，无地址栏与页面入口（工具窗口自洽）。title 由各窗口壳传入。
+ * WindowControls 内部用 getCurrentWindow()，天然作用于本窗口（最小化/最大化/关闭，
+ * 含 Windows 11 磁吸布局命中区）。
  */
 export default function StudioTitleBar({ title = "语音合成工具" }: { title?: string }) {
   return (
