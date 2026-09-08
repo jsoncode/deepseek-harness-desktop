@@ -18,10 +18,17 @@ pub fn open_settings_window(app: &tauri::AppHandle, section: Option<&str>) -> Re
         Some(s) => format!("index.html#/settings?section={s}"),
         None => "index.html#/settings".to_string(),
     };
+    // 窗口宽度按「插件管理」表格的最小宽度反推：antd Table 的 scroll.x = 820
+    // （列宽 48 + 440 + 110 + 98 + 124），而表格容器可用宽度 =
+    //   窗口内宽 − 设置页内边距(16×2) − 左侧菜单(190 + 边框 2) − 间距 14
+    //            − 内容区边框 2 − 内容区 padding(18×2)
+    //   = 窗口内宽 − 274（纵向滚动条出现时再 −10）
+    // 故窗口内宽需 ≥ 1104 才不出现横向滚动条；取 1140 留出余量（字号/滚动条差异）。
+    // 高度沿用 760：列表本身在面板内滚动，加宽即可消除横向滚动条。
     tauri::WebviewWindowBuilder::new(app, "settings", tauri::WebviewUrl::App(url.into()))
         .title("设置")
-        .inner_size(1040.0, 760.0)
-        .min_inner_size(880.0, 640.0)
+        .inner_size(1140.0, 760.0)
+        .min_inner_size(1024.0, 640.0)
         .decorations(false)
         .center()
         .build()

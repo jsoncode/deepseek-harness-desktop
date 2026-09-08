@@ -2061,6 +2061,24 @@ html[data-theme="light"] .pm-detail-desc {
   color: var(--text-2);
 }
 
+/* 模型代理「最近请求」：紧凑两列（时间 / 域名 / 去向 / 上游），随卡片宽度自适应 */
+.settings-proxy-log {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.settings-proxy-log td {
+  padding: 4px 6px 4px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.settings-proxy-log tr:last-child td {
+  border-bottom: none;
+}
+
 /* --------------------------------------------------------------------------
    语音生成历史（TtsHistory，/tts-studio/history）
    -------------------------------------------------------------------------- */

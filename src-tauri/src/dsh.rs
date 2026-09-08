@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -24,6 +24,9 @@ pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
 pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
 pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
+/// 请求主窗口执行「停止 → 重新启动服务」：设置窗口的弹框（模型代理 / 插件变更）
+/// 用它把重启交给主窗口，复用同一套状态机与日志会话处理（见 BottomBar）。
+pub const RESTART_REQUEST_EVENT: &str = "dsh://restart-request";
 /// 会话事件推送的多通道投递负载（见 `session_events::NotifyMessage`）
 pub const NOTIFY_MESSAGE_EVENT: &str = "dsh://notify-message";
 /// 用户点击了系统通知（toast 激活）：负载为 `notify::ActivatePayload`
@@ -66,6 +69,11 @@ pub struct AppState {
     pub active_log: Mutex<Option<ActiveLog>>,
     /// 当前活动插件操作日志会话（无则 None；与服务会话独立，见 logs.rs）
     pub active_plugin_log: Mutex<Option<ActiveLog>>,
+    /// 模型代理运行时（loopback 路由代理；未启用则 None，见 model_proxy.rs）
+    pub model_proxy: Mutex<Option<crate::model_proxy::ModelProxyRuntime>>,
+    /// 当前宿主子进程是否已注入模型代理环境变量（环境变量只在 spawn 时生效一次，
+    /// 与配置的「启用状态」比对即可判断是否需要重启服务）
+    pub model_proxy_injected: AtomicBool,
 }
 
 impl Default for AppState {
@@ -80,6 +88,8 @@ impl Default for AppState {
             voice: Mutex::new(crate::tts::VoiceConfig::default()),
             active_log: Mutex::new(None),
             active_plugin_log: Mutex::new(None),
+            model_proxy: Mutex::new(None),
+            model_proxy_injected: AtomicBool::new(false),
         }
     }
 }
@@ -757,6 +767,61 @@ fn apply_pnpm_env(app: &AppHandle, event: &'static str, cmd: &mut Command) {
     // 持久化（仅 Windows）：幂等补写用户级注册表 PATH
     #[cfg(windows)]
     spawn_persist_user_path(app.clone(), event, strs);
+}
+
+/// 模型代理：按「提供方域名」把宿主出站流量分流到代理或直连。
+///
+/// 宿主启动时会读 `HTTP(S)_PROXY` 装成自己的全局 dispatcher（`@deepseek-ai/dsh-http-proxy`
+/// 在第一个插件挂载前执行），没有按域名的配置入口 —— 所以这里把宿主指向壳内的
+/// loopback 路由代理，由它逐条判定去向（见 model_proxy.rs）。未启用任何规则时
+/// 什么都不注入，宿主行为与之前完全一致。
+fn apply_model_proxy_env(app: &AppHandle, state: &AppState, cmd: &mut Command) {
+    let (port, plan) = match crate::model_proxy::ensure_running(app, state) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => {
+            state.model_proxy_injected.store(false, Ordering::SeqCst);
+            return;
+        }
+        Err(e) => {
+            state.model_proxy_injected.store(false, Ordering::SeqCst);
+            emit_log(app, WEB_LOG_EVENT, "error", &format!("模型代理启动失败: {e}"));
+            return;
+        }
+    };
+    let url = format!("http://127.0.0.1:{port}");
+    for key in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.env(key, &url);
+    }
+    // loopback 必须绕过（否则宿主自己的 Web UI、连接传输与本地测试服务会成环）；
+    // 用户自己的 NO_PROXY 条目一并保留，别替他改绕过规则
+    let no_proxy = crate::model_proxy::no_proxy_env();
+    for key in ["NO_PROXY", "no_proxy"] {
+        cmd.env(key, &no_proxy);
+    }
+    // 宿主派生的 Node 子进程也遵循同一套变量（Node 22.21+/24+ 读该标志）；
+    // 我们只写 http:// 上游，不会触发 Node 启动期对非法 scheme 的退出。
+    cmd.env("NODE_USE_ENV_PROXY", "1");
+    state.model_proxy_injected.store(true, Ordering::SeqCst);
+    let fallback = plan
+        .fallback
+        .clone()
+        .unwrap_or_else(|| "直连".to_string());
+    emit_log(
+        app,
+        WEB_LOG_EVENT,
+        "system",
+        &format!(
+            "已启用模型代理（按提供方域名）：路由代理 {url}，命中规则走 {}，其余走 {fallback}",
+            plan.upstream
+        ),
+    );
 }
 
 /// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）。
@@ -2134,6 +2199,10 @@ fn start_dsh_web_inner(app: AppHandle, state: &AppState) -> Result<(), String> {
         .arg("--port")
         .arg(service_port().to_string())
         .current_dir(&home);
+    // 模型代理：把宿主出站流量指向壳内 loopback 路由代理，由它按「提供方域名」
+    // 逐条决定走代理还是直连（见 model_proxy.rs）。环境变量只在本次 spawn 生效，
+    // 因此开关整个功能需要重启服务；单条规则的热更新不需要。
+    apply_model_proxy_env(&app, state, &mut cmd);
     emit_log(
         &app,
         WEB_LOG_EVENT,
@@ -2395,6 +2464,7 @@ pub fn kill_tree(pid: u32) {
 
 /// 同步停止（仅应用退出钩子使用）：进程即将结束，阻塞无碍。
 pub fn stop_dsh_web_sync(state: &AppState) {
+    crate::model_proxy::stop_quiet(state);
     let pid = state.child_pid.lock().unwrap().take();
     if let Some(pid) = pid {
         kill_tree(pid);
@@ -2415,9 +2485,19 @@ pub fn stop_dsh_web_sync(state: &AppState) {
     *state.detected_url.lock().unwrap() = None;
 }
 
+/// 请求主窗口重启服务（停止 → 重新启动）。
+///
+/// 设置窗口里的弹框（模型代理启用后、插件安装/更新/卸载后）只能发这个请求：
+/// 重启涉及主窗口的状态机（phase / 日志会话 / 跳转服务状态页），由主窗口的
+/// `ServiceRestartHandler` 统一执行，避免两个窗口各跑一套。
+#[tauri::command]
+pub fn request_service_restart(app: AppHandle) {
+    let _ = app.emit(RESTART_REQUEST_EVENT, ());
+}
+
 /// 停止 dsh web：杀树 + 兜底清理耗时秒级，移交线程池执行避免冻结窗口
 #[tauri::command]
-pub async fn stop_dsh_web(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let pid = state.child_pid.lock().unwrap().take();
     let mut urls = state.pending_urls.lock().unwrap().clone();
     // 兜底：无任何 URL 记录时也清理本应用专属端口（覆盖孤儿服务等场景）
@@ -2437,6 +2517,9 @@ pub async fn stop_dsh_web(state: State<'_, AppState>) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("停止服务失败: {e}"))?;
+    // 宿主已停：路由代理没有服务对象，一并回收（下次启动按配置重建）。
+    // 放在杀进程之后，避免停止过程中仍有在途请求被本代理拒连。
+    crate::model_proxy::stop(&app, &state);
     // 服务已停止，清除已探测 URL，避免托盘"浏览器中打开"打开死链
     *state.detected_url.lock().unwrap() = None;
     Ok(())

@@ -1,6 +1,7 @@
 mod credentials;
 mod dsh;
 mod logs;
+mod model_proxy;
 mod notify;
 mod permissions;
 mod preview;
@@ -42,6 +43,7 @@ pub fn run() {
             dsh::refresh_search_path,
             dsh::start_dsh_web,
             dsh::stop_dsh_web,
+            dsh::request_service_restart,
             dsh::open_in_browser,
             settings::open_settings,
             dsh::remove_plugin,
@@ -78,6 +80,10 @@ pub fn run() {
             credentials::fix_credentials,
             proxy_config::get_proxy_config,
             proxy_config::set_proxy_config,
+            model_proxy::get_model_proxy_status,
+            model_proxy::set_model_proxy_config,
+            model_proxy::clear_model_proxy_log,
+            model_proxy::discover_model_proxy_hosts,
             logs::log_start_session,
             logs::log_append,
             logs::log_set_status,

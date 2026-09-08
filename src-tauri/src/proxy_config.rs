@@ -149,7 +149,10 @@ pub fn set_proxy_config(app: AppHandle, config: ProxyConfig) -> Result<(), Strin
         port: config.port,
     };
     let text = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
-    fs::write(&path, text).map_err(|e| format!("保存代理配置失败: {e}"))
+    fs::write(&path, text).map_err(|e| format!("保存代理配置失败: {e}"))?;
+    // 模型代理的上游就取自这份配置：运行中的路由代理就地换上游，不必重启服务
+    crate::model_proxy::reload_upstream(&app);
+    Ok(())
 }
 
 #[cfg(test)]

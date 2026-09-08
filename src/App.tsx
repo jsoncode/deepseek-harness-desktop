@@ -6,6 +6,7 @@ import BottomBar from "./components/BottomBar";
 import CredentialsFixModal from "./components/CredentialsFixModal";
 import NotifyActivateHandler from "./components/NotifyActivateHandler";
 import PluginFailureModal from "./components/PluginFailureModal";
+import ServiceRestartHandler from "./components/ServiceRestartHandler";
 import StudioTitleBar from "./components/StudioTitleBar";
 import TitleBar from "./components/TitleBar";
 import Loading from "./pages/Loading";
@@ -165,6 +166,8 @@ function Shell() {
       <NotifyActivateHandler />
       {/* 插件加载失败弹框：需在 Router 内（弹框前要按当前路由离开预览页） */}
       <PluginFailureModal />
+      {/* 设置窗口请求的重启（模型代理 / 插件变更）：重启状态机只在主窗口跑 */}
+      <ServiceRestartHandler />
       <div className="app-shell">
         <TitleBar />
         <div className="app-content" key={reloadKey}>

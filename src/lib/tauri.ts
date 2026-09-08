@@ -76,6 +76,58 @@ export interface ProxyConfig {
   port: number | null;
 }
 
+/** 一条模型代理规则：按提供方域名决定是否走代理 */
+export interface ModelProxyRule {
+  /** 提供方域名，如 api.openai.com；写 example.com 同时匹配其子域名 */
+  host: string;
+  /** 是否让该域名的模型请求走「安装代理」 */
+  enabled: boolean;
+}
+
+/** 一次被路由的请求（设置页「最近请求」） */
+export interface ModelProxyRequest {
+  /** unix 毫秒 */
+  ts: number;
+  host: string;
+  port: number;
+  /** "proxy" = 走了代理；"direct" = 直连 */
+  via: "proxy" | "direct";
+  upstream: string | null;
+  ok: boolean;
+  error: string | null;
+}
+
+/** 模型代理运行时状态：与 Rust `model_proxy::ModelProxyStatus` 同形 */
+export interface ModelProxyStatus {
+  /** 路由代理是否在监听 */
+  running: boolean;
+  /** 监听端口；未运行时 null */
+  port: number | null;
+  /** 当前宿主进程是否已注入代理环境变量 */
+  injected: boolean;
+  /** 命中规则时使用的上游（来自「安装代理」配置） */
+  upstream: string | null;
+  /** 未命中规则的流量使用的上游（来自壳进程自身的代理环境变量） */
+  fallback: string | null;
+  rules: ModelProxyRule[];
+  /** 最近请求（新→旧） */
+  requests: ModelProxyRequest[];
+  /** 未生效 / 不可用的原因 */
+  reason: string | null;
+  /** 改动是否需要重启服务才生效 */
+  restartRequired: boolean;
+}
+
+/** 被发现的提供方域名 */
+export interface DiscoveredHost {
+  host: string;
+  /** "settings" = 来自 $DSH_HOME/settings.yaml；"observed" = 代理实际见过 */
+  source: "settings" | "observed";
+  provider: string | null;
+  lastSeen: number | null;
+  hits: number;
+}
+
 /** 日志会话元信息（设置页日志管理列表） */
 export interface LogSessionMeta {
   id: string;
@@ -108,6 +160,8 @@ export const EVENTS = {
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
+  /** 设置窗口请求主窗口重启服务（模型代理启用 / 插件变更后的弹框，见 ServiceRestartHandler） */
+  restartRequest: "dsh://restart-request",
   /** preview 子 webview 桥接上报：宿主主题切换（dark 布尔，见 preview.rs THEME_SYNC_BRIDGE） */
   previewTheme: "dsh://preview-theme",
   /** preview 子 webview 桥接上报：插件加载失败（items = 失败插件名，见 PLUGIN_FAILURE_BRIDGE） */
@@ -316,6 +370,8 @@ export const api = {
   refreshSearchPath: () => requireTauri(() => invoke<void>("refresh_search_path")),
   startDshWeb: () => requireTauri(() => invoke<void>("start_dsh_web")),
   stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
+  /** 请求主窗口重启服务（停止 → 重新启动）：设置窗口的弹框用，实际动作由主窗口执行 */
+  requestServiceRestart: () => requireTauri(() => invoke<void>("request_service_restart")),
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
   /** 打开设置独立窗口（已开则聚焦并切到目标分区）：主窗口所有设置入口统一走此命令。
    *  section 省略时仅聚焦（不重置用户所在分区）；
@@ -441,6 +497,17 @@ export const api = {
   /** 保存安装临时代理配置：仅对后续的安装类子进程生效 */
   setProxyConfig: (config: ProxyConfig) =>
     requireTauri(() => invoke<void>("set_proxy_config", { config })),
+  /** 模型代理状态：规则表、运行态、上游与最近请求（设置页「模型代理」卡片） */
+  getModelProxyStatus: () =>
+    requireTauri(() => invoke<ModelProxyStatus>("get_model_proxy_status")),
+  /** 保存模型代理规则：单条规则即时生效；启用/停用需要重启服务（restartRequired） */
+  setModelProxyConfig: (config: { rules: ModelProxyRule[] }) =>
+    requireTauri(() => invoke<ModelProxyStatus>("set_model_proxy_config", { config })),
+  /** 清空模型代理的「最近请求」日志 */
+  clearModelProxyLog: () => requireTauri(() => invoke<void>("clear_model_proxy_log")),
+  /** 发现提供方域名：settings.yaml 里配置的 + 路由代理实际见过的 */
+  discoverModelProxyHosts: () =>
+    requireTauri(() => invoke<DiscoveredHost[]>("discover_model_proxy_hosts")),
   /** 开始新日志会话（finalize 旧会话），返回会话 id 与会话建立前暂存的服务日志
    *  （乐观启动时 Rust 会先于前端订阅事件拉起服务，那些行由后端补写文件并回传） */
   logStartSession: (title: string) =>

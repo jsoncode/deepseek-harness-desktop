@@ -187,16 +187,45 @@ export default function PluginManagerPanel() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [pluginOpLogs.at(-1)?.id]);
 
-  // 完成监听：running → false 转变时提示并刷新列表与版本信息（无论面板是否挂载）
+  // 完成监听：running → false 转变时刷新列表与版本信息，并弹框提示重启。
+  // 插件是启动时按 profile bundles 加载的，装/更/卸之后必须重启服务才会真正生效
+  // （旧实现只弹一条 message，容易被忽略）。确认后只发重启请求，实际重启由主窗口执行
+  // （见 ServiceRestartHandler）——设置窗口不该自己跑一套启动状态机。
   useEffect(() => {
     const running = pluginOp?.running ?? false;
     if (prevRunningRef.current && !running && pluginOp) {
-      message.info("插件已变更，请稍后刷新页面或重启服务");
       void refreshStatus();
       void refreshPluginVersions();
+      if (pluginOp.exitCode === 0) {
+        const verb = OP_VERB[pluginOp.kind];
+        modal.confirm({
+          title: `插件已${verb}，需要重启服务才能生效`,
+          content: (
+            <div>
+              <p style={{ margin: "0 0 8px" }}>
+                <b>{pluginOp.name}</b> 已{verb}。插件在宿主启动时随 profile 加载，
+                重启服务后才会真正生效。
+              </p>
+              <p style={{ margin: 0, color: "var(--text-3)", fontSize: 12.5 }}>
+                重启会中断当前正在进行的对话；选择「稍后」可随时用底部导航条的
+                「重启服务」完成。
+              </p>
+            </div>
+          ),
+          okText: "立即重启",
+          cancelText: "稍后",
+          width: 460,
+          onOk: async () => {
+            await api.requestServiceRestart();
+            message.success("已请求重启服务，稍后可在主窗口查看进度");
+          },
+        });
+      } else {
+        message.error(`插件${OP_VERB[pluginOp.kind]}失败（退出码 ${pluginOp.exitCode ?? "?"}）`);
+      }
     }
     prevRunningRef.current = running;
-  }, [pluginOp?.running, pluginOp, message, refreshStatus, refreshPluginVersions]);
+  }, [pluginOp?.running, pluginOp, modal, message, refreshStatus, refreshPluginVersions]);
 
   if (!tauri) {
     return (
