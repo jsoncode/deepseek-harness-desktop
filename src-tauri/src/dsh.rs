@@ -64,6 +64,8 @@ pub struct AppState {
     pub voice: Mutex<crate::tts::VoiceConfig>,
     /// 当前活动日志会话（无则 None；见 logs.rs）
     pub active_log: Mutex<Option<ActiveLog>>,
+    /// 当前活动插件操作日志会话（无则 None；与服务会话独立，见 logs.rs）
+    pub active_plugin_log: Mutex<Option<ActiveLog>>,
 }
 
 impl Default for AppState {
@@ -77,6 +79,7 @@ impl Default for AppState {
             notify_style: AtomicU8::new(1),
             voice: Mutex::new(crate::tts::VoiceConfig::default()),
             active_log: Mutex::new(None),
+            active_plugin_log: Mutex::new(None),
         }
     }
 }
@@ -227,21 +230,38 @@ fn resolve_node() -> Option<PathBuf> {
 
 /// 执行 `<program> [args...] --version` 并解析首行输出版本号（去前导 v，如 `22.21.1`）。
 ///
-/// 带 2 秒超时：子进程挂起时不阻塞 app_status；失败/超时/输出不合预期一律 None。
-/// 输出首行必须形如 `major.minor[.patch]` 才视为有效版本。
+/// 失败/超时/输出不合预期一律 None。带一次重试：Windows 下 pnpm/dsh 是 .cmd 垫片
+/// （cmd.exe → node 启动），服务运行、杀软扫描等负载下首读可能超过单次超时——
+/// 读慢不等于损坏，误判会驱动错误链路（启动链把读不出版本的 dsh 当作安装损坏
+/// 而重装、界面显示「可能已损坏」）。单次超时 5 秒，两次最坏 10 秒出头，仅在
+/// 工具真正挂起时才会付满，正常情况首次即返回。
 fn read_exec_version(program: &str, args: &[String]) -> Option<String> {
-    let mut cmd = Command::new(program);
-    cmd.args(args).arg("--version");
-    let output = run_with_timeout(cmd, Duration::from_secs(2))?;
-    if !output.status.success() {
-        return None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let mut cmd = Command::new(program);
+        cmd.args(args).arg("--version");
+        let Some(output) = run_with_timeout(cmd, Duration::from_secs(5)) else {
+            continue; // 超时/ spawn 失败：重试一次
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = text.lines().next() else {
+            continue;
+        };
+        let line = line.trim();
+        let ver = line.strip_prefix('v').unwrap_or(line);
+        let mut parts = ver.split('.');
+        match parts.next().and_then(|p| p.parse::<u64>().ok()) {
+            Some(_) => return Some(ver.to_string()),
+            // 输出首行不是版本号：重试一次（垫片冷启动偶发输出异常），仍无效才放弃
+            None => continue,
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().next()?.trim();
-    let ver = line.strip_prefix('v').unwrap_or(line);
-    let mut parts = ver.split('.');
-    parts.next()?.parse::<u64>().ok()?;
-    Some(ver.to_string())
+    None
 }
 
 /// 执行 `<program> --version` 并解析首行输出版本号（node / pnpm 等无前置参数的工具）
@@ -327,10 +347,21 @@ fn merge_login_shell_path() {
     }
 }
 
-/// 环境检测前的搜索路径兜底：macOS 合并登录 shell PATH；其他平台为 no-op。
+/// 环境检测前的搜索路径兜底：GUI 进程的 PATH 是启动时刻的快照，工具/安装器
+/// 之后写入注册表或登录 shell 配置的新目录不会出现在其中——刚装好的
+/// node/pnpm、nvm 切换版本后的目录会因此探测不到，误判「未安装」。
+/// macOS 合并登录 shell PATH；Windows 合并注册表 Machine/User PATH
+/// （PowerShell 冷启动数秒，进程内只执行一次；失败静默，保留启动时的旧 PATH）。
 pub fn ensure_search_path() {
     #[cfg(target_os = "macos")]
     merge_login_shell_path();
+    #[cfg(windows)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = refresh_windows_path();
+        });
+    }
 }
 
 /// 读取用户环境目录（如 %LOCALAPPDATA%）
@@ -1094,7 +1125,7 @@ fn extract_urls(line: &str) -> Vec<String> {
 // 日志 / 进程泵
 // ---------------------------------------------------------------------------
 
-fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
+pub(crate) fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
     let _ = app.emit(
         event,
         LogLine {
@@ -1102,6 +1133,13 @@ fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
             line: line.to_string(),
         },
     );
+}
+
+/// 插件操作日志：发事件给前端终端的同时镜像写入插件日志会话文件
+/// （日志管理可事后查看，见 logs.rs）
+pub(crate) fn emit_plugin_log(app: &AppHandle, stream: &str, line: &str) {
+    emit_log(app, PLUGIN_OP_LOG_EVENT, stream, line);
+    crate::logs::append_active_plugin_log(app, stream, line);
 }
 
 /// 泵送子进程 stdout/stderr 直到进程退出，返回退出码；不负责发出 exit 事件。
@@ -1127,6 +1165,9 @@ pub(crate) fn pump_streams_until_exit(
                 if log_event == WEB_LOG_EVENT {
                     try_detect_url(&app_out, &line);
                 }
+                if log_event == PLUGIN_OP_LOG_EVENT {
+                    crate::logs::append_active_plugin_log(&app_out, "stdout", &line);
+                }
             }
         }
     });
@@ -1138,6 +1179,9 @@ pub(crate) fn pump_streams_until_exit(
             for line in reader.lines().map_while(Result::ok) {
                 let line = line.trim_end_matches('\r').to_string();
                 emit_log(&app_err, log_event, "stderr", &line);
+                if log_event == PLUGIN_OP_LOG_EVENT {
+                    crate::logs::append_active_plugin_log(&app_err, "stderr", &line);
+                }
             }
         }
     });
@@ -1149,9 +1193,16 @@ pub(crate) fn pump_streams_until_exit(
 }
 
 /// 读取子进程 stdout/stderr 并逐行发出事件；进程结束后发出 exit 事件。
-fn pump_process(app: &AppHandle, child: Child, log_event: &'static str, exit_event: &'static str) {
+/// 返回退出码（run_plugin_op 据此落插件日志会话状态）
+fn pump_process(
+    app: &AppHandle,
+    child: Child,
+    log_event: &'static str,
+    exit_event: &'static str,
+) -> i32 {
     let code = pump_streams_until_exit(app, child, log_event);
     let _ = app.emit(exit_event, ExitPayload { code });
+    code
 }
 
 /// 从输出行里尝试探测 URL；记录候选并只处理一次成功
@@ -1343,16 +1394,37 @@ pub async fn probe_service(url: String) -> Result<bool, String> {
         .map_err(|e| format!("服务探测任务异常: {e}"))
 }
 
+/// 回显真实命令行：从实际要 spawn 的 Command 取 program + 全部 argv 原样拼接
+/// （含空格/空参数时加引号）。终端里的 `$` 行必须与真实执行的命令一致，
+/// 不允许手写拼接（此前手写回显漏过 --port、镜像参数与 powershell 包装）。
+fn display_cmd(cmd: &Command) -> String {
+    let mut line = cmd.get_program().to_string_lossy().into_owned();
+    for a in cmd.get_args() {
+        let a = a.to_string_lossy();
+        if a.is_empty() || a.contains(' ') {
+            line.push_str(&format!(" \"{}\"", a.replace('"', "\\\"")));
+        } else {
+            line.push(' ');
+            line.push_str(&a);
+        }
+    }
+    line
+}
+
 /// 流式启动一个安装子进程：命令行回显与输出经 log_event 逐行转发，
 /// 退出码经 exit_event 异步通知前端续接下一步。
 fn spawn_streamed(
     app: AppHandle,
-    display: &str,
     mut cmd: Command,
     log_event: &'static str,
     exit_event: &'static str,
 ) -> Result<(), String> {
-    emit_log(&app, log_event, "system", &format!("$ {display}"));
+    emit_log(
+        &app,
+        log_event,
+        "system",
+        &format!("$ {}", display_cmd(&cmd)),
+    );
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -1405,17 +1477,8 @@ fn install_tool_node(app: AppHandle) -> Result<(), String> {
             "--accept-source-agreements",
             "--disable-interactivity",
         ]);
-        let display = format!(
-            "{} install -e --id OpenJS.NodeJS.LTS --silent",
-            winget.display()
-        );
-        return spawn_streamed(
-            app,
-            &display,
-            cmd,
-            ENV_INSTALL_LOG_EVENT,
-            ENV_INSTALL_EXIT_EVENT,
-        );
+        crate::proxy_config::apply_proxy_env(&app, ENV_INSTALL_LOG_EVENT, &mut cmd);
+        return spawn_streamed(app, cmd, ENV_INSTALL_LOG_EVENT, ENV_INSTALL_EXIT_EVENT);
     }
     #[cfg(target_os = "macos")]
     {
@@ -1428,14 +1491,8 @@ fn install_tool_node(app: AppHandle) -> Result<(), String> {
             )?;
         let mut cmd = Command::new(&brew);
         cmd.args(["install", "node"]);
-        let display = format!("{} install node", brew.display());
-        return spawn_streamed(
-            app,
-            &display,
-            cmd,
-            ENV_INSTALL_LOG_EVENT,
-            ENV_INSTALL_EXIT_EVENT,
-        );
+        crate::proxy_config::apply_proxy_env(&app, ENV_INSTALL_LOG_EVENT, &mut cmd);
+        return spawn_streamed(app, cmd, ENV_INSTALL_LOG_EVENT, ENV_INSTALL_EXIT_EVENT);
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -1452,14 +1509,8 @@ fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
     // 锁定 pnpm 10 主版本：dsh 与 pnpm 11 的全局虚拟仓库布局不兼容，不能用默认 latest（11.x）
     cmd.args(["install", "-g", "pnpm@10"]);
     cmd.args(npm_mirror_args());
-    let display = format!("{} install -g pnpm@10", npm.display());
-    spawn_streamed(
-        app,
-        &display,
-        cmd,
-        ENV_INSTALL_LOG_EVENT,
-        ENV_INSTALL_EXIT_EVENT,
-    )
+    crate::proxy_config::apply_proxy_env(&app, ENV_INSTALL_LOG_EVENT, &mut cmd);
+    spawn_streamed(app, cmd, ENV_INSTALL_LOG_EVENT, ENV_INSTALL_EXIT_EVENT)
 }
 
 /// 刷新本进程的 PATH：Windows 经 PowerShell 读注册表 Machine/User Path
@@ -1474,35 +1525,39 @@ pub async fn refresh_search_path() -> Result<(), String> {
         .map_err(|e| format!("刷新 PATH 失败: {e}"))?
 }
 
+#[cfg(windows)]
+fn refresh_windows_path() -> Result<(), String> {
+    const SCRIPT: &str = concat!(
+        "$m=[Environment]::GetEnvironmentVariable('Path','Machine');",
+        "$u=[Environment]::GetEnvironmentVariable('Path','User');",
+        "($m,$u | Where-Object { $_ }) -join ';'"
+    );
+    let out = run_with_timeout(
+        {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
+            c
+        },
+        Duration::from_secs(8),
+    )
+    .ok_or("读取系统 PATH 超时")?;
+    if !out.status.success() {
+        return Err("读取系统 PATH 失败".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let dirs: Vec<String> = text
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    merge_into_process_path(dirs);
+    Ok(())
+}
+
 fn refresh_search_path_blocking() -> Result<(), String> {
     ensure_search_path();
     #[cfg(windows)]
-    {
-        const SCRIPT: &str = concat!(
-            "$m=[Environment]::GetEnvironmentVariable('Path','Machine');",
-            "$u=[Environment]::GetEnvironmentVariable('Path','User');",
-            "($m,$u | Where-Object { $_ }) -join ';'"
-        );
-        let out = run_with_timeout(
-            {
-                let mut c = Command::new("powershell");
-                c.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
-                c
-            },
-            Duration::from_secs(8),
-        )
-        .ok_or("读取系统 PATH 超时")?;
-        if !out.status.success() {
-            return Err("读取系统 PATH 失败".into());
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let dirs: Vec<String> = text
-            .split(';')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        merge_into_process_path(dirs);
-    }
+    refresh_windows_path()?;
     Ok(())
 }
 /// 全局安装 @deepseek-ai/dsh@latest（流式输出）。
@@ -1520,12 +1575,6 @@ fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
     let pnpm =
         resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
     log_npm_mirror(&app, INSTALL_LOG_EVENT);
-    emit_log(
-        &app,
-        INSTALL_LOG_EVENT,
-        "system",
-        &format!("$ {} add -g @deepseek-ai/dsh@latest", pnpm.display()),
-    );
     let mut cmd = Command::new(&pnpm);
     cmd.args(["add", "-g", "@deepseek-ai/dsh@latest"])
         // 关闭“清除模块目录”确认提示（无 TTY 时直接报 ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）
@@ -1534,6 +1583,13 @@ fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
     // 未运行 pnpm setup 的机器会因全局目录不在 PATH 失败（pnpm ≥11 必然触发校验），
     // 这里显式补齐；同时合并进程 PATH 并持久化到用户注册表（详见 apply_pnpm_env）
     apply_pnpm_env(&app, INSTALL_LOG_EVENT, &mut cmd);
+    crate::proxy_config::apply_proxy_env(&app, INSTALL_LOG_EVENT, &mut cmd);
+    emit_log(
+        &app,
+        INSTALL_LOG_EVENT,
+        "system",
+        &format!("$ {}", display_cmd(&cmd)),
+    );
     let child = hide_window(&mut cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1554,42 +1610,20 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
         return Ok(()); // 已在运行
     }
     // 收养遗留的孤儿服务：如安装新版本时安装器强杀了旧应用，dsh web 仍在占用服务端口。
-    // 旧版宿主的裸地址即可访问 → 直接接管（可停止/继续使用）；
-    // 新版宿主要求进程 token（页面地址带查询串），遗留实例的 token 无法从外部恢复、
-    // 裸地址恒 401 → 接管没有意义，改为停掉后重新拉起一个新实例（新实例的 token
-    // 会出现在启动日志里，被正常解析并广播）。
+    // 仅收养裸地址可直接使用的实例（旧版宿主，接管后可停止/继续使用）；token 锁死的
+    // 遗留实例不收养，落到下方启动链：ensure_port_free 杀掉后重新拉起一个新实例
+    // （新实例的 token 会出现在启动日志里，被正常解析并广播）。
     if adopt_orphan_service(&state) {
-        let url = state.detected_url.lock().unwrap().clone();
-        let usable_without_token = url
-            .as_deref()
-            .and_then(|u| probe_http_status(u, 500))
-            .is_some_and(|code| (200..400).contains(&code));
-        if !usable_without_token {
-            emit_log(
-                &app,
-                WEB_LOG_EVENT,
-                "system",
-                "检测到遗留服务实例需要访问 token 且无法从外部恢复，已停止并重新启动服务…",
-            );
-            if let Some(pid) = state.child_pid.lock().unwrap().take() {
-                kill_tree(pid);
-            }
-            *state.detected_url.lock().unwrap() = None;
-            state.pending_urls.lock().unwrap().clear();
-            // 等待端口释放，避免新实例绑定失败
-            std::thread::sleep(Duration::from_millis(400));
-        } else {
-            emit_log(
-                &app,
-                WEB_LOG_EVENT,
-                "system",
-                "检测到上次未正常退出遗留的服务实例，已接管（可直接停止或继续使用）",
-            );
-            if let Some(url) = url {
-                let _ = app.emit(URL_EVENT, UrlPayload { url });
-            }
-            return Ok(());
+        emit_log(
+            &app,
+            WEB_LOG_EVENT,
+            "system",
+            "检测到上次未正常退出遗留的服务实例，已接管（可直接停止或继续使用）",
+        );
+        if let Some(url) = state.detected_url.lock().unwrap().clone() {
+            let _ = app.emit(URL_EVENT, UrlPayload { url });
         }
+        return Ok(());
     }
     // 新子进程 → 重置上一轮的探测结果，避免误用外部实例/旧 URL
     *state.detected_url.lock().unwrap() = None;
@@ -1628,26 +1662,37 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
             "dsh 安装已损坏（无法读取版本），请点击「安装」重新全局安装 @deepseek-ai/dsh".into(),
         );
     }
+    // 启动前确保服务端口真正空闲（覆盖上面 taskkill 后的等待）：
+    // 端口未释放就 spawn 会让新实例绑定失败，而 dsh web 绑定失败不会退出、
+    // 只会原地重试，前端就会永远停留在「启动中」。
+    if !ensure_port_free(&app) {
+        let port = service_port();
+        let msg = format!(
+            "服务端口 {port} 被其他进程占用且无法释放，本次启动已取消，请结束占用该端口的进程后重试"
+        );
+        emit_log(&app, WEB_LOG_EVENT, "error", &msg);
+        return Err(msg);
+    }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".into());
-    emit_log(
-        &app,
-        WEB_LOG_EVENT,
-        "system",
-        // --no-open：dsh web 默认会在服务就绪后调用系统浏览器打开 UI（见
-        // @deepseek-ai/dsh-web-app 的 openBrowser 配置），桌面壳自身以 iframe 承载 UI，必须禁用
-        &format!("$ {} web --no-open", dsh.display),
-    );
-
     let mut cmd = Command::new(&dsh.program);
+    // --no-open：dsh web 默认会在服务就绪后调用系统浏览器打开 UI（见
+    // @deepseek-ai/dsh-web-app 的 openBrowser 配置），桌面壳自身以 iframe 承载 UI，必须禁用；
+    // --port 随构建类型固定（dev 6088 / release 3080），测试实例与正式实例互不侵占端口
     cmd.args(&dsh.args)
         .arg("web")
         .arg("--no-open")
         .arg("--port")
         .arg(service_port().to_string())
-        .current_dir(&home)
-        .stdout(Stdio::piped())
+        .current_dir(&home);
+    emit_log(
+        &app,
+        WEB_LOG_EVENT,
+        "system",
+        &format!("$ {}", display_cmd(&cmd)),
+    );
+    cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
     let child = hide_window(&mut cmd)
@@ -1746,6 +1791,21 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
             }
             std::thread::sleep(Duration::from_millis(400));
         }
+        // 探测窗口耗尽仍无就绪地址：进程可能活着但卡死/绑定失败（dsh web 绑定
+        // 失败不会自行退出）。杀掉进程树并释放端口，让泵线程把进程退出如实
+        // 上报为「启动失败」，前端给出重试入口，而不是永远停留在「启动中」。
+        if let Some(s) = app3.try_state::<AppState>() {
+            if let Some(pid) = s.child_pid.lock().unwrap().take() {
+                emit_log(
+                    &app3,
+                    WEB_LOG_EVENT,
+                    "system",
+                    "长时间未检测到服务就绪（日志中未出现服务地址），已终止本次启动进程…",
+                );
+                kill_tree(pid);
+                ensure_port_free(&app3);
+            }
+        }
     });
     Ok(())
 }
@@ -1787,12 +1847,15 @@ pub fn run_plugin_op(
         name: name.clone(),
     });
 
-    emit_log(
-        &app,
-        PLUGIN_OP_LOG_EVENT,
-        "system",
-        &format!("$ dsh plugin --profile web {op} {name}"),
-    );
+    // 每次插件操作一条独立日志会话（日志管理可事后查看），失败不阻塞操作本身
+    let op_verb = match op.as_str() {
+        "add" => "安装",
+        "update" => "更新",
+        _ => "卸载",
+    };
+    if let Err(e) = crate::logs::start_plugin_session(&app, &format!("{op_verb}插件 {name}")) {
+        eprintln!("[plugin-op] 创建插件日志会话失败: {e}");
+    }
 
     let mut cmd = Command::new(&dsh.program);
     cmd.args(&dsh.args)
@@ -1800,8 +1863,9 @@ pub fn run_plugin_op(
         .arg("--profile")
         .arg("web")
         .arg(&op)
-        .arg(&name)
-        .stdout(Stdio::piped())
+        .arg(&name);
+    emit_plugin_log(&app, "system", &format!("$ {}", display_cmd(&cmd)));
+    cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
 
@@ -1809,6 +1873,7 @@ pub fn run_plugin_op(
     // 并关闭“清除模块目录”确认提示（无 TTY 时直接失败），经环境变量传递给 dsh 内部的 pnpm
     apply_pnpm_env(&app, PLUGIN_OP_LOG_EVENT, &mut cmd);
     cmd.env("npm_config_confirm_modules_purge", "false");
+    crate::proxy_config::apply_proxy_env(&app, PLUGIN_OP_LOG_EVENT, &mut cmd);
 
     match hide_window(&mut cmd).spawn() {
         Ok(child) => {
@@ -1816,15 +1881,19 @@ pub fn run_plugin_op(
             if let Some(st) = state.plugin_op.lock().unwrap().as_mut() {
                 st.pid = pid;
             }
-            emit_log(
+            emit_plugin_log(
                 &app,
-                PLUGIN_OP_LOG_EVENT,
                 "system",
                 &format!("进程已启动（PID {pid}），输出如下"),
             );
             let app2 = app.clone();
             std::thread::spawn(move || {
-                pump_process(&app2, child, PLUGIN_OP_LOG_EVENT, PLUGIN_OP_EXIT_EVENT);
+                let code = pump_process(&app2, child, PLUGIN_OP_LOG_EVENT, PLUGIN_OP_EXIT_EVENT);
+                // 按退出码落插件日志会话状态并补写结束时间
+                crate::logs::finish_active_plugin_session(
+                    &app2,
+                    if code == 0 { "success" } else { "error" },
+                );
                 if let Some(s) = app2.try_state::<AppState>() {
                     *s.plugin_op.lock().unwrap() = None;
                 }
@@ -1833,12 +1902,8 @@ pub fn run_plugin_op(
         }
         Err(e) => {
             *state.plugin_op.lock().unwrap() = None;
-            emit_log(
-                &app,
-                PLUGIN_OP_LOG_EVENT,
-                "error",
-                &format!("启动失败: {e}"),
-            );
+            emit_plugin_log(&app, "error", &format!("启动失败: {e}"));
+            crate::logs::finish_active_plugin_session(&app, "error");
             Err(format!("启动插件操作失败: {e}"))
         }
     }
@@ -1987,6 +2052,32 @@ fn kill_listener(port: u16) {
     }
 }
 
+/// 确保服务端口空闲（最长约 8 秒）：taskkill /T /F 是异步树杀，kill 返回后
+/// 监听套接字未必立即关闭，固定 sleep 会把「端口未释放」留给新实例——
+/// dsh web 绑定失败不会退出、只原地重试，前端会永远停在「启动中」。
+/// 这里每 200ms 复查一次监听者，仍在则补杀。本端口号为本应用专属
+/// （dev 6088 / release 3080），清理不会误伤无关进程。
+/// 返回 false 表示超时仍无法释放，调用方应放弃本次启动并给出明确错误。
+fn ensure_port_free(app: &AppHandle) -> bool {
+    let port = service_port();
+    for attempt in 0..40u8 {
+        if listener_pids(port).is_empty() {
+            return true;
+        }
+        if attempt == 0 {
+            emit_log(
+                app,
+                WEB_LOG_EVENT,
+                "system",
+                &format!("服务端口 {port} 仍有进程监听，正在等待释放…"),
+            );
+        }
+        kill_listener(port);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    listener_pids(port).is_empty()
+}
+
 /// 收养遗留的孤儿服务实例，返回是否发生收养。
 ///
 /// 场景：应用运行中已启动服务，此时用户安装新版本——安装器会【强制结束】本应用进程，
@@ -1994,9 +2085,17 @@ fn kill_listener(port: u16) {
 /// 孤儿并继续占用服务端口。重装后打开的新实例 AppState 全新（child_pid/pending_urls
 /// 均为空），点"停止"会静默无效、"重启"会拉起一个绑定失败的重复实例。
 ///
-/// 处理：检查本应用专属服务端口上是否有监听；有则把监听进程 PID 记入 child_pid、
-/// 把默认 URL 记入 pending_urls/detected_url。之后停止（杀树 + 按端口兜底）与重启
-/// 即恢复正常。只探测本应用固定服务端口（dev/release 天然隔离），绝不误伤其他进程。
+/// 处理：检查本应用专属服务端口上是否有监听；有且裸地址可直接使用（非 401/403，
+/// 旧版宿主）才收养——把监听进程 PID 记入 child_pid、把默认 URL 记入
+/// pending_urls/detected_url，之后停止（杀树 + 按端口兜底）与重启即恢复正常。
+///
+/// token 锁死的遗留实例（新版宿主，裸地址恒 401/403）不收养：若只记 child_pid，
+/// app_status 会报 child_running=true + service_running=false，前端 settleStatus
+/// 映射为 starting，Loading 自动启动守卫随即跳过启动链，「杀掉遗留实例重新拉起」
+/// 的恢复逻辑永远没机会执行——界面永远停在「正在启动服务」。保持状态干净，交给
+/// 启动链处理：ensure_port_free 会在 spawn 前杀掉该实例并等端口释放，再拉起带
+/// 可用 token 的新实例。只探测本应用固定服务端口（dev/release 天然隔离），
+/// 绝不误伤其他进程。
 ///
 /// 注意：收养的 PID 没有 pump 线程看护，若孤儿后续自行退出，child_pid 会残留到下次
 /// 停止时由 taskkill 对失效 PID 的空操作与端口兜底自然消化，无副作用。
@@ -2008,6 +2107,10 @@ pub fn adopt_orphan_service(state: &AppState) -> bool {
     let pids = listener_pids(port);
     if pids.is_empty() {
         return false;
+    }
+    let url = format!("http://127.0.0.1:{port}");
+    if !is_url_usable_without_auth(&url, 500) {
+        return false; // 需要访问 token 或不可达：不收养，交给启动链重新拉起
     }
     // 记录第一个监听者作为主管理对象；同端口其余监听者由停止时的按端口兜底统一清理
     *state.child_pid.lock().unwrap() = Some(pids[0]);
@@ -2023,10 +2126,7 @@ pub fn adopt_orphan_service(state: &AppState) -> bool {
         }
     }
     if state.detected_url.lock().unwrap().is_none() {
-        let url = format!("http://127.0.0.1:{port}");
-        if probe_url(&url, 400) {
-            *state.detected_url.lock().unwrap() = Some(url);
-        }
+        *state.detected_url.lock().unwrap() = Some(url);
     }
     true
 }
@@ -2113,13 +2213,36 @@ fn read_profile_plugins() -> (bool, Vec<String>) {
     (true, plugins)
 }
 
+/// 从 profile package.json 卸载插件（命令包装）：写入插件日志会话后转交内部实现
+#[tauri::command]
+pub fn remove_plugin(app: AppHandle, name: String) -> Result<(), String> {
+    if let Err(e) = crate::logs::start_plugin_session(&app, &format!("卸载插件 {name}")) {
+        eprintln!("[plugin-op] 创建插件日志会话失败: {e}");
+    }
+    let r = remove_plugin_inner(name);
+    match &r {
+        Ok(_) => {
+            crate::logs::append_active_plugin_log(
+                &app,
+                "system",
+                "已从 profile 移除插件，登记的依赖将在下次启动时清理",
+            );
+            crate::logs::finish_active_plugin_session(&app, "success");
+        }
+        Err(e) => {
+            crate::logs::append_active_plugin_log(&app, "error", e);
+            crate::logs::finish_active_plugin_session(&app, "error");
+        }
+    }
+    r
+}
+
 /// 从 profile package.json 卸载插件：仅从 bundles 数组移除该名字，并把名字登记到
 /// dsh.profile.pendingRemovals；dependencies 键保留不动——真正的依赖移除推迟到
 /// 下次启动（start_dsh_web 启动前清理登记表，见 prune_pending_plugin_deps），
 /// 避免服务运行中直接卸载模块导致服务崩溃。
 /// 写回时保持键顺序（preserve_order）与两空格缩进
-#[tauri::command]
-pub fn remove_plugin(name: String) -> Result<(), String> {
+fn remove_plugin_inner(name: String) -> Result<(), String> {
     let path =
         profile_package_json().ok_or("未找到插件目录（%USERPROFILE%\\.dsh\\profiles\\web）")?;
     let text =

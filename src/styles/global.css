@@ -191,126 +191,8 @@ body {
 }
 
 /* ==========================================================================
-   启动页
+   环境检测卡片（设置-关于本应用-系统环境）
    ========================================================================== */
-
-.launch {
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-
-.launch-logo-wrap {
-  margin-bottom: 26px;
-  animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.launch-logo {
-  width: 96px;
-  height: 96px;
-  border-radius: 26px;
-  display: grid;
-  place-items: center;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02)),
-    rgba(10, 13, 20, 0.6);
-  border: 1px solid var(--border-strong);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  box-shadow:
-    0 24px 60px -18px rgba(99, 102, 241, 0.45),
-    0 8px 24px -8px rgba(0, 0, 0, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  position: relative;
-}
-
-.launch-logo::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: 27px;
-  padding: 1px;
-  background: linear-gradient(150deg, rgba(99, 102, 241, 0.7), rgba(34, 211, 238, 0.4), transparent 60%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-}
-
-.launch-logo img {
-  width: 52px;
-  height: 52px;
-  filter: drop-shadow(0 4px 14px rgba(99, 102, 241, 0.55));
-}
-
-.launch-title {
-  margin: 0;
-  font-size: 42px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.15;
-  background: linear-gradient(120deg, #ffffff 20%, #c7d2fe 55%, #7dd3fc 90%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  animation: fadeUp 0.7s 0.08s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.launch-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 30px 0 22px;
-  padding: 8px 16px;
-  border-radius: 999px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  font-size: 13px;
-  color: var(--text-2);
-  animation: fadeUp 0.7s 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.launch-status .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-3);
-}
-
-.launch-status.running .dot {
-  background: var(--success);
-  animation: pulseDot 2s ease-in-out infinite;
-}
-
-.launch-status.error .dot {
-  background: var(--danger);
-}
-
-.launch-status.busy .dot {
-  background: var(--warn);
-  animation: pulseDot 1.6s ease-in-out infinite;
-}
-
-.launch-status .url-text {
-  font-family: var(--mono);
-  color: var(--text-1);
-  font-size: 12.5px;
-}
-
-/* 浏览器预览模式提示（直接访问 vite dev server 时展示） */
-.launch-preview-note {
-  margin: -6px 0 6px;
-  padding: 7px 14px;
-  border-radius: 10px;
-  background: var(--panel);
-  border: 1px dashed var(--border-strong);
-  font-size: 12.5px;
-  color: var(--text-2);
-  max-width: 460px;
-  text-align: center;
-  animation: fadeUp 0.7s 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
 
 /* 环境检查卡片：逐项展示 Node.js / pnpm / dsh 状态 */
 .env-card {
@@ -407,35 +289,6 @@ body {
   color: var(--danger);
 }
 
-/* Plugins 小节：用户插件列表（bundles ∩ dependencies） */
-.env-section-title {
-  margin-top: 2px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border-strong);
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-/* 启动页插件小标签（只读展示；管理入口在标题栏插件管理弹框） */
-.plugin-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.plugin-tag {
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--panel);
-  border: 1px solid var(--border-strong);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-2);
-}
-
 /* 插件管理弹框（列表视图 + 操作终端视图） */
 .plugin-op-banner {
   margin-bottom: 12px;
@@ -488,13 +341,6 @@ body {
 
 .plugin-ver.new {
   color: #22d3ee;
-}
-
-.plugin-empty {
-  padding: 24px 0;
-  text-align: center;
-  font-size: 13px;
-  color: var(--text-3);
 }
 
 .plugin-add-hint {
@@ -1097,65 +943,6 @@ html[data-theme="light"] .mk-op-banner {
   color: var(--text-2);
 }
 
-/* 主按钮 */
-.launch-actions {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  animation: fadeUp 0.7s 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.btn-primary {
-  position: relative;
-  border: none;
-  cursor: pointer;
-  padding: 15px 52px;
-  border-radius: 999px;
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #fff;
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #22d3ee 100%);
-  background-size: 180% 180%;
-  box-shadow:
-    0 12px 32px -10px rgba(99, 102, 241, 0.65),
-    inset 0 1px 0 rgba(255, 255, 255, 0.25);
-  transition:
-    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 0.18s ease,
-    filter 0.18s ease;
-  overflow: hidden;
-}
-
-.btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
-  filter: brightness(1.08);
-  box-shadow:
-    0 18px 44px -12px rgba(99, 102, 241, 0.8),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
-}
-
-.btn-primary:active:not(:disabled) {
-  transform: translateY(0) scale(0.985);
-}
-
-.btn-primary:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
-.btn-primary .btn-shine {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.28) 50%, transparent 70%);
-  background-size: 200% 100%;
-  animation: shimmer 3.2s linear infinite;
-  pointer-events: none;
-}
-
 .btn-secondary {
   border: 1px solid var(--border-strong);
   background: var(--panel);
@@ -1346,64 +1133,10 @@ html[data-theme="light"] .mk-op-banner {
 }
 
 .term-line {
-  display: flex;
-  gap: 10px;
   padding: 1px 0;
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.term-line .t-time {
-  color: #3d4557;
-  flex-shrink: 0;
-  font-size: 12px;
-  padding-top: 1px;
-}
-
-.term-line .t-mark {
-  flex-shrink: 0;
-  width: 18px;
-  text-align: center;
-}
-
-.term-line .t-text {
   color: #c7cdda;
-}
-
-/* 日志着色 */
-.term-line.system .t-mark {
-  color: #818cf8;
-}
-.term-line.system .t-text {
-  color: #a5b4fc;
-}
-
-.term-line.stdout .t-mark {
-  color: #64748b;
-}
-.term-line.stdout .t-text {
-  color: #cbd5e1;
-}
-
-.term-line.stderr .t-mark {
-  color: var(--warn);
-}
-.term-line.stderr .t-text {
-  color: #fcd34d;
-}
-
-.term-line.success .t-mark {
-  color: var(--success);
-}
-.term-line.success .t-text {
-  color: #6ee7b7;
-}
-
-.term-line.error .t-mark {
-  color: var(--danger);
-}
-.term-line.error .t-text {
-  color: #fca5a5;
 }
 
 .term-cursor {
@@ -1815,6 +1548,14 @@ html[data-theme="light"] .mk-op-banner {
   animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* 服务已停止态（手动停止/异常退出后回到状态页）：中性色圆圈 */
+.loading-stopped {
+  font-size: 44px;
+  line-height: 1;
+  color: var(--text-3);
+  animation: fadeUp 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .loading-actions {
   display: flex;
   align-items: center;
@@ -1883,27 +1624,6 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ---- 浅色下硬编码深色的覆盖（步骤 5 审计） ---- */
-
-/* 启动页大标题：原为白色渐变文字，浅色底上不可读 → 深色渐变 */
-html[data-theme="light"] .launch-title {
-  background: linear-gradient(120deg, #1c2129 20%, #4f46e5 55%, #0891b2 90%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-}
-
-/* 启动页 logo 瓷片：原为深色玻璃底，浅色下 logo（黑）不可读 → 浅色玻璃底 */
-html[data-theme="light"] .launch-logo {
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.35)),
-    rgba(255, 255, 255, 0.5);
-  border-color: rgba(15, 23, 42, 0.14);
-  box-shadow:
-    0 24px 60px -18px rgba(99, 102, 241, 0.4),
-    0 8px 24px -8px rgba(15, 23, 42, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
-}
 
 /* 次按钮悬停边框：原为白色半透明，浅色底上不可见 → 深色半透明 */
 html[data-theme="light"] .btn-secondary:hover {
@@ -2308,6 +2028,12 @@ html[data-theme="light"] .pm-detail-desc {
   font-weight: 600;
   color: var(--text-1);
   margin-bottom: 6px;
+}
+
+/* 系统环境卡片内嵌环境检查列表：铺满卡片宽度，去掉启动页遗留的外边距 */
+.about-env-card {
+  width: 100%;
+  margin-bottom: 0;
 }
 
 .settings-desc {

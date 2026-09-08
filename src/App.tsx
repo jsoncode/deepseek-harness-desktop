@@ -1,7 +1,6 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from "antd";
 import { useEffect, useLayoutEffect } from "react";
-import { HashRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
-import { tauri } from "./lib/tauri";
+import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import { useUiStore } from "./store/useUiStore";
 import BottomBar from "./components/BottomBar";
 import CredentialsFixModal from "./components/CredentialsFixModal";
@@ -9,7 +8,6 @@ import NotifyActivateHandler from "./components/NotifyActivateHandler";
 import PluginFailureModal from "./components/PluginFailureModal";
 import StudioTitleBar from "./components/StudioTitleBar";
 import TitleBar from "./components/TitleBar";
-import Launch from "./pages/Launch";
 import Loading from "./pages/Loading";
 import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
@@ -18,6 +16,7 @@ import TtsHistory from "./pages/TtsHistory";
 import { useThemeStore } from "./store/useThemeStore";
 import { initNotifySync } from "./store/useNotifyStore";
 import { startNotifyListener } from "./lib/notify";
+import TrayNavigateHandler from "./components/TrayNavigateHandler";
 
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
@@ -78,17 +77,14 @@ export default function App() {
       <AntApp>
         <div className="app-bg" />
         <HashRouter>
+          {/* 托盘「设置/分区」菜单跳转：任何路由（含语音工具窗口）下都要响应 */}
+          <TrayNavigateHandler />
           <Shell />
         </HashRouter>
       </AntApp>
     </ConfigProvider>
   );
 }
-
-/** 「打开软件直接进入启动页」的一次性标记：仅应用首挂载时的「/」生效，
- *  之后「/」仍可由用户主动进入（如启动失败后的「返回启动页」）。
- *  语音工具窗口打开时路由为 /tts-studio，条件不命中，不受影响。 */
-let autoStartRedirected = false;
 
 /**
  * 壳层分流：主窗口壳（TitleBar + 内容区 + BottomBar + 主窗口级弹窗）与
@@ -97,18 +93,9 @@ let autoStartRedirected = false;
  */
 function Shell() {
   const location = useLocation();
-  const navigate = useNavigate();
-  // 全局刷新纪元：刷新按钮自增，作为内容区 key 使当前页面（启动页/终端页/服务预览页）
+  // 全局刷新纪元：刷新按钮自增，作为内容区 key 使当前页面（状态页/终端页/服务预览页）
   // 整体重挂载——任何页面都能被刷新，而不止服务预览页
   const reloadKey = useUiStore((s) => s.reloadKey);
-
-  // 打开软件直接进入启动过渡页，由 Loading 页自动完成「检测环境 →（缺失才安装）
-  // → 启动」（见 Loading.tsx 模块级自动启动），不再停留在启动页等待手动操作
-  useEffect(() => {
-    if (!tauri || autoStartRedirected || location.pathname !== "/") return;
-    autoStartRedirected = true;
-    navigate("/loading", { replace: true });
-  }, [location.pathname, navigate]);
 
   if (location.pathname.startsWith("/tts-studio")) {
     return (
@@ -136,11 +123,13 @@ function Shell() {
         <TitleBar />
         <div className="app-content" key={reloadKey}>
           <Routes>
-            <Route path="/" element={<Launch />} />
+            {/* 启动检查页已移除：根路径直接进服务状态页（自动检测环境并启动），
+                旧「/」入口（含通配兜底）一律重定向到 /loading */}
+            <Route path="/" element={<Navigate to="/loading" replace />} />
             <Route path="/loading" element={<Loading />} />
             <Route path="/preview" element={<Preview />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/loading" replace />} />
           </Routes>
         </div>
         {/* 底部导航条：flex 布局最后一个元素，占位且固定在窗口底部 */}

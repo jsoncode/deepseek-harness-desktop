@@ -1,8 +1,9 @@
 import { SearchOutlined } from "@ant-design/icons";
 import { App as AntApp, Input, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import AppModal from "./AppModal";
+import SlidingSeg from "./SlidingSeg";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
 import {
@@ -14,7 +15,6 @@ import {
   type MarketSort,
   type MarketSource,
 } from "../lib/pluginMarket";
-import { MARK } from "../lib/logFormat";
 
 const OP_VERB: Record<PluginOpKind, string> = {
   add: "安装",
@@ -57,80 +57,6 @@ function nameMatches(name: string, rawQuery: string): boolean {
   // 归一化后为空（查询仅含分隔符）时跳过归一化比较，避免空串命中所有行
   if (!nq) return false;
   return normalizeFuzzy(name).includes(nq);
-}
-
-/**
- * 滑块式分段选择：active 指示块在选项之间平滑穿梭滑动（替代变色胶囊）。
- * 测量目标按钮 offsetLeft/offsetWidth 驱动 thumb 位移；窗口尺寸变化时自动校正。
- */
-function SlidingSeg<T extends string>({
-  value,
-  options,
-  onChange,
-  getDisabled,
-  getTitle,
-  className = "",
-}: {
-  value: T;
-  options: Array<{ key: T; label: ReactNode }>;
-  onChange: (key: T) => void;
-  getDisabled?: (key: T) => boolean;
-  getTitle?: (key: T) => string | undefined;
-  className?: string;
-}) {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const [thumb, setThumb] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
-
-  const measure = useCallback(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const el = wrap.querySelector<HTMLButtonElement>('button[data-seg="' + value + '"]');
-    if (!el) return;
-    setThumb({ left: el.offsetLeft, width: el.offsetWidth });
-  }, [value]);
-
-  // 值变化后先测量再绘制，避免 thumb 初始闪到原点
-  useLayoutEffect(() => {
-    measure();
-  }, [measure]);
-
-  // 选项文案变化（如「所有插件(N)」数量增减）或窗口尺寸变化都会改变按钮宽度，
-  // 用 ResizeObserver 监听容器尺寸并重测指示块，避免文字跑出高亮胶囊之外
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    let ro: ResizeObserver | undefined;
-    if (wrap && typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => measure());
-      ro.observe(wrap);
-    }
-    window.addEventListener("resize", measure);
-    return () => {
-      ro?.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [measure]);
-
-  return (
-    <div className={"pm-seg" + (className ? " " + className : "")} ref={wrapRef}>
-      <span className="pm-seg-thumb" style={{ left: thumb.left, width: thumb.width }} />
-      {options.map((o) => {
-        const disabled = getDisabled?.(o.key) ?? false;
-        return (
-          <button
-            key={o.key}
-            type="button"
-            data-seg={o.key}
-            title={getTitle?.(o.key)}
-            className={(value === o.key ? "active" : "") + (disabled ? " disabled" : "")}
-            disabled={disabled}
-            onClick={() => !disabled && onChange(o.key)}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
 }
 
 /** 表格行数据（市场行与已安装行统一） */
@@ -637,31 +563,21 @@ export default function PluginManagerPanel() {
           <div className="term-empty">等待输出…</div>
         ) : (
           pluginOpLogs.map((l) => (
-            <div key={l.id} className={`term-line ${l.stream}`}>
-              <span className="t-time">{l.time}</span>
-              <span className="t-mark">{MARK[l.stream] ?? "·"}</span>
-              <span className="t-text">{l.text}</span>
+            <div key={l.id} className="term-line">
+              {l.text}
             </div>
           ))
         )}
         {running ? (
-          <div className="term-line system">
-            <span className="t-time">{"·".repeat(8)}</span>
-            <span className="t-mark">◆</span>
-            <span className="t-text">
-              正在执行，请稍候…
-              <span className="term-cursor" />
-            </span>
+          <div className="term-line">
+            正在执行，请稍候…
+            <span className="term-cursor" />
           </div>
         ) : (
-          <div className={`term-line ${(pluginOp?.exitCode ?? -1) === 0 ? "success" : "error"}`}>
-            <span className="t-time">{""}</span>
-            <span className="t-mark">{(pluginOp?.exitCode ?? -1) === 0 ? "✓" : "✗"}</span>
-            <span className="t-text">
-              {(pluginOp?.exitCode ?? -1) === 0
-                ? "操作完成"
-                : `操作失败（退出码 ${pluginOp?.exitCode ?? "?"}）`}
-            </span>
+          <div className="term-line">
+            {(pluginOp?.exitCode ?? -1) === 0
+              ? "操作完成"
+              : `操作失败（退出码 ${pluginOp?.exitCode ?? "?"}）`}
           </div>
         )}
       </div>
@@ -676,17 +592,19 @@ export default function PluginManagerPanel() {
       <div className="settings-body flush">
         {/* 复用 plugin-manager-modal 命名空间：其下的 .mk-* 样式（工具栏/表格/终端）原样生效 */}
         <div className="pm-panel plugin-manager-modal">
-          {/* 面板头部：来源切换（GitHub / NPM） */}
-          <div className="pm-panel-head">
-            <SlidingSeg
-              value={source}
-              options={[
-                { key: "github", label: "GitHub" },
-                { key: "npm", label: "NPM" },
-              ]}
-              onChange={(s) => switchSource(s)}
-            />
-          </div>
+          {/* 面板头部：来源切换（GitHub / NPM）；终端视图不显示，保持安装界面干净 */}
+          {view === "market" ? (
+            <div className="pm-panel-head">
+              <SlidingSeg
+                value={source}
+                options={[
+                  { key: "github", label: "GitHub" },
+                  { key: "npm", label: "NPM" },
+                ]}
+                onChange={(s) => switchSource(s)}
+              />
+            </div>
+          ) : null}
 
           {/* 视图主体：市场列表 / 操作终端（上浮缩放过渡） */}
           <div key={view} className="mk-view-enter">
@@ -793,20 +711,13 @@ export default function PluginManagerPanel() {
                   className="pm-btn danger"
                   type="button"
                   disabled={running}
-                  onClick={async () => {
+                  onClick={() => {
                     const row = detailRow;
                     setDetailRow(null);
-                    // 卸载只移除 bundles 并登记待清理依赖；dependencies 与
-                    // node_modules 保持不动（服务运行中卸载不会崩溃），残留
-                    // 依赖在下次启动 pnpm install 时统一清理
-                    try {
-                      await api.removePlugin(row.name);
-                      message.success(`已移除插件 ${row.name}，残留依赖将在下次启动时清理`);
-                      void refreshStatus();
-                      void refreshPluginVersions();
-                    } catch (e) {
-                      message.error(`移除插件失败：${e instanceof Error ? e.message : String(e)}`);
-                    }
+                    // 详情页已明确展示插件信息，点击即卸载（后台执行），不再二次确认。
+                    // 走真实 CLI：终端逐行显示 $ dsh plugin --profile web remove 与 pnpm
+                    // 输出，依赖立即清理；服务运行中卸载可能使服务退出，完成后按提示重启
+                    void startPluginOp("remove", row.name);
                   }}
                 >
                   卸载

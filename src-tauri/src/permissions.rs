@@ -57,8 +57,8 @@ fn attach_permission_handler(webview: &tauri::webview::PlatformWebview) -> Resul
     let controller: ICoreWebView2Controller = webview.controller();
     // 同一 windows 0.61 类型域（webview2-com 0.38 与本 crate 的 windows 依赖一致），
     // 宿主窗口的 HWND 可直接传给本模块的 MessageBoxW。
-    let core: ICoreWebView2 = unsafe { controller.CoreWebView2() }
-        .map_err(|e| format!("CoreWebView2: {e}"))?;
+    let core: ICoreWebView2 =
+        unsafe { controller.CoreWebView2() }.map_err(|e| format!("CoreWebView2: {e}"))?;
     let mut hwnd = HWND::default();
     unsafe { controller.ParentWindow(&mut hwnd) }.map_err(|e| format!("ParentWindow: {e}"))?;
 
@@ -140,10 +140,10 @@ fn permission_label(
 /// 原生「允许 / 拒绝」对话框。父窗口 = WebView2 宿主窗口（模态于本应用）。
 #[cfg(windows)]
 fn ask_permission(hwnd: windows::Win32::Foundation::HWND, label: &str) -> bool {
+    use windows::core::HSTRING;
     use windows::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
     };
-    use windows::core::HSTRING;
 
     let text = HSTRING::from(format!("内嵌网页申请使用「{label}」权限。\n\n是否允许？"));
     let title = HSTRING::from("Web 权限申请");

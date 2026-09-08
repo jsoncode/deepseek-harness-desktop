@@ -60,7 +60,11 @@ pub enum ToastStyle {
 #[cfg(windows)]
 fn toast_style(app: &AppHandle) -> ToastStyle {
     use std::sync::atomic::Ordering;
-    match app.state::<dsh::AppState>().notify_style.load(Ordering::SeqCst) {
+    match app
+        .state::<dsh::AppState>()
+        .notify_style
+        .load(Ordering::SeqCst)
+    {
         1 => ToastStyle::Clickable,
         _ => ToastStyle::Legacy,
     }
@@ -300,7 +304,10 @@ pub fn push_sample(app: &AppHandle) {
         title: "系统推送",
         desc: "已开启，任务进展会在这里提醒你".into(),
         summary: "系统推送：已开启，任务进展会在这里提醒你".into(),
-        body: format!("dsh 会话更新任务清单或结束对话时会弹出这样的通知 · {}", now_hms()),
+        body: format!(
+            "dsh 会话更新任务清单或结束对话时会弹出这样的通知 · {}",
+            now_hms()
+        ),
         ts: now_ms(),
     };
     for ch in channels() {

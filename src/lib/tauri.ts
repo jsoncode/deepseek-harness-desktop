@@ -64,6 +64,18 @@ export interface CredentialsCheck {
   template: string | null;
 }
 
+/** 安装临时代理配置：与 Rust `proxy_config::ProxyConfig` 同形。
+ *  kind = "direct" 时不注入任何代理；非 direct 时仅在安装类子进程
+ *  （node/pnpm/dsh 安装、插件操作）环境变量里生效，不改系统/npm 配置 */
+export type ProxyKind = "direct" | "http" | "https" | "socks4" | "socks5";
+export interface ProxyConfig {
+  kind: ProxyKind;
+  /** 代理服务器 IP / 域名（direct 时忽略） */
+  host: string;
+  /** 代理端口 1-65535（direct 时忽略） */
+  port: number | null;
+}
+
 /** 日志会话元信息（设置页日志管理列表） */
 export interface LogSessionMeta {
   id: string;
@@ -74,6 +86,8 @@ export interface LogSessionMeta {
   ended_at: number | null;
   /** "active" | "success" | "error" | "closed" */
   status: string;
+  /** "service"（服务启动/重启）| "plugin"（插件操作） */
+  kind: "service" | "plugin";
   lines: number;
 }
 
@@ -112,6 +126,8 @@ export const EVENTS = {
   voiceInstallLog: "dsh://voice-install-log",
   /** 长文本分段合成的逐段进度（Rust tts.rs：第 current/total 段完成） */
   ttsSynthProgress: "dsh://tts-synth-progress",
+  /** 托盘「设置/分区」菜单点击（窗口已由 Rust 恢复）：path 为目标 hash 路由 */
+  trayNavigate: "dsh://tray-navigate",
 } as const;
 
 /** 系统通知点击（toast 激活）负载：与 Rust `notify::ActivatePayload` 同形（serde camelCase） */
@@ -338,6 +354,11 @@ export const api = {
     requireTauri(() => invoke<CredentialsCheck>("check_credentials_compat")),
   /** 把凭据文件重写为最新规范格式（凭据值全部保留），返回修复摘要 */
   fixCredentials: () => requireTauri(() => invoke<string>("fix_credentials")),
+  /** 读取安装临时代理配置（设置页「代理设置」） */
+  getProxyConfig: () => requireTauri(() => invoke<ProxyConfig>("get_proxy_config")),
+  /** 保存安装临时代理配置：仅对后续的安装类子进程生效 */
+  setProxyConfig: (config: ProxyConfig) =>
+    requireTauri(() => invoke<void>("set_proxy_config", { config })),
   /** 开始新日志会话（finalize 旧会话），返回会话 id */
   logStartSession: (title: string) =>
     requireTauri(() => invoke<string>("log_start_session", { title })),

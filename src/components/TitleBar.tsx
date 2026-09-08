@@ -12,8 +12,8 @@ import { maskServiceUrl } from "../lib/urlMask";
  * 顶部标题栏：品牌区（版本号可点击进设置-关于本应用）+ Home 入口 +
  * 服务地址/刷新/复制/浏览器打开 + 窗口控制。
  * 停止/重启服务在底部导航条（BottomBar）；插件管理、通知管理、主题设置、
- * 日志管理等已迁移到设置页（BottomBar 右侧入口进入）。
- * Home 入口：服务已启动跳服务内（预览页），未启动跳预检页（启动页）。
+ * 日志管理、系统环境等已迁移到设置页（BottomBar 右侧入口进入）。
+ * Home 入口：服务已启动跳服务内（预览页），未启动跳服务状态页（启动过渡页）。
  */
 export default function TitleBar() {
   const { message } = AntApp.useApp();
@@ -57,13 +57,13 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        {/* Home 入口：服务已启动 → 服务内（预览页）；未启动 → 预检页（启动页） */}
+        {/* Home 入口：服务已启动 → 服务内（预览页）；未启动 → 服务状态页（启动过渡页） */}
         <button
           type="button"
           className="icon-btn"
-          title={phase === "running" ? "进入应用" : "返回启动页"}
+          title={phase === "running" ? "进入应用" : "服务状态"}
           aria-label="首页"
-          onClick={() => navigate(phase === "running" ? "/preview" : "/")}
+          onClick={() => navigate(phase === "running" ? "/preview" : "/loading")}
         >
           <img src={logo} alt="" draggable={false} className="titlebar-home-logo" />
         </button>

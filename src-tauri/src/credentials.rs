@@ -104,9 +104,7 @@ fn validate_document(root: &Value) -> Result<(), String> {
         if flat_ok {
             return Ok(());
         }
-        return Err(
-            "缺少 version 字段，且文件内容不是 dsh 可自动迁移的旧版扁平格式".to_string(),
-        );
+        return Err("缺少 version 字段，且文件内容不是 dsh 可自动迁移的旧版扁平格式".to_string());
     }
     // dsh 要求 version 严格等于整数 1（字符串 "1" 同样会被拒绝）
     let version = mapping.get("version").ok_or_else(|| {
@@ -150,9 +148,7 @@ fn validate_section(section: Option<&Value>, name: &str, is_records: bool) -> Re
             }
             match v {
                 Value::String(s) if !s.is_empty() => {}
-                Value::String(_) => {
-                    return Err(format!("refs 中 \"{key}\" 的值为空，请删除该键"))
-                }
+                Value::String(_) => return Err(format!("refs 中 \"{key}\" 的值为空，请删除该键")),
                 _ => return Err(format!("refs 中 \"{key}\" 的值必须是字符串")),
             }
         }
@@ -236,11 +232,7 @@ fn mask_line(line: &str) -> String {
         return line.to_string();
     };
     let key = line[..idx].trim().trim_start_matches("- ").trim();
-    if STRUCTURAL_KEYS.contains(&key)
-        || key.is_empty()
-        || key.contains(' ')
-        || key.contains('\t')
-    {
+    if STRUCTURAL_KEYS.contains(&key) || key.is_empty() || key.contains(' ') || key.contains('\t') {
         return line.to_string();
     }
     let rest = &line[idx + 1..];
@@ -286,8 +278,7 @@ fn extract_document(text: &str) -> Result<(Mapping, Mapping, usize), String> {
             let mut refs = Mapping::new();
             let mut dropped = 0usize;
             // 旧版扁平格式：无 version/refs/records，整个文档即 refs 表
-            if !m.contains_key("version") && !m.contains_key("refs") && !m.contains_key("records")
-            {
+            if !m.contains_key("version") && !m.contains_key("refs") && !m.contains_key("records") {
                 for (k, v) in m {
                     if let (Some(key), Some(val)) = (k.as_str(), normalize_ref_value(v)) {
                         refs.insert(Value::String(key.into()), val);
@@ -327,7 +318,9 @@ fn extract_document(text: &str) -> Result<(Mapping, Mapping, usize), String> {
         if !is_upper_ref(key) {
             continue;
         }
-        let value = line[idx + 1..].trim().trim_matches(|c| c == '"' || c == '\'');
+        let value = line[idx + 1..]
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'');
         if value.is_empty() {
             dropped += 1;
             continue;
@@ -590,9 +583,7 @@ mod tests {
         assert_eq!(dropped, 0);
         assert_eq!(refs.len(), 1);
         assert!(records.is_empty());
-        assert!(refs
-            .get(Value::String("DEEPSEEK_API_KEY".into()))
-            .is_some());
+        assert!(refs.get(Value::String("DEEPSEEK_API_KEY".into())).is_some());
     }
 
     #[test]
@@ -624,10 +615,9 @@ mod tests {
 
     #[test]
     fn 修复输出为大括号包裹格式() {
-        let (refs, _, _) = extract_document(
-            "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n  OTHER: \"a: b\"\n",
-        )
-        .unwrap();
+        let (refs, _, _) =
+            extract_document("version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n  OTHER: \"a: b\"\n")
+                .unwrap();
         let out = render_brace_document(&refs, &Mapping::new());
         assert!(out.starts_with("version: 1\nrefs:\n  {\n"), "实际: {out}");
         // 条目间用逗号分隔（严格合法的 flow mapping），最后一条无逗号
@@ -693,7 +683,11 @@ mod tests {
         assert!(c.compatible, "扁平格式应兼容: {:?}", c.reason);
 
         // ③ 字符串版本号 → 不兼容：打码内容不泄露完整值；修复后为大括号格式并再次通过
-        std::fs::write(&path, "version: \"1\"\nrefs:\n  DEEPSEEK_API_KEY: sk-abcdef\n").unwrap();
+        std::fs::write(
+            &path,
+            "version: \"1\"\nrefs:\n  DEEPSEEK_API_KEY: sk-abcdef\n",
+        )
+        .unwrap();
         let c = check_credentials_compat().unwrap();
         assert!(!c.compatible);
         let masked = c.masked_content.as_deref().unwrap();
@@ -707,9 +701,18 @@ mod tests {
             fixed.starts_with("version: 1\nrefs:\n  {\n"),
             "修复后应为大括号包裹格式: {fixed}"
         );
-        assert!(fixed.contains("    DEEPSEEK_API_KEY: sk-abcdef"), "凭据值应保留");
-        assert!(fixed.ends_with("  }\n"), "修复后应以缩进右花括号结尾: {fixed}");
-        assert!(check_credentials_compat().unwrap().compatible, "修复后应通过检查");
+        assert!(
+            fixed.contains("    DEEPSEEK_API_KEY: sk-abcdef"),
+            "凭据值应保留"
+        );
+        assert!(
+            fixed.ends_with("  }\n"),
+            "修复后应以缩进右花括号结尾: {fixed}"
+        );
+        assert!(
+            check_credentials_compat().unwrap().compatible,
+            "修复后应通过检查"
+        );
 
         // ④ 无法识别的内容 → 修复拒绝且不覆盖文件
         std::fs::write(&path, "!!!\n").unwrap();

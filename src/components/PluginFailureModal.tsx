@@ -12,7 +12,8 @@ import { useUiStore } from "../store/useUiStore";
  * （Rust 侧转发 dsh://preview-plugin-failed 事件）；Preview 页收到后写入
  * store.pluginLoadError，本组件弹框提示用户：
  * 确认 → 从 .dsh\profiles\web\package.json 移除插件并重启服务。
- * 弹框是 DOM 浮层、无法显示在原生子 webview 之上——当前在预览页时先离开再弹。
+ * 弹框是 DOM 浮层、无法显示在原生子 webview 之上——当前在预览页时先切到
+ * 设置-日志管理（DOM 页面）再弹。
  */
 export default function PluginFailureModal() {
   const { modal, message } = AntApp.useApp();
@@ -30,8 +31,11 @@ export default function PluginFailureModal() {
     const err = pluginLoadError;
     if (!err || shownFor.current === err.name) return;
     shownFor.current = err.name;
-    // 预览页的原生子 webview 会盖住 antd 弹框：先回启动页再弹（shownFor 防重复弹）
-    if (location.pathname === "/preview") navigate("/", { replace: true });
+    // 预览页的原生子 webview 会盖住 antd 弹框：先切到设置-日志管理再弹
+    //（shownFor 防重复弹；服务仍在运行，取消后可从标题栏 Home 回预览页）
+    if (location.pathname === "/preview") {
+      navigate("/settings?section=logs", { replace: true });
+    }
     modal.confirm({
       title: "插件加载失败",
       content: (

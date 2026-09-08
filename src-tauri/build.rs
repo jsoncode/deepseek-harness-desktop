@@ -7,8 +7,8 @@ fn main() {
     // 图标/版本信息仍由 tauri-build 的 resource.lib 提供（见 tests/windows_manifest.rs 回归守卫）。
     #[cfg(target_os = "windows")]
     {
-        let path = std::path::Path::new(&std::env::var("OUT_DIR").unwrap())
-            .join("test-app-manifest.xml");
+        let path =
+            std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("test-app-manifest.xml");
         std::fs::write(&path, TEST_MANIFEST).unwrap();
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", path.display());

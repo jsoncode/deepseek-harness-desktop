@@ -170,15 +170,15 @@ export default function Preview() {
     void api.previewOpenSession(pendingOpenSession.sessionId).catch(() => undefined);
   }, [pendingOpenSession, nativeActive, clearPendingOpenSession]);
 
-  // 无 URL（未检测到服务）时不再展示空态页，直接回启动页处理启动/重试
+  // 无 URL（未检测到服务）时不再展示空态页，直接回服务状态页处理启动/重试
   useEffect(() => {
-    if (!url && initialized) navigate("/", { replace: true });
+    if (!url && initialized) navigate("/loading", { replace: true });
   }, [url, initialized, navigate]);
 
   // 服务健康监测已上移至全局 store（useAppStore），断连只反映在标题栏指示灯，
   // 本页不再做任何拦截，避免服务繁忙时的单次探测超时误报遮挡内容。
 
-  // 无 URL（状态同步中或跳转前的一瞬）时不渲染任何内容，由上方 effect 负责回启动页
+  // 无 URL（状态同步中或跳转前的一瞬）时不渲染任何内容，由上方 effect 负责回服务状态页
   if (!url) return null;
 
   // 原生路径：子 webview 由 Rust 创建并悬浮于本 div 区域，DOM 里只留占位。

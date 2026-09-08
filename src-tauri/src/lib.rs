@@ -4,14 +4,15 @@ mod logs;
 mod notify;
 mod permissions;
 mod preview;
+mod proxy_config;
 mod session_events;
 mod tts;
 
 use dsh::AppState;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, RunEvent, WindowEvent,
+    Emitter, Manager, RunEvent, WindowEvent,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -67,6 +68,8 @@ pub fn run() {
             tts::tts_history_delete,
             credentials::check_credentials_compat,
             credentials::fix_credentials,
+            proxy_config::get_proxy_config,
+            proxy_config::set_proxy_config,
             logs::log_start_session,
             logs::log_append,
             logs::log_set_status,
@@ -115,8 +118,35 @@ pub fn run() {
 
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
             let browser = MenuItem::with_id(app, "browser", "浏览器中打开", true, None::<&str>)?;
+            // 设置直达：主项 + 设置页各分区（与设置页左侧菜单一致），点击恢复窗口并深链
+            let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+            let sec_plugins =
+                MenuItem::with_id(app, "sec-plugins", "插件管理", true, None::<&str>)?;
+            let sec_notify = MenuItem::with_id(app, "sec-notify", "通知管理", true, None::<&str>)?;
+            let sec_theme = MenuItem::with_id(app, "sec-theme", "主题设置", true, None::<&str>)?;
+            let sec_proxy = MenuItem::with_id(app, "sec-proxy", "代理设置", true, None::<&str>)?;
+            let sec_logs = MenuItem::with_id(app, "sec-logs", "日志管理", true, None::<&str>)?;
+            let sec_about = MenuItem::with_id(app, "sec-about", "关于本应用", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", quit_label(), true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &browser, &quit])?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &open,
+                    &browser,
+                    &sep1,
+                    &settings,
+                    &sec_plugins,
+                    &sec_notify,
+                    &sec_theme,
+                    &sec_proxy,
+                    &sec_logs,
+                    &sec_about,
+                    &sep2,
+                    &quit,
+                ],
+            )?;
 
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
@@ -126,7 +156,15 @@ pub fn run() {
                     "open" => show_main_window(app),
                     "browser" => open_service_in_browser(app),
                     "quit" => app.exit(0),
-                    _ => {}
+                    id => {
+                        if let Some(path) = tray_settings_path(id) {
+                            show_main_window(app);
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ =
+                                    window.emit(TRAY_NAVIGATE_EVENT, TrayNavigatePayload { path });
+                            }
+                        }
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -209,6 +247,33 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 托盘「设置/分区」菜单 → 前端路由跳转事件（前端 TrayNavigateHandler 监听）
+const TRAY_NAVIGATE_EVENT: &str = "dsh://tray-navigate";
+
+/// 托盘设置分区跳转事件负载（与前端 TrayNavigateHandler 的 payload 同形）
+#[derive(serde::Serialize, Clone)]
+struct TrayNavigatePayload {
+    path: String,
+}
+
+/// 托盘菜单 id → 前端 hash 路由路径；非设置类菜单返回 None
+fn tray_settings_path(id: &str) -> Option<String> {
+    let section = match id {
+        "settings" => None,
+        "sec-plugins" => Some("plugins"),
+        "sec-notify" => Some("notify"),
+        "sec-theme" => Some("theme"),
+        "sec-proxy" => Some("proxy"),
+        "sec-logs" => Some("logs"),
+        "sec-about" => Some("about"),
+        _ => return None,
+    };
+    Some(match section {
+        Some(s) => format!("/settings?section={s}"),
+        None => "/settings".to_string(),
+    })
+}
+
 /// 托盘"浏览器中打开"：读取已探测到的服务 URL 并在默认浏览器打开
 fn open_service_in_browser(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
@@ -238,7 +303,7 @@ fn tray_tooltip_text(app_name: &str) -> String {
 
 #[cfg(test)]
 mod tray_tooltip_tests {
-    use super::tray_tooltip_text;
+    use super::{tray_settings_path, tray_tooltip_text};
 
     const NAME: &str = "DeepSeek Harness Desktop";
 
@@ -246,5 +311,20 @@ mod tray_tooltip_tests {
     #[test]
     fn 调试构建返回名称加后缀() {
         assert_eq!(tray_tooltip_text(NAME), format!("{NAME}（调试）"));
+    }
+
+    #[test]
+    fn 托盘设置分区映射到前端路由() {
+        assert_eq!(tray_settings_path("settings").as_deref(), Some("/settings"));
+        assert_eq!(
+            tray_settings_path("sec-plugins").as_deref(),
+            Some("/settings?section=plugins")
+        );
+        assert_eq!(
+            tray_settings_path("sec-about").as_deref(),
+            Some("/settings?section=about")
+        );
+        assert_eq!(tray_settings_path("quit"), None);
+        assert_eq!(tray_settings_path("open"), None);
     }
 }

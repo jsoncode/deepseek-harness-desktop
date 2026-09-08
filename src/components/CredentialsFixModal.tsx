@@ -1,6 +1,5 @@
 import { App as AntApp, Modal } from "antd";
 import { useState } from "react";
-import { useNavigate } from "react-router";
 import { api } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
@@ -10,11 +9,11 @@ import { useAppStore } from "../store/useAppStore";
  *
  * 展示打码后的文件内容（机密值不经过前端，由 Rust 侧打码后下发）与最新格式模板
  * （refs 用大括号包裹）；用户确认 → 调用 fix_credentials 重写为最新格式
- * （凭据值完整保留）→ 自动重新启动服务；暂不处理 → 停留在错误页，可手动重试。
+ * （凭据值完整保留）→ 自动重新启动服务；暂不处理 → 关闭弹框，停留在当前页
+ * （通常为服务状态页的失败态，可稍后重试）。
  */
 export default function CredentialsFixModal() {
   const { message } = AntApp.useApp();
-  const navigate = useNavigate();
   const issue = useAppStore((s) => s.credentialsIssue);
   const resolveCredentialsConfirm = useAppStore((s) => s.resolveCredentialsConfirm);
   const appendLog = useAppStore((s) => s.appendLog);
@@ -27,13 +26,13 @@ export default function CredentialsFixModal() {
     setFixError(null);
     try {
       const summary = await api.fixCredentials();
-      appendLog("success", `✅ ${summary}`);
+      appendLog("success", summary);
       message.success("凭据配置文件已更新为最新格式");
       resolveCredentialsConfirm(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setFixError(msg);
-      appendLog("error", `❌ 凭据配置文件修复失败：${msg}`);
+      appendLog("error", `凭据配置文件修复失败：${msg}`);
     } finally {
       setFixing(false);
     }
@@ -41,9 +40,8 @@ export default function CredentialsFixModal() {
 
   const handleCancel = () => {
     if (fixing) return;
+    // 取消修复 → 仅关闭弹框；当前页（通常为服务状态页）处于失败态，可稍后重试
     resolveCredentialsConfirm(false);
-    // 取消修复 → 回到启动页（错误态带「重新启动」入口，可稍后重试）
-    navigate("/");
   };
 
   return (

@@ -124,7 +124,7 @@ const MAX_LOGS = 3000;
 /** 日志截断提示（截断期间顶部恒有一条：每次截断重建，旧提示随最旧日志一起被丢弃） */
 const TRUNCATED_NOTE = "（历史日志过长，已截断早期内容）";
 /** 重新启动服务时的日志分隔线 */
-const RESTART_SEPARATOR = "────── 重新启动服务 ──────";
+const RESTART_SEPARATOR = "重新启动服务";
 /** 插件操作日志上限 */
 const MAX_PLUGIN_OP_LOGS = 1000;
 /** 环境依赖单步安装的等待上限：winget/brew 下载安装可能耗时数分钟 */
@@ -174,6 +174,11 @@ function dropEnvExitWait() {
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let healthFailCount = 0;
 const HEALTH_INTERVAL_MS = 6000;
+
+/** 环境状态刷新在跑标记：刷新会并发拉起十几个探测子进程（3×check_tool +
+ *  app_status，各含 where 解析与版本读取），叠加执行会互相争抢 CPU 导致
+ *  版本读取超时、界面闪出「已损坏」误报——同一时刻只允许一轮在跑 */
+let statusRefreshInFlight = false;
 
 function healthTick() {
   const s = useAppStore.getState();
@@ -255,11 +260,11 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     onEvent<ExitPayload>(EVENTS.installExit, (p) => {
       if (p.code === 0) {
-        get().appendLog("success", "✅ @deepseek-ai/dsh 全局安装完成");
+        get().appendLog("success", "@deepseek-ai/dsh 全局安装完成");
         set({ dshInstalled: true });
         void get().startService();
       } else {
-        get().appendLog("error", `❌ 安装失败（退出码 ${p.code}），请检查网络或 pnpm 配置`);
+        get().appendLog("error", `安装失败（退出码 ${p.code}），请检查网络或 pnpm 配置`);
         set({ phase: "error", error: `安装失败，退出码 ${p.code}` });
       }
     });
@@ -351,7 +356,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           const reasonLine = credsFailLine ?? `dsh web 启动失败，退出码 ${p.code}`;
           get().appendLog(
             "error",
-            `❌ dsh web 启动失败（退出码 ${p.code}）：凭据配置文件格式不兼容`,
+            `dsh web 启动失败（退出码 ${p.code}）：凭据配置文件格式不兼容`,
           );
           set({ phase: "error", error: "dsh web 启动失败：凭据配置文件格式不兼容" });
           // 弹框展示打码内容与最新格式模板；确认修复后自动重启服务
@@ -362,14 +367,14 @@ export const useAppStore = create<AppStore>((set, get) => {
           }
           return;
         }
-        get().appendLog("error", `❌ dsh web 启动失败（退出码 ${p.code}）`);
+        get().appendLog("error", `dsh web 启动失败（退出码 ${p.code}）`);
         set({ phase: "error", error: `dsh web 启动失败，退出码 ${p.code}` });
       })();
     });
 
     onEvent<UrlPayload>(EVENTS.url, (p) => {
       set({ url: p.url, serviceRunning: true, childRunning: true, serviceAlive: true });
-      get().appendLog("success", `🚀 服务已就绪：${p.url}`);
+      get().appendLog("success", `服务已就绪：${p.url}`);
       set({ phase: "running" });
     });
   }
@@ -377,7 +382,8 @@ export const useAppStore = create<AppStore>((set, get) => {
   /** 无条件拉取最新环境状态并合并进 store（phase 由调用方链路控制，不在此改动）；
    *  安装链每步之后调用，用于确认上一步安装是否真正生效 */
   async function pullStatusFields(): Promise<void> {
-    const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
+    // 超时 20s：后端并行解析 + 版本读取（5s×2 重试）+ 服务探测，负载高峰接近 14s
+    const s: StatusPayload = await withTimeout(api.appStatus(), 20000, "环境检测");
     set({
       dshInstalled: s.dsh_installed,
       dshVersion: s.dsh_version,
@@ -396,10 +402,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     });
   }
 
-  /** 单项环境检测：逐项点亮启动页检查行；失败静默（app_status 收尾兜底） */
+  /** 单项环境检测：逐项点亮环境检查行；失败静默（app_status 收尾兜底）。
+   *  超时 16s：后端单项检测 = where 解析（3s）+ 版本读取（5s×2 次重试），
+   *  负载高峰接近上限，给足余量避免前端先于后端超时。 */
   async function runToolCheck(tool: EnvTool): Promise<void> {
     try {
-      const r = await withTimeout(api.checkTool(tool), 8000, "环境检测");
+      const r = await withTimeout(api.checkTool(tool), 16000, "环境检测");
       get().applyEnvToolCheck(tool, r);
     } catch {
       /* 单项失败（旧后端无此命令/超时）：由 app_status 收尾统一落值 */
@@ -411,7 +419,8 @@ export const useAppStore = create<AppStore>((set, get) => {
    *  false（refreshStatus 刷新）：失败静默忽略，保留现有展示 */
   async function settleStatus(prevPhase: Phase, failToIdle: boolean): Promise<void> {
     try {
-      const s: StatusPayload = await withTimeout(api.appStatus(), 10000, "环境检测");
+      // 超时 20s：后端并行解析 + 版本读取（5s×2 重试）+ 服务探测，负载高峰接近 14s
+      const s: StatusPayload = await withTimeout(api.appStatus(), 20000, "环境检测");
       set({
         dshInstalled: s.dsh_installed,
         dshVersion: s.dsh_version,
@@ -609,31 +618,40 @@ export const useAppStore = create<AppStore>((set, get) => {
         set({ phase: "idle", initialized: true });
         return;
       }
-      // 环境检测拆分为「逐项 + 收尾」并发执行：node/pnpm/dsh 各发一次 check_tool，
-      // 每项完成即写回 store，启动页对应行立即从「检测中」点亮为结果，
-      // 不再等全部检测结束才一次性渲染；app_status 收尾提供权威的
-      // 服务/插件/phase 值并最终落定全部检查行。
+      // 环境检测拆分为「逐项 + 收尾」两段【串行】执行：先并发跑 node/pnpm/dsh
+      // 三次 check_tool（每项完成即写回 store，检查行立即点亮），全部落定后再跑
+      // app_status 收尾（提供权威的服务/插件/phase 值并最终落定全部检查行）。
+      // 两段不能并发：check_tool 与 app_status 各自都要做全量探测（where 解析 +
+      // 版本读取），并发叠加时子进程互相争抢 CPU 导致版本读取超时，收尾会用
+      // null 覆盖单项已检出的版本，曾据此误判 node 未安装而触发 winget 重装。
       // 用 allSettled：任一项失败（如旧后端无 check_tool 命令）不影响其余链路。
       await Promise.allSettled([
         runToolCheck("node"),
         runToolCheck("pnpm"),
         runToolCheck("dsh"),
-        settleStatus(get().phase, true),
       ]);
+      await settleStatus(get().phase, true);
     },
 
     refreshStatus: async () => {
       // 启动中不打断
       const cur = get().phase;
       if (cur === "installing" || cur === "starting") return;
-      // 与 init 相同的逐项 + 收尾链路：返回启动页时检查行同样逐项刷新，
-      // 不再等全部检测结束才一次性更新
-      await Promise.allSettled([
-        runToolCheck("node"),
-        runToolCheck("pnpm"),
-        runToolCheck("dsh"),
-        settleStatus(cur, false),
-      ]);
+      // 并发去重：关于页自动检测/手动重检/标题栏刷新可能叠加，只跑一轮
+      if (statusRefreshInFlight) return;
+      statusRefreshInFlight = true;
+      try {
+        // 与 init 相同的逐项 + 收尾链路（两段串行，理由见 init 内注释）：
+        // 进入环境区块时检查行同样逐项刷新，不再等全部检测结束才一次性更新
+        await Promise.allSettled([
+          runToolCheck("node"),
+          runToolCheck("pnpm"),
+          runToolCheck("dsh"),
+        ]);
+        await settleStatus(cur, false);
+      } finally {
+        statusRefreshInFlight = false;
+      }
     },
 
     promptCredentialsFix: async (fallbackReason: string) => {
@@ -699,7 +717,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (code !== 0) {
         throw new Error(`pnpm 降级失败（退出码 ${code}），请查看下方日志`);
       }
-      get().appendLog("success", "✅ 已降级到 pnpm 10");
+      get().appendLog("success", "已降级到 pnpm 10");
       await api.refreshSearchPath();
       await pullStatusFields();
       if (pnpmMajorOf(get().pnpmVersion) >= 11) {
@@ -731,7 +749,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         downgraded = await get().ensurePnpm10();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        get().appendLog("error", `❌ ${msg}`);
+        get().appendLog("error", msg);
         set({ phase: "error", error: msg });
         return;
       }
@@ -747,7 +765,7 @@ export const useAppStore = create<AppStore>((set, get) => {
             "检测到 pnpm 刚从 11 降级到 10：保留现有 dsh 版本继续启动（不再自动重装 @latest，避免覆盖现有版本）",
           );
         }
-        get().appendLog("system", "✔ 检测到 dsh 已全局安装，跳过安装步骤");
+        get().appendLog("system", "检测到 dsh 已全局安装，跳过安装步骤");
         void get().startService();
       } else {
         get().appendLog("system", "开始全局安装 @deepseek-ai/dsh@latest …");
@@ -793,15 +811,34 @@ export const useAppStore = create<AppStore>((set, get) => {
         if (code !== 0) {
           throw new Error(`${label}安装失败（退出码 ${code}），请查看下方日志`);
         }
-        get().appendLog("success", `✅ ${label}安装完成`);
+        get().appendLog("success", `${label}安装完成`);
       };
 
       try {
-        // ① Node.js（Windows: winget / macOS: brew；中文系统 npm 类安装自动走国内镜像）
-        if (!meetsNodeRequirement(get().nodeVersion)) {
+        // ① Node.js（Windows: winget / macOS: brew；中文系统 npm 类安装自动走国内镜像）。
+        // 安装判定按「路径未找到」而非「版本读不出」：版本读取在负载下偶发超时，
+        // 据此重装会把好端端的 node（如 nvm 管理的）用 winget 再装一份并抢占 PATH。
+        // 路径在、版本读不出 → 复检一次，仍读不出就按未知版本继续链路；
+        // 版本可读且低于 22.19 → 确实需要 LTS，才走安装。
+        if (!get().nodePath) {
+          // 动手前复检一次：where 解析偶发超时不等于未安装
+          await runToolCheck("node");
+        }
+        if (!get().nodePath) {
           get().appendLog(
             "system",
-            "未检测到可用的 Node.js（≥22.19）：Windows 使用 winget、macOS 使用 Homebrew 自动安装 LTS 版本…",
+            "未检测到 Node.js：Windows 使用 winget、macOS 使用 Homebrew 自动安装 LTS 版本…",
+          );
+          await runStep("node", "Node.js");
+          await api.refreshSearchPath();
+          await pullStatusFields();
+          if (!get().nodePath) {
+            throw new Error("Node.js 已执行安装但当前会话仍未探测到，请重启本应用后重试");
+          }
+        } else if (get().nodeVersion && !meetsNodeRequirement(get().nodeVersion)) {
+          get().appendLog(
+            "system",
+            `检测到 Node.js ${get().nodeVersion} 低于要求的 22.19：自动安装 LTS 版本…`,
           );
           await runStep("node", "Node.js");
           await api.refreshSearchPath();
@@ -809,6 +846,11 @@ export const useAppStore = create<AppStore>((set, get) => {
           if (!meetsNodeRequirement(get().nodeVersion)) {
             throw new Error("Node.js 已执行安装但当前会话仍未探测到，请重启本应用后重试");
           }
+        } else if (!get().nodeVersion) {
+          get().appendLog(
+            "system",
+            `已找到 Node.js（${get().nodePath}）但版本读取超时，按未知版本继续启动链…`,
+          );
         }
 
         // ② pnpm（npm 全局安装，锁定 10.x——dsh 不支持 pnpm 11）
@@ -848,13 +890,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         }
 
         // 环境全部就绪 → 直接进入现有启动链（含 dsh web 启动、自动打开）
-        get().appendLog("success", "✅ 运行环境就绪");
+        get().appendLog("success", "运行环境就绪");
         set({ envInstallTool: null });
         void get().startService();
       } catch (e) {
         dropEnvExitWait();
         const msg = e instanceof Error ? e.message : String(e);
-        get().appendLog("error", `❌ ${msg}`);
+        get().appendLog("error", msg);
         set({ phase: "error", error: msg, envInstallTool: null });
       }
     },
@@ -866,7 +908,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch {
         /* 忽略停止失败 */
       }
-      get().appendLog("system", "🛑 已停止 dsh web 服务");
+      get().appendLog("system", "已停止 dsh web 服务");
       // 结束当前日志会话：服务停止即会话结束（下次启动/重启会开新会话）
       const sid = get().logSessionId;
       if (sid) {

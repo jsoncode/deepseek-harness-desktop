@@ -1,4 +1,5 @@
 import {
+  ApiOutlined,
   AppstoreOutlined,
   BellOutlined,
   ClusterOutlined,
@@ -12,16 +13,18 @@ import PluginManagerPanel from "../components/PluginManagerPanel";
 import AboutSettings from "../components/settings/AboutSettings";
 import LogManagerSettings from "../components/settings/LogManagerSettings";
 import NotifySettings from "../components/settings/NotifySettings";
+import ProxySettings from "../components/settings/ProxySettings";
 import ThemeSettings from "../components/settings/ThemeSettings";
 
-type SectionKey = "plugins" | "notify" | "theme" | "logs" | "about";
+type SectionKey = "plugins" | "notify" | "theme" | "proxy" | "logs" | "about";
 
-const SECTION_KEYS: SectionKey[] = ["plugins", "notify", "theme", "logs", "about"];
+const SECTION_KEYS: SectionKey[] = ["plugins", "notify", "theme", "proxy", "logs", "about"];
 
 const MENU_ITEMS = [
   { key: "plugins", icon: <ClusterOutlined />, label: "插件管理" },
   { key: "notify", icon: <BellOutlined />, label: "通知管理" },
   { key: "theme", icon: <AppstoreOutlined />, label: "主题设置" },
+  { key: "proxy", icon: <ApiOutlined />, label: "代理设置" },
   { key: "logs", icon: <FileTextOutlined />, label: "日志管理" },
   { key: "about", icon: <InfoCircleOutlined />, label: "关于本应用" },
 ];
@@ -67,6 +70,7 @@ export default function Settings() {
         {active === "plugins" ? <PluginManagerPanel /> : null}
         {active === "notify" ? <NotifySettings /> : null}
         {active === "theme" ? <ThemeSettings /> : null}
+        {active === "proxy" ? <ProxySettings /> : null}
         {active === "logs" ? <LogManagerSettings /> : null}
         {active === "about" ? <AboutSettings /> : null}
       </div>

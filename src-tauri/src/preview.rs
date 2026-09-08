@@ -106,7 +106,11 @@ pub fn preview_bridge_report(
 ) -> Result<(), String> {
     match kind.as_str() {
         "theme" => {
-            let _ = app.emit_to("main", "dsh://preview-theme", serde_json::json!({ "dark": dark }));
+            let _ = app.emit_to(
+                "main",
+                "dsh://preview-theme",
+                serde_json::json!({ "dark": dark }),
+            );
         }
         "plugin-failed" => {
             let _ = app.emit_to(

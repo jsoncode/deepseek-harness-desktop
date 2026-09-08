@@ -1,8 +1,10 @@
 import { GithubOutlined, SyncOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import logo from "../../assets/logo.svg";
+import { meetsNodeRequirement, pnpmMajorOf } from "../../lib/envReq";
 import { api, tauri } from "../../lib/tauri";
+import { useAppStore } from "../../store/useAppStore";
 
 /** GitHub 仓库（与 .github/workflows/release.yml 发布源一致） */
 const REPO = "jsoncode/deepseek-harness-desktop";
@@ -16,6 +18,173 @@ interface GitHubRelease {
   published_at?: string;
   html_url?: string;
   body?: string | null;
+}
+
+interface EnvRow {
+  name: string;
+  state: "ok" | "bad" | "warn" | "loading";
+  detail: ReactNode;
+}
+
+/**
+ * 系统环境（设置页区块）：Node.js / pnpm / dsh CLI 的本机检测详情。
+ * 启动检查页已移除后环境结果收敛到此处；进入区块或启动/安装链结束后自动检测，
+ * 也可手动重新检测。缺失/异常项不在此修复——启动应用时会按需自动安装/降级/重装。
+ */
+function SystemEnvCard() {
+  const nodePath = useAppStore((s) => s.nodePath);
+  const nodeVersion = useAppStore((s) => s.nodeVersion);
+  const pnpmPath = useAppStore((s) => s.pnpmPath);
+  const pnpmVersion = useAppStore((s) => s.pnpmVersion);
+  const dshInstalled = useAppStore((s) => s.dshInstalled);
+  const dshVersion = useAppStore((s) => s.dshVersion);
+  const phase = useAppStore((s) => s.phase);
+  const refreshStatus = useAppStore((s) => s.refreshStatus);
+  // 逐项检测完成标记：false = 该项仍在检测中（行内显示 loading）
+  const envCheckDone = useAppStore((s) => s.envCheckDone);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // 进入区块 / phase 每次落定（启动、安装链结束）时自动检测：
+  // 安装链内的 pullStatusFields 不刷新检查行，链路结束后在此补一次
+  useEffect(() => {
+    if (phase === "checking" || phase === "installing" || phase === "starting") return;
+    void refreshStatus();
+  }, [phase, refreshStatus]);
+
+  const recheck = async () => {
+    setRefreshing(true);
+    try {
+      await refreshStatus();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // 启动/安装进行中后端会跳过重测（refreshStatus 内部保护），按钮一并禁用
+  const busy = phase === "installing" || phase === "starting";
+
+  // ---- 环境检查行（与启动链判定一致：缺失/损坏项由启动流程自动修复）----
+  const envRows: EnvRow[] = [];
+  if (!tauri) {
+    envRows.push({
+      name: "运行环境",
+      state: "warn",
+      detail: "浏览器预览模式：环境检查需在桌面应用内进行",
+    });
+  } else {
+    if (!envCheckDone.node) {
+      envRows.push({ name: "Node.js", state: "loading", detail: <span>检测中…</span> });
+    } else if (meetsNodeRequirement(nodeVersion)) {
+      envRows.push({ name: "Node.js", state: "ok", detail: <>已安装 v{nodeVersion}</> });
+    } else if (!nodePath) {
+      envRows.push({
+        name: "Node.js",
+        state: "bad",
+        detail: <>未检测到 · 启动应用时将自动安装 LTS 版本（≥ 22.19：Windows 走 winget / macOS 走 Homebrew）</>,
+      });
+    } else if (!nodeVersion) {
+      envRows.push({
+        name: "Node.js",
+        state: "bad",
+        detail: <>已找到 Node 但无法读取版本 · 启动应用时将自动重新安装修复</>,
+      });
+    } else {
+      envRows.push({
+        name: "Node.js",
+        state: "bad",
+        detail: <>当前 v{nodeVersion}，低于要求的 22.19 · 启动应用时将自动安装 LTS 版本</>,
+      });
+    }
+
+    const pnpm11 = pnpmMajorOf(pnpmVersion) >= 11;
+    envRows.push(
+      !envCheckDone.pnpm
+        ? { name: "pnpm", state: "loading", detail: <span>检测中…</span> }
+        : pnpmPath
+          ? {
+              name: "pnpm",
+              state: pnpm11 ? "warn" : "ok",
+              detail: pnpmVersion ? (
+                <span>
+                  已安装 v{pnpmVersion}
+                  {pnpm11 ? (
+                    <span className="env-warn-text">（dsh 不支持 pnpm 11，启动时将自动降级到 pnpm 10）</span>
+                  ) : null}
+                </span>
+              ) : (
+                <span>已安装</span>
+              ),
+            }
+          : {
+              name: "pnpm",
+              state: "bad",
+              detail: <span>未检测到 · 启动应用时将自动全局安装 pnpm@10（dsh 不支持 pnpm 11）</span>,
+            },
+    );
+
+    // dsh 已安装但读不出版本 = 安装损坏，启动链会按需自动重装
+    const dshBroken = dshInstalled && !dshVersion;
+    envRows.push(
+      !envCheckDone.dsh
+        ? { name: "dsh CLI", state: "loading", detail: <span>检测中…</span> }
+        : dshInstalled
+          ? {
+              name: "dsh CLI",
+              state: dshBroken ? "warn" : "ok",
+              detail: dshVersion ? (
+                <span>已安装 v{dshVersion}</span>
+              ) : (
+                <span>已安装但无法读取版本（可能已损坏）· 启动应用时将自动重新全局安装</span>
+              ),
+            }
+          : {
+              name: "dsh CLI",
+              state: "warn",
+              detail: <span>未安装 · 启动应用时将自动全局安装 @deepseek-ai/dsh</span>,
+            },
+    );
+  }
+
+  // 卡片描边：任一行 bad → 红框；否则任一行 warn → 黄框；检测中不描边（值未落定）
+  const worst =
+    envRows.some((r) => r.state === "loading")
+      ? ""
+      : envRows.some((r) => r.state === "bad")
+        ? "bad"
+        : envRows.some((r) => r.state === "warn")
+          ? "warn"
+          : "";
+
+  return (
+    <div className="settings-card">
+      <div
+        className="settings-card-title"
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
+      >
+        <span>系统环境</span>
+        <button
+          className="pm-btn pm-btn-sm"
+          type="button"
+          disabled={refreshing || busy}
+          onClick={() => void recheck()}
+        >
+          <SyncOutlined style={{ fontSize: 12 }} spin={refreshing} />
+          {refreshing ? "检测中…" : "重新检测"}
+        </button>
+      </div>
+      <div className={"env-card about-env-card" + (worst ? " " + worst : "")}>
+        {envRows.map((r) => (
+          <div key={r.name} className="env-row">
+            <span className={"env-mark " + r.state}>
+              {r.state === "ok" ? "✓" : r.state === "warn" ? "○" : r.state === "bad" ? "✗" : <span className="env-spinner" />}
+            </span>
+            <span className="env-name">{r.name}</span>
+            <span className={"env-detail" + (r.state === "loading" ? " loading" : "")}>{r.detail}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /** 检查状态：未检查 / 检查中 / 已是最新 / 发现新版本 / 检查失败 */
@@ -144,6 +313,9 @@ export default function AboutSettings() {
             </button>
           </div>
         </div>
+
+        {/* 系统环境：Node.js / pnpm / dsh CLI 检测结果（启动检查页已移除，收敛至此） */}
+        <SystemEnvCard />
 
         <div className="settings-card">
           <div className="settings-card-title">版本更新</div>

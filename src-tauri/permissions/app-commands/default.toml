@@ -45,6 +45,8 @@ commands.allow = [
   "tts_history_delete",
   "check_credentials_compat",
   "fix_credentials",
+  "get_proxy_config",
+  "set_proxy_config",
   "log_start_session",
   "log_append",
   "log_set_status",

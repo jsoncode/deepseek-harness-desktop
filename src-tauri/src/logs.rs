@@ -36,6 +36,8 @@ pub struct LogSessionMeta {
     pub ended_at: Option<i64>,
     /// "active" | "success" | "error" | "closed"
     pub status: String,
+    /// "service"（服务启动/重启）| "plugin"（插件操作）；旧文件无该字段时归一为 "service"
+    pub kind: String,
     pub lines: usize,
 }
 
@@ -47,6 +49,9 @@ struct SessionHeader {
     started_at: i64,
     ended_at: Option<i64>,
     status: String,
+    /// "service"（默认，旧文件无此字段）| "plugin"
+    #[serde(default)]
+    kind: String,
 }
 
 fn unix_now() -> i64 {
@@ -71,6 +76,11 @@ fn session_file(dir: &PathBuf, id: &str) -> PathBuf {
     dir.join(format!("{id}.jsonl"))
 }
 
+/// 日志行时间：与前端 useAppStore::now 同格式（HH:MM:SS 本地时间）
+fn hms_now() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
 /// 生成会话 id：unix 纳秒字符串，保证唯一
 fn session_id() -> String {
     let nanos = SystemTime::now()
@@ -82,12 +92,18 @@ fn session_id() -> String {
 
 /// 重写会话文件 header 行（保留后续日志行不变）；失败静默（非关键路径）
 fn rewrite_header(file: &PathBuf, f: impl FnOnce(&mut SessionHeader)) {
-    let Ok(content) = fs::read_to_string(file) else { return };
+    let Ok(content) = fs::read_to_string(file) else {
+        return;
+    };
     let mut it = content.lines();
     let Some(first) = it.next() else { return };
-    let Ok(mut h) = serde_json::from_str::<SessionHeader>(first) else { return };
+    let Ok(mut h) = serde_json::from_str::<SessionHeader>(first) else {
+        return;
+    };
     f(&mut h);
-    let Ok(new_first) = serde_json::to_string(&h) else { return };
+    let Ok(new_first) = serde_json::to_string(&h) else {
+        return;
+    };
     let mut out = String::with_capacity(content.len() + 16);
     out.push_str(&new_first);
     out.push('\n');
@@ -98,13 +114,21 @@ fn rewrite_header(file: &PathBuf, f: impl FnOnce(&mut SessionHeader)) {
     let _ = fs::write(file, out);
 }
 
-/// 结束当前活动会话：补写 ended_at；status 仍为 active 时置 closed。
+/// 结束当前活动日志会话：补写 ended_at；status 仍为 active 时置 closed。
+/// 服务会话与插件会话两个槽位都收尾（应用退出/崩溃时插件操作可能正在进行）。
 /// 应用启动（setup）与退出（RunEvent::Exit）时各调用一次，覆盖崩溃/异常退出。
 pub fn finalize_active(app: &AppHandle) {
-    let Some(state) = app.try_state::<AppState>() else { return };
-    let id = state.active_log.lock().unwrap().take().map(|a| a.id);
-    let Some(id) = id else { return };
-    if let Ok(dir) = logs_dir(app) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let ids = [
+        state.active_log.lock().unwrap().take().map(|a| a.id),
+        state.active_plugin_log.lock().unwrap().take().map(|a| a.id),
+    ];
+    let Some(dir) = logs_dir(app).ok() else {
+        return;
+    };
+    for id in ids.into_iter().flatten() {
         rewrite_header(&session_file(&dir, &id), |h| {
             h.ended_at = Some(unix_now());
             if h.status == "active" {
@@ -114,31 +138,100 @@ pub fn finalize_active(app: &AppHandle) {
     }
 }
 
-/// 开始新日志会话：先 finalize 旧会话，再创建新会话文件并返回会话 id
-#[tauri::command]
-pub fn log_start_session(app: AppHandle, title: String) -> Result<String, String> {
-    finalize_active(&app);
-    let dir = logs_dir(&app)?;
+/// 创建会话文件（写入 header），返回会话 id
+fn create_session(dir: &PathBuf, title: &str, kind: &str) -> Result<String, String> {
     let id = session_id();
     let header = SessionHeader {
         id: id.clone(),
-        title,
+        title: title.to_string(),
         started_at: unix_now(),
         ended_at: None,
         status: "active".into(),
+        kind: kind.to_string(),
     };
-    let mut file = fs::File::create(session_file(&dir, &id))
-        .map_err(|e| format!("创建日志会话失败: {e}"))?;
+    let mut file =
+        fs::File::create(session_file(dir, &id)).map_err(|e| format!("创建日志会话失败: {e}"))?;
     writeln!(
         file,
         "{}",
         serde_json::to_string(&header).map_err(|e| format!("序列化失败: {e}"))?
     )
     .map_err(|e| format!("写入日志会话失败: {e}"))?;
+    Ok(id)
+}
+
+/// 追加一条日志到指定会话文件
+fn append_to_session(app: &AppHandle, id: &str, entry: &LogEntry) -> Result<(), String> {
+    let dir = logs_dir(app)?;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(session_file(&dir, id))
+        .map_err(|e| format!("打开日志会话失败: {e}"))?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(entry).map_err(|e| format!("序列化失败: {e}"))?
+    )
+    .map_err(|e| format!("写入日志失败: {e}"))?;
+    Ok(())
+}
+
+/// 开始新服务日志会话：先 finalize 旧会话，再创建新会话文件并返回会话 id
+#[tauri::command]
+pub fn log_start_session(app: AppHandle, title: String) -> Result<String, String> {
+    finalize_active(&app);
+    let dir = logs_dir(&app)?;
+    let id = create_session(&dir, &title, "service")?;
     if let Some(state) = app.try_state::<AppState>() {
         *state.active_log.lock().unwrap() = Some(ActiveLog { id: id.clone() });
     }
     Ok(id)
+}
+
+/// 开始插件操作日志会话（Rust 侧直接写入，前端无需调用）：
+/// 与服务会话相互独立——服务会话进行中发起插件操作时互不干扰
+pub fn start_plugin_session(app: &AppHandle, title: &str) -> Result<(), String> {
+    let dir = logs_dir(app)?;
+    let id = create_session(&dir, title, "plugin")?;
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.active_plugin_log.lock().unwrap() = Some(ActiveLog { id });
+    }
+    Ok(())
+}
+
+/// 追加一条日志到当前活动插件会话（无活动插件会话时静默忽略）
+pub fn append_active_plugin_log(app: &AppHandle, stream: &str, text: &str) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let id = state
+        .active_plugin_log
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|a| a.id.clone());
+    let Some(id) = id else { return };
+    let entry = LogEntry {
+        time: hms_now(),
+        stream: stream.to_string(),
+        text: text.to_string(),
+    };
+    let _ = append_to_session(app, &id, &entry);
+}
+
+/// 结束当前活动插件会话：落状态（success/error）并补写结束时间（无活动会话时静默忽略）
+pub fn finish_active_plugin_session(app: &AppHandle, status: &str) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let id = state.active_plugin_log.lock().unwrap().take().map(|a| a.id);
+    let Some(id) = id else { return };
+    if let Ok(dir) = logs_dir(app) {
+        rewrite_header(&session_file(&dir, &id), |h| {
+            h.status = status.to_string();
+            h.ended_at = Some(unix_now());
+        });
+    }
 }
 
 /// 追加一条日志到当前活动会话（无活动会话时静默忽略）
@@ -156,18 +249,7 @@ pub fn log_append(app: AppHandle, entry: LogEntry) -> Result<(), String> {
     let Some(id) = id else {
         return Ok(());
     };
-    let dir = logs_dir(&app)?;
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(session_file(&dir, &id))
-        .map_err(|e| format!("打开日志会话失败: {e}"))?;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string(&entry).map_err(|e| format!("序列化失败: {e}"))?
-    )
-    .map_err(|e| format!("写入日志失败: {e}"))?;
-    Ok(())
+    append_to_session(&app, &id, &entry)
 }
 
 /// 更新会话状态（success / error / closed）；状态非 active 时同时补写结束时间
@@ -215,6 +297,11 @@ pub fn log_sessions(app: AppHandle) -> Result<Vec<LogSessionMeta>, String> {
             started_at: h.started_at,
             ended_at: h.ended_at,
             status: h.status,
+            kind: if h.kind == "plugin" {
+                "plugin".into()
+            } else {
+                "service".into()
+            },
             lines: it.count(),
         });
     }
@@ -242,6 +329,7 @@ pub fn log_content(app: AppHandle, id: String) -> Result<Vec<LogEntry>, String> 
 pub fn log_clear(app: AppHandle) -> Result<(), String> {
     if let Some(state) = app.try_state::<AppState>() {
         *state.active_log.lock().unwrap() = None;
+        *state.active_plugin_log.lock().unwrap() = None;
     }
     let dir = logs_dir(&app)?;
     for entry in fs::read_dir(&dir).map_err(|e| format!("读取日志目录失败: {e}"))? {

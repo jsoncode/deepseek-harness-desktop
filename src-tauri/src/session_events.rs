@@ -790,7 +790,10 @@ mod tests {
         let msg = extract_mux(&frame, &mut live, &mut notes).expect("应产生一条推送");
         assert_eq!(msg.kind, "todo");
         assert_eq!(msg.session_id, "session-x");
-        assert_eq!(msg.summary, "更新任务清单：1项已完成 · 1项进行中 · 1项待处理");
+        assert_eq!(
+            msg.summary,
+            "更新任务清单：1项已完成 · 1项进行中 · 1项待处理"
+        );
         // 描述行 = 会话标题 + 「· HH:MM:SS」时间尾缀
         let (base, hms) = msg.body.rsplit_once(" · ").expect("body 应带时间尾缀");
         assert_eq!(base, "未命名对话");
@@ -878,7 +881,11 @@ mod tests {
                 None => msg.body.as_str(),
             };
             assert!(is_hms(hms), "描述行应含 HH:MM:SS: {}", msg.body);
-            assert!(!msg.title.contains(hms), "title 不得出现时间: {}", msg.title);
+            assert!(
+                !msg.title.contains(hms),
+                "title 不得出现时间: {}",
+                msg.title
+            );
             assert!(!msg.desc.contains(hms), "desc 不得出现时间: {}", msg.desc);
             assert!(
                 !msg.summary.contains(hms),

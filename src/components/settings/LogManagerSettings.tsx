@@ -2,7 +2,7 @@ import { App as AntApp } from "antd";
 import { CopyOutlined, DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AppModal from "../AppModal";
-import { MARK } from "../../lib/logFormat";
+import SlidingSeg from "../SlidingSeg";
 import { api, nativeConfirm, tauri, type LogSessionMeta } from "../../lib/tauri";
 import { useAppStore } from "../../store/useAppStore";
 
@@ -54,6 +54,8 @@ export default function LogManagerSettings() {
   const [detail, setDetail] = useState<LogSessionMeta | null>(null);
   const [detailLines, setDetailLines] = useState<Array<{ time: string; stream: string; text: string }> | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  /** 日志类型筛选：all=全部 / service=服务日志 / plugin=插件操作日志 */
+  const [kindFilter, setKindFilter] = useState<"all" | "service" | "plugin">("all");
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -84,9 +86,15 @@ export default function LogManagerSettings() {
           started_at: Math.floor(Date.now() / 1000),
           ended_at: null,
           status: "active",
+          kind: "service",
           lines: logs.length,
         },
       ];
+
+  // 类型筛选只作用于桌面端会话列表（预览模式仅一条伪会话）
+  const visibleSessions = tauri
+    ? displaySessions.filter((s) => kindFilter === "all" || s.kind === kindFilter)
+    : displaySessions;
 
   // 详情是否实时：桌面端当前活动会话 / 预览模式伪会话
   const isLive = detail !== null && (tauri ? detail.id === logSessionId : true);
@@ -146,6 +154,12 @@ export default function LogManagerSettings() {
   const linesOf = (s: LogSessionMeta) =>
     s.status === "active" && s.id === logSessionId ? logs.length : s.lines;
 
+  const KIND_LABELS: Record<typeof kindFilter, string> = {
+    all: "日志",
+    service: "服务日志",
+    plugin: "插件日志",
+  };
+
   return (
     <>
       <div className="settings-nav">
@@ -153,6 +167,15 @@ export default function LogManagerSettings() {
         <div className="settings-nav-actions">
           {tauri ? (
             <>
+              <SlidingSeg
+                value={kindFilter}
+                options={[
+                  { key: "all", label: "全部" },
+                  { key: "service", label: "服务日志" },
+                  { key: "plugin", label: "插件日志" },
+                ]}
+                onChange={setKindFilter}
+              />
               <button className="pm-btn" type="button" disabled={loading} onClick={() => void load()}>
                 <ReloadOutlined style={{ fontSize: 12 }} />
                 {loading ? "加载中…" : "刷新"}
@@ -217,11 +240,15 @@ export default function LogManagerSettings() {
             <span className="mk-op-spinner" />
             <span>正在加载日志…</span>
           </div>
-        ) : displaySessions.length === 0 ? (
-          <div className="log-empty">暂无日志记录（启动或重启服务后自动生成）</div>
+        ) : visibleSessions.length === 0 ? (
+          <div className="log-empty">
+            {displaySessions.length > 0
+              ? `暂无${KIND_LABELS[kindFilter]}记录`
+              : "暂无日志记录（启动服务或执行插件操作后自动生成）"}
+          </div>
         ) : (
           <div className="log-sessions">
-            {displaySessions.map((s) => {
+            {visibleSessions.map((s) => {
               const meta = statusOf(s);
               return (
                 <button
@@ -273,21 +300,15 @@ export default function LogManagerSettings() {
               <div className="term-empty">{isLive ? "等待输出…" : "该会话暂无日志输出"}</div>
             ) : (
               detailRows.map((l) => (
-                <div key={l.key} className={`term-line ${l.stream}`}>
-                  <span className="t-time">{l.time}</span>
-                  <span className="t-mark">{MARK[l.stream] ?? "·"}</span>
-                  <span className="t-text">{l.text}</span>
+                <div key={l.key} className="term-line">
+                  {l.text}
                 </div>
               ))
             )}
             {isLive && detailRows.length > 0 ? (
-              <div className="term-line system">
-                <span className="t-time">{"·".repeat(8)}</span>
-                <span className="t-mark">◆</span>
-                <span className="t-text">
-                  实时输出中…
-                  <span className="term-cursor" />
-                </span>
+              <div className="term-line">
+                实时输出中…
+                <span className="term-cursor" />
               </div>
             ) : null}
           </div>
