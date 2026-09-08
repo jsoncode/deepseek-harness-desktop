@@ -176,6 +176,19 @@ export interface VoiceConfig {
   maxNewTokens: number;
   /** 贪心解码：忽略采样参数，输出最稳定 */
   greedy: boolean;
+  /** 合成引擎："audio8"（默认，原始方案）| "kokoro"（82M 轻量模型） */
+  engine: "audio8" | "kokoro";
+  /** Kokoro 模型目录（git clone ModelScope Kokoro-82M 产物：
+   *  config.json + kokoro-v1_0.pth + voices/*.pt）；仅 engine = "kokoro" 使用 */
+  kokoroModelDir: string;
+  /** kokoro 库源码目录（git clone hexgrad/kokoro，含 kokoro/__init__.py）。
+   *  可选：留空 = pip 安装的 kokoro 包；填写则 worker 优先加载该源码 */
+  kokoroRepoDir: string;
+  /** Kokoro 音色 id（voices/ 下 .pt 文件名去扩展名，如 "zf_xiaoxiao"）；
+   *  空 = worker 默认（优先 zf_xiaoxiao） */
+  kokoroVoice: string;
+  /** Kokoro 语速（0.5~2.0，1.0 原速） */
+  kokoroSpeed: number;
 }
 
 /** 内置音色（Rust `tts::BuiltinVoiceMeta` 同形）：来自资源目录 voices/ 下的
@@ -204,6 +217,39 @@ export interface VoiceEnvReport {
   torchError: string | null;
   /** torch 检测失败且 Python 可用时的完整一键安装命令；正常/Python 不可用时为 null */
   torchInstallCmd: string | null;
+  // —— Kokoro 引擎（engine = "kokoro" 时展示这几行）——
+  /** kokoro / misaki 包可导入且中文 G2P 依赖就绪 */
+  kokoroPkgOk: boolean;
+  kokoroPkgInfo: string | null;
+  kokoroPkgError: string | null;
+  /** kokoro 依赖检测失败且 Python 可用时的完整一键安装命令 */
+  kokoroInstallCmd: string | null;
+  /** 模型目录布局：config.json + 权重 .pth */
+  kokoroModelOk: boolean;
+  kokoroModelHint: string;
+  /** 音色包：voices/*.pt 至少 1 个 */
+  kokoroVoicesOk: boolean;
+  kokoroVoicesHint: string;
+  /** 可选源码目录：留空 = 用 pip 包（视为 ok）；填写校验 kokoro/__init__.py */
+  kokoroRepoOk: boolean;
+  kokoroRepoHint: string;
+}
+
+/** Kokoro 模型/源码自动探测结果（Rust `tts::KokoroAutodetect` 同形） */
+export interface KokoroAutodetect {
+  /** 第一个布局完整的模型目录；未找到为 null */
+  modelDir: string | null;
+  /** 第一个 kokoro 库源码目录（可选加载源）；未找到为 null */
+  repoDir: string | null;
+}
+
+/** Kokoro 音色包（Rust `tts::KokoroVoiceMeta` 同形）：voices/*.pt 文件名即 id */
+export interface KokoroVoiceMeta {
+  id: string;
+  /** 语言码（音色名首字母，与 KPipeline lang_code 一致） */
+  lang: string;
+  /** 语言展示名（中文 / 英语（美）…） */
+  langLabel: string;
 }
 
 /** 长文本分段合成进度负载（Rust tts.rs TTS_SYNTH_PROGRESS_EVENT） */
@@ -314,6 +360,10 @@ export const api = {
    *  section：省略/"synth" → 合成页；"history" → 生成历史页 */
   ttsOpenStudio: (section?: "synth" | "history") =>
     requireTauri(() => invoke<void>("tts_open_studio", { section: section ?? null })),
+  /** 打开 Kokoro 语音合成工具独立窗口（与 Audio8 窗口同构，配置面板为 Kokoro 字段；
+   *  历史页两引擎共用）。section 语义同 ttsOpenStudio */
+  ttsOpenKokoroStudio: (section?: "synth" | "history") =>
+    requireTauri(() => invoke<void>("tts_open_kokoro_studio", { section: section ?? null })),
   /** 自动配置 Audio8_TTS 仓库和模型（若路径为空则克隆到 app_data/tts/） */
   ttsAutoSetup: () =>
     requireTauri(() => invoke<{ repoDir: string; modelDir: string; actions: string[] }>("tts_auto_setup")),
@@ -333,6 +383,35 @@ export const api = {
         target: target ?? null,
       }),
     ),
+  /** Kokoro 音色列表（扫描模型目录 voices/*.pt；目录未就绪返回空数组） */
+  ttsKokoroVoices: (modelDir: string) =>
+    requireTauri(() => invoke<KokoroVoiceMeta[]>("tts_kokoro_voices", { modelDir })),
+  /** 自动探测 Kokoro 模型/源码目录（应用数据目录 → 工作目录及父目录 → 常见
+   *  开发目录 `<盘>:\code` 等 → exe 目录） */
+  ttsKokoroAutodetect: () =>
+    requireTauri(() => invoke<KokoroAutodetect>("tts_kokoro_autodetect")),
+  /** 一键下载 Kokoro-82M 模型（ModelScope 优先、HF 回退）：语义同 ttsDownloadModel，
+   *  target 省略/空 → app_data/tts/Kokoro-82M */
+  ttsDownloadKokoroModel: (target?: string) =>
+    requireTauri(() =>
+      invoke<{ modelDir: string; skipped: boolean; actions: string[] }>(
+        "tts_download_kokoro_model",
+        { target: target ?? null },
+      ),
+    ),
+  /** 一键克隆 kokoro 源码仓库（hexgrad/kokoro）：语义同 ttsCloneRepo，
+   *  target 省略/空 → app_data/tts/kokoro；目录已存在时 skipped=true。
+   *  源码目录是可选项（留空 = pip 安装的 kokoro 包） */
+  ttsCloneKokoroRepo: (target?: string) =>
+    requireTauri(() =>
+      invoke<{ repoDir: string; skipped: boolean; actions: string[] }>(
+        "tts_clone_kokoro_repo",
+        { target: target ?? null },
+      ),
+    ),
+  /** 一键安装 Kokoro 依赖（kokoro / misaki[zh] / soundfile）：pip 输出经
+   *  EVENTS.voiceInstallLog 逐行推送；命令在全部步骤结束后才 resolve */
+  ttsInstallKokoroDeps: () => requireTauri(() => invoke<void>("tts_install_kokoro_deps")),
   /** 长文本分段合成 → 拼接导出（app_data/tts/exports/tts-<ts>.wav）；
    *  进度经 EVENTS.ttsSynthProgress 逐段推送；命令在全部完成后返回导出文件绝对路径。
    *  每段独立复用文本缓存；首次调用会拉起 worker 加载模型（30~90s） */

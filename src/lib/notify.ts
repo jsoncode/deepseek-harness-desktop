@@ -28,7 +28,8 @@ export type NotifyChannel = (m: NotifyMessage) => void;
 
 /**
  * 语音播报不在前端做：Rust 侧 `src-tauri/src/tts.rs` 的 VoiceChannel 已经接入
- * （常驻 Python worker 合成 Audio8 TTS + rodio 原生播放）。原因：
+ * （常驻 Python worker 合成 TTS + rodio 原生播放；引擎可在 Audio8 / Kokoro 间
+ * 切换，见设置→通知管理「合成引擎」）。原因：
  * 1) WebView2 隐藏/最小化时会节流定时器与音频，通知场景恰好是后台状态；
  * 2) 前端朗读会与 Rust 通道双播。
  * 这里保留空通道位维持 channels 结构；语音状态展示在设置页（监听 notifyVoice）。

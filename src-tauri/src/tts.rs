@@ -1,11 +1,17 @@
-//! 语音播报通道：把通知文本交给常驻 Python worker（Audio8 TTS）合成语音，
-//! 再用 rodio 本地播放。设计约束与原因：
+//! 语音播报通道：把通知文本交给常驻 Python worker 合成语音，再用 rodio 本地播放。
+//! 支持两个可切换的合成引擎（`VoiceConfig::engine`）：
 //!
-//! - **不迁移 Python 代码**：Rust 只做进程编排，模型加载/推理全在 Audio8 原仓库
-//!   的官方路径（AutoProcessor/AutoModel + trust_remote_code），与
-//!   `audio8_tts_infer.py` 完全一致，仓库升级零跟进成本。worker 脚本
-//!   （[`WORKER_PY`]，include_str! 内嵌）运行时写入应用数据目录，不污染用户克隆。
-//! - **常驻 worker**：冷启动（torch import + 加载 AR+codec 模型）30~90s，每条通知
+//! - **audio8**（默认，原始方案）：Audio8_TTS 仓库的官方推理路径
+//!   （AutoProcessor/AutoModel + trust_remote_code），worker 脚本
+//!   （[`WORKER_PY`]，include_str! 内嵌）运行时写入应用数据目录，Rust 只做进程
+//!   编排，仓库升级零跟进成本。
+//! - **kokoro**（轻量备选）：Kokoro-82M（hexgrad/kokoro 库 + ModelScope 镜像
+//!   权重），worker 脚本（[`KOKORO_WORKER_PY`]）复用同一套 JSONL 协议与宿主
+//!   生命周期，仅参数（speed/voice）不同；完全本地加载，全程不访问网络。
+//!
+//! 设计约束与原因：
+//!
+//! - **常驻 worker**：冷启动（torch import + 权重加载）30~90s，每条通知
 //!   重跑一次不可用；worker 加载一次后常驻，空闲 10 分钟自退，崩溃由宿主退避重启。
 //! - **CPU/GPU 双覆盖**：device 由 torch 自动选择（CUDA → bf16，否则 CPU fp32），
 //!   是 infer.py 的原生行为，Rust 侧不感知。
@@ -35,6 +41,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub const VOICE_EVENT: &str = "dsh://notify-voice";
 
 const WORKER_PY: &str = include_str!("tts_worker.py");
+/// Kokoro 引擎 worker（与 Audio8 同一 JSONL 协议，见 kokoro_worker.py 模块注释）
+const KOKORO_WORKER_PY: &str = include_str!("kokoro_worker.py");
+
+/// 合成引擎：audio8（默认，原始方案）| kokoro（82M 轻量模型，低延迟低占用）
+pub const ENGINE_AUDIO8: &str = "audio8";
+pub const ENGINE_KOKORO: &str = "kokoro";
 /// 单条合成等待上限（CPU 慢机 + 512 token 的兜底；进程死亡会提前唤醒）
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// 模型加载等待上限（冷启动 torch import + 权重加载）
@@ -211,6 +223,21 @@ pub struct VoiceConfig {
     pub max_new_tokens: u32,
     /// 贪心解码：忽略采样参数，每步取最大概率，输出最稳定
     pub greedy: bool,
+    /// 合成引擎："audio8"（默认）| "kokoro"。决定拉起哪个 worker 脚本与
+    /// 哪组路径校验；切换即换 worker_key → 下次合成自动重启对应引擎的 worker
+    pub engine: String,
+    /// Kokoro-82M 模型目录（git clone ModelScope 产物：config.json +
+    /// kokoro-v1_0.pth + voices/*.pt）。仅 engine == "kokoro" 时使用
+    pub kokoro_model_dir: String,
+    /// kokoro 库源码目录（git clone hexgrad/kokoro，含 kokoro/__init__.py）。
+    /// 可选：留空用 pip 安装的 kokoro 包；填写则 worker 优先加载该源码
+    /// （与 Audio8 的「仓库目录」同构，便于跟踪上游 main）
+    pub kokoro_repo_dir: String,
+    /// Kokoro 音色 id（voices/ 下 .pt 文件名去扩展名，如 "zf_xiaoxiao"）；
+    /// 空 → worker 端选默认（优先 zf_xiaoxiao，否则排序第一个）
+    pub kokoro_voice: String,
+    /// Kokoro 语速（0.5~2.0，1.0 原速；按请求下发，改值无需重启 worker）
+    pub kokoro_speed: f32,
 }
 
 impl Default for VoiceConfig {
@@ -232,23 +259,52 @@ impl Default for VoiceConfig {
             seed: 42,
             max_new_tokens: 512,
             greedy: false,
+            // 默认引擎保持 audio8：老配置（无 engine 字段）行为不变
+            engine: ENGINE_AUDIO8.into(),
+            kokoro_model_dir: String::new(),
+            // 源码目录可选，默认空 = pip 安装的 kokoro 包
+            kokoro_repo_dir: String::new(),
+            // zf_xiaoxiao：ModelScope Kokoro-82M 自带中文女声，作为缺省音色
+            kokoro_voice: "zf_xiaoxiao".into(),
+            kokoro_speed: 1.0,
         }
     }
 }
 
 impl VoiceConfig {
-    /// worker 身份键：三要素任一变化都要求重启 worker（换解释器/仓库/模型）。
-    /// 采样参数刻意不参与：worker 按请求携带参数，改参数不需要重载模型。
+    /// 当前是否 Kokoro 引擎（engine 字段经 set_voice_config 归一，只会是两个
+    /// 合法值之一；防御性起见非 kokoro 一律按 audio8 处理）
+    fn is_kokoro(&self) -> bool {
+        self.engine == ENGINE_KOKORO
+    }
+
+    /// worker 身份键：引擎 + 各引擎的路径要素任一变化都要求重启 worker
+    /// （换解释器/仓库/模型/引擎）。采样参数（Audio8）与语速/音色（Kokoro）
+    /// 刻意不参与：worker 按请求携带，改参数不需要重载模型。
     fn worker_key(&self) -> String {
-        format!(
-            "{}\u{1f}{}\u{1f}{}",
-            self.python_cmd, self.repo_dir, self.model_dir
-        )
+        if self.is_kokoro() {
+            format!(
+                "{ENGINE_KOKORO}\u{1f}{}\u{1f}{}\u{1f}{}",
+                self.python_cmd, self.kokoro_model_dir, self.kokoro_repo_dir
+            )
+        } else {
+            format!(
+                "{ENGINE_AUDIO8}\u{1f}{}\u{1f}{}\u{1f}{}",
+                self.python_cmd, self.repo_dir, self.model_dir
+            )
+        }
     }
 
     /// 采样参数进缓存键：同文本不同参数（尤其是 seed）必须产出不同缓存，
-    /// 否则改参数后播的还是旧音频
+    /// 否则改参数后播的还是旧音频。Kokoro 分支带音色 + 语速（换音色/语速
+    /// 必须换缓存）；Audio8 分支保持原格式不变。
     fn params_tag(&self) -> String {
+        if self.is_kokoro() {
+            return format!(
+                "kokoro\u{1f}v{}\u{1f}sp{}",
+                self.kokoro_voice, self.kokoro_speed
+            );
+        }
         format!(
             "g{}\u{1f}s{}\u{1f}t{}\u{1f}p{}\u{1f}k{}\u{1f}n{}",
             self.greedy as u8,
@@ -258,6 +314,15 @@ impl VoiceConfig {
             self.top_k,
             self.max_new_tokens
         )
+    }
+
+    /// 缓存键用的模型目录：两引擎各自的模型目录（换引擎/换模型自动换缓存）
+    fn cache_model_dir(&self) -> &str {
+        if self.is_kokoro() {
+            &self.kokoro_model_dir
+        } else {
+            &self.model_dir
+        }
     }
 
     /// 完整缓存标签 = 采样参数 + 实际生效的参考音频指纹（路径 + 原文 + 文件
@@ -328,6 +393,11 @@ fn resolve_reference(
     app: &AppHandle,
     cfg: &VoiceConfig,
 ) -> Result<Option<(PathBuf, String)>, String> {
+    // Kokoro 引擎没有参考音频克隆：音色由 voices/*.pt 音色包决定，
+    // 恒返回 None（缓存键也不带参考指纹）
+    if cfg.is_kokoro() {
+        return Ok(None);
+    }
     let voices = builtin_voices(app);
     match effective_voice(cfg, &voices) {
         EffectiveVoice::Builtin(v) => Ok(Some((v.path.clone(), v.ref_text.clone()))),
@@ -350,7 +420,10 @@ fn resolve_reference(
 /// 音频必须成对且文件存在；未知内置 id（文件被重命名/移除后的陈旧配置）归一
 /// 为默认音色——下拉框是 id 的唯一合法来源，set 时出现未知 id 只会是陈旧配置，
 /// 归一比报错更稳（报错会让启动回灌整体失败）
-fn normalize_voice_selection(cfg: &mut VoiceConfig, voices: &[BuiltinVoice]) -> Result<(), String> {
+fn normalize_voice_selection(
+    cfg: &mut VoiceConfig,
+    voices: &[BuiltinVoice],
+) -> Result<(), String> {
     let id = cfg.voice_id.trim().to_string();
     if id.is_empty() {
         return Ok(());
@@ -417,7 +490,7 @@ impl crate::notify::NotifyChannel for VoiceChannel {
             );
             return;
         }
-        // 严格校验路径：不仅检查空，还检查盘符根等无效路径。
+        // 严格校验路径：不仅检查空，还检查盘符根等无效路径（按引擎各查各的）。
         // 校验失败同样 emit skipped：历史上这里是纯静默 return，用户只会看到
         // 「通知弹了但没声音」，无从定位是路径配置问题
         for (dir, label) in [
@@ -601,7 +674,7 @@ fn cache_path(
 fn cache_path_for(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBuf, String> {
     let reference = resolve_reference(app, cfg)?;
     let tag = cfg.cache_tag(reference.as_ref().map(|(p, t)| (p.as_path(), t.as_str())));
-    cache_path(app, text, &cfg.model_dir, &tag)
+    cache_path(app, text, cfg.cache_model_dir(), &tag)
 }
 
 fn trim_cache(dir: &Path) {
@@ -732,27 +805,38 @@ struct WorkerState {
     error: Option<String>,
 }
 
-/// 一次合成请求的采样参数（JSONL 请求的 params 字段；与官方 audio8_tts_infer.py
-/// 的 generate 参数一一对应）。按请求携带：改参数不需要重启常驻 worker 重载模型。
+/// 一次合成请求的采样参数（JSONL 请求的 params 字段）。按引擎二选一：
+/// - Audio8：与官方 audio8_tts_infer.py 的 generate 参数一一对应；
+/// - Kokoro：语速 + 音色（worker 按 params.voice 解析本地 voices/<name>.pt，
+///   空串 = worker 默认音色）。
+/// 按请求携带：改参数不需要重启常驻 worker 重载模型。
 #[derive(Serialize, Clone, Debug, PartialEq)]
-struct GenerateParams {
-    temperature: f32,
-    top_p: f32,
-    top_k: u32,
-    seed: u64,
-    max_new_tokens: u32,
-    greedy: bool,
+#[serde(untagged)]
+enum GenerateParams {
+    Audio8 {
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        seed: u64,
+        max_new_tokens: u32,
+        greedy: bool,
+    },
+    Kokoro { speed: f32, voice: String },
 }
 
 impl From<&VoiceConfig> for GenerateParams {
     fn from(cfg: &VoiceConfig) -> Self {
-        Self {
-            temperature: cfg.temperature,
-            top_p: cfg.top_p,
-            top_k: cfg.top_k,
-            seed: cfg.seed,
-            max_new_tokens: cfg.max_new_tokens,
-            greedy: cfg.greedy,
+        if cfg.is_kokoro() {
+            Self::Kokoro { speed: cfg.kokoro_speed, voice: cfg.kokoro_voice.clone() }
+        } else {
+            Self::Audio8 {
+                temperature: cfg.temperature,
+                top_p: cfg.top_p,
+                top_k: cfg.top_k,
+                seed: cfg.seed,
+                max_new_tokens: cfg.max_new_tokens,
+                greedy: cfg.greedy,
+            }
         }
     }
 }
@@ -919,10 +1003,15 @@ fn worker_for(cfg: &VoiceConfig, app: &AppHandle) -> Result<Arc<WorkerInner>, St
 }
 
 fn spawn_worker(cfg: &VoiceConfig, app: &AppHandle) -> Result<Arc<WorkerInner>, String> {
-    let script = ensure_worker_script(app)?;
     // HF 缓存与宿主环境解耦：固定在应用数据目录下，保证存在且可写
     let hf_home = tts_dir(app)?.join("hf");
-    spawn_worker_with(cfg, &script, &hf_home)
+    if cfg.is_kokoro() {
+        let script = ensure_kokoro_worker_script(app)?;
+        spawn_worker_with(cfg, &script, &hf_home)
+    } else {
+        let script = ensure_worker_script(app)?;
+        spawn_worker_with(cfg, &script, &hf_home)
+    }
 }
 
 /// worker 子进程的 HF 缓存环境覆盖（纯函数，供单测）。
@@ -943,6 +1032,18 @@ fn apply_worker_env(cmd: &mut Command, hf_home: &Path) {
         ("HF_DATASETS_CACHE", p("datasets")),
     ] {
         cmd.env(k, v);
+    }
+}
+
+/// 校验当前引擎实际使用的路径（Kokoro 只用 kokoro_model_dir；Audio8 用
+/// 仓库 + 模型目录）。deliver / 试听 / 长文本合成 / 自检共用，保证「播报被
+/// 跳过的原因」与「自检报错」一致。
+fn validate_engine_paths(cfg: &VoiceConfig) -> Result<(), String> {
+    if cfg.is_kokoro() {
+        validate_audio_path(&cfg.kokoro_model_dir, "Kokoro 模型目录")
+    } else {
+        validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
+            .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
     }
 }
 
@@ -987,23 +1088,34 @@ fn validate_audio_path(p: &str, label: &str) -> Result<(), String> {
 
 /// 拆出脚本路径参数：单测用桩脚本直连协议（无需 AppHandle）。
 /// hf_home：worker 子进程的 HF 缓存根目录（先确保存在，再注入环境）。
-fn spawn_worker_with(
-    cfg: &VoiceConfig,
-    script: &Path,
-    hf_home: &Path,
-) -> Result<Arc<WorkerInner>, String> {
-    validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")?;
-    validate_audio_path(&cfg.model_dir, "模型目录")?;
+/// 引擎分支（由 cfg.engine 决定）：kokoro 传 `脚本 <kokoro_model_dir>
+/// [kokoro_repo_dir]`（源码目录可选）；audio8 传 `脚本 <repo_dir> <model_dir>`
+/// （脚本参数由调用方给出）。
+fn spawn_worker_with(cfg: &VoiceConfig, script: &Path, hf_home: &Path) -> Result<Arc<WorkerInner>, String> {
+    if cfg.is_kokoro() {
+        validate_audio_path(&cfg.kokoro_model_dir, "Kokoro 模型目录")?;
+        if !cfg.kokoro_repo_dir.trim().is_empty() {
+            validate_audio_path(&cfg.kokoro_repo_dir, "Kokoro 源码目录")?;
+        }
+    } else {
+        validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")?;
+        validate_audio_path(&cfg.model_dir, "模型目录")?;
+    }
     std::fs::create_dir_all(hf_home)
         .map_err(|e| format!("创建 HF 缓存目录失败（{}）: {e}", hf_home.display()))?;
     let mut cmd = Command::new(&cfg.python_cmd);
     // GUI 进程派生控制台子进程会弹黑窗，worker 一驻留 10 分钟更不能闪
     crate::dsh::hide_window(&mut cmd);
     apply_worker_env(&mut cmd, hf_home);
+    if cfg.is_kokoro() {
+        cmd.arg(script).arg(&cfg.kokoro_model_dir);
+        if !cfg.kokoro_repo_dir.trim().is_empty() {
+            cmd.arg(cfg.kokoro_repo_dir.trim());
+        }
+    } else {
+        cmd.arg(script).arg(&cfg.repo_dir).arg(&cfg.model_dir);
+    }
     let mut child = cmd
-        .arg(script)
-        .arg(&cfg.repo_dir)
-        .arg(&cfg.model_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // stderr 直通应用控制台：torch/transformers 的加载日志与报错就地可见
@@ -1081,6 +1193,17 @@ fn ensure_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Kokoro 引擎的 worker 脚本落盘（同 ensure_worker_script，独立文件名避免
+/// 与 Audio8 worker 相互覆盖：两份脚本可能同时驻留/交替使用）
+fn ensure_kokoro_worker_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = tts_dir(app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 tts 目录失败: {e}"))?;
+    let path = dir.join("kokoro_worker.py");
+    std::fs::write(&path, KOKORO_WORKER_PY)
+        .map_err(|e| format!("写入 kokoro_worker.py 失败: {e}"))?;
+    Ok(path)
+}
+
 /// 应用退出时回收 worker 进程（lib.rs 的 RunEvent::Exit 调用）
 pub fn shutdown_worker() {
     if let Some(entry) = WORKER.lock().unwrap().take() {
@@ -1122,11 +1245,11 @@ fn stop_voice_service_blocking() -> bool {
 // ---------------------------------------------------------------------------
 
 fn generate_wav(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBuf, String> {
-    // 先解析实际生效的参考音频（音色选择 → 内置 wav 解压 / 自定义参考音频），
-    // 缓存键随之带参考指纹：换音色自动换缓存，不会串音色
+    // 先解析实际生效的参考音频（音色选择 → 内置 wav 解压 / 自定义参考音频；
+    // Kokoro 引擎恒为 None），缓存键随之带参考指纹：换音色自动换缓存，不会串音色
     let reference = resolve_reference(app, cfg)?;
     let cache_tag = cfg.cache_tag(reference.as_ref().map(|(p, t)| (p.as_path(), t.as_str())));
-    let path = cache_path(app, text, &cfg.model_dir, &cache_tag)?;
+    let path = cache_path(app, text, cfg.cache_model_dir(), &cache_tag)?;
     let worker = worker_for(cfg, app)?;
     worker.generate(
         text,
@@ -1215,6 +1338,32 @@ pub struct VoiceEnvReport {
     pub torch_error: Option<String>,
     /// torch 检测失败且 Python 可用时的完整一键安装命令（按有无 N 卡与系统语言生成）
     pub torch_install_cmd: Option<String>,
+    // —— Kokoro 引擎（engine == "kokoro" 时前端展示这几行）——
+    /// kokoro / misaki 包可导入且中文 G2P 依赖就绪
+    pub kokoro_pkg_ok: bool,
+    pub kokoro_pkg_info: Option<String>,
+    pub kokoro_pkg_error: Option<String>,
+    /// kokoro 依赖检测失败且 Python 可用时的完整一键安装命令
+    pub kokoro_install_cmd: Option<String>,
+    /// 模型目录布局：config.json + 权重 .pth
+    pub kokoro_model_ok: bool,
+    pub kokoro_model_hint: String,
+    /// 音色包：voices/*.pt 至少 1 个
+    pub kokoro_voices_ok: bool,
+    pub kokoro_voices_hint: String,
+    /// 可选源码目录：留空 = 用 pip 包（视为 ok）；填写时校验 kokoro/__init__.py
+    pub kokoro_repo_ok: bool,
+    pub kokoro_repo_hint: String,
+}
+
+/// 引擎字段归一（set_voice_config 用；纯函数供单测）：仅接受 "kokoro"，
+/// 其余值（含空/未知/老配置缺省）一律归一为 "audio8"——默认引擎必须是原始方案
+fn normalize_engine(engine: &str) -> String {
+    if engine == ENGINE_KOKORO {
+        ENGINE_KOKORO.into()
+    } else {
+        ENGINE_AUDIO8.into()
+    }
 }
 
 #[tauri::command]
@@ -1229,12 +1378,36 @@ pub async fn set_voice_config(
     if config.python_cmd.trim().is_empty() {
         return Err("python 命令不能为空".into());
     }
-    if config.enabled && (config.repo_dir.is_empty() || config.model_dir.is_empty()) {
-        return Err("启用语音播报前请先填写 Audio8 仓库目录与模型目录".into());
+    let mut config = config;
+    config.engine = normalize_engine(&config.engine);
+    if config.enabled {
+        // 按引擎校验各自必填的路径（Kokoro 不需要 Audio8 仓库/模型路径）
+        if config.is_kokoro() {
+            if config.kokoro_model_dir.trim().is_empty() {
+                return Err("启用语音播报前请先在 Kokoro 配置中下载/填写模型目录".into());
+            }
+        } else if config.repo_dir.is_empty() || config.model_dir.is_empty() {
+            return Err("启用语音播报前请先填写 Audio8 仓库目录与模型目录".into());
+        }
+    }
+    if config.kokoro_speed <= 0.0 || config.kokoro_speed > 4.0 {
+        return Err("kokoroSpeed 需在 (0, 4] 范围内".into());
+    }
+    // 可选源码目录：填写时必须是 kokoro 库目录（含 kokoro/__init__.py），
+    // 否则 worker 启动必然 fatal——提前拦下并给出可行动的提示
+    if !config.kokoro_repo_dir.trim().is_empty()
+        && !Path::new(config.kokoro_repo_dir.trim())
+            .join("kokoro")
+            .join("__init__.py")
+            .is_file()
+    {
+        return Err(format!(
+            "Kokoro 源码目录无效（缺少 kokoro/__init__.py）: {}；请留空改用 pip 安装的 kokoro 包",
+            config.kokoro_repo_dir.trim()
+        ));
     }
     // 音色校验+归一：未知内置 id（文件被重命名/移除后的陈旧配置）自愈为默认
     // 音色而不是拒绝——拒绝会让启动回灌整体失败，语音播报静默失效
-    let mut config = config;
     normalize_voice_selection(&mut config, &builtin_voices(&app))?;
     validate_generate_params(&config)?;
     *state.voice.lock().unwrap() = config;
@@ -1264,10 +1437,8 @@ pub async fn tts_env_check(state: State<'_, AppState>) -> Result<VoiceEnvReport,
 }
 
 fn env_check_blocking(cfg: &VoiceConfig) -> Result<VoiceEnvReport, String> {
-    // 路径校验：若无效，直接返回错误，不执行后续检查
-    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
-        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
-    {
+    // 路径校验按引擎各查各的：若无效，直接返回错误，不执行后续检查
+    if let Err(e) = validate_engine_paths(cfg) {
         return Err(e);
     }
 
@@ -1284,6 +1455,16 @@ fn env_check_blocking(cfg: &VoiceConfig) -> Result<VoiceEnvReport, String> {
         torch_info: None,
         torch_error: None,
         torch_install_cmd: None,
+        kokoro_pkg_ok: false,
+        kokoro_pkg_info: None,
+        kokoro_pkg_error: None,
+        kokoro_install_cmd: None,
+        kokoro_model_ok: false,
+        kokoro_model_hint: String::new(),
+        kokoro_voices_ok: false,
+        kokoro_voices_hint: String::new(),
+        kokoro_repo_ok: false,
+        kokoro_repo_hint: String::new(),
     };
 
     // 1) python 可执行性
@@ -1316,11 +1497,15 @@ fn env_check_blocking(cfg: &VoiceConfig) -> Result<VoiceEnvReport, String> {
     report.codec_ok = codec_ok;
     report.codec_hint = codec_hint;
 
-    // 5) torch/transformers + 设备（只 import，不加载模型）
+    // 5) torch/transformers + 设备 + torchaudio（只 import，不加载模型）。
+    //    torchaudio 是 Audio8 官方 requirements 的组成部分（参考音频采样率与
+    //    模型不一致时 load_audio 走 torchaudio.functional.resample，缺失时报
+    //    "torchaudio is required to resample reference audio"——16kHz/24kHz
+    //    参考音频（林志玲/赛马娘/邓紫棋）全部踩中，44.1kHz 内置音色不触发）
     if report.python_version.is_some() {
         match run_with_timeout(
             Command::new(&cfg.python_cmd).arg("-c").arg(
-                "import torch, transformers; print(torch.__version__); print(transformers.__version__); print('cuda' if torch.cuda.is_available() else 'cpu')",
+                "import torch, transformers; print(torch.__version__); print(transformers.__version__); print('cuda' if torch.cuda.is_available() else 'cpu'); import torchaudio; print(torchaudio.__version__)",
             ),
             Duration::from_secs(120),
         ) {
@@ -1329,20 +1514,127 @@ fn env_check_blocking(cfg: &VoiceConfig) -> Result<VoiceEnvReport, String> {
                 let parts: Vec<&str> = text.split_whitespace().collect();
                 if parts.len() >= 3 {
                     report.torch_ok = true;
-                    report.torch_info =
-                        Some(format!("torch {} / transformers {} / {}", parts[0], parts[1], parts[2]));
+                    match parts.get(3) {
+                        Some(&v) => {
+                            report.torch_info = Some(format!(
+                                "torch {} / transformers {} / {} / torchaudio {}",
+                                parts[0], parts[1], parts[2], v
+                            ));
+                        }
+                        // 老探测输出（无第 4 段）不应发生（脚本恒打印 4 段），兜底按缺失处理
+                        None => {
+                            report.torch_info = Some(format!(
+                                "torch {} / transformers {} / {} / torchaudio 缺失",
+                                parts[0], parts[1], parts[2]
+                            ));
+                            report.torch_install_cmd =
+                                Some(torch_install_cmd_display(&cfg.python_cmd));
+                        }
+                    }
                 } else {
                     report.torch_error = Some(format!("无法解析输出: {text}"));
                 }
             }
             Ok(out) => {
-                report.torch_error = Some(String::from_utf8_lossy(&out.stderr).trim().to_string());
+                // 区分 torch 本体缺失与 torchaudio 缺失：stderr 含 torchaudio 时
+                // torch 本体可用（torch_ok=true），给出针对性的安装引导
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if stderr.contains("torchaudio") || stderr.contains("No module named torchaudio") {
+                    if let Ok(probe) = run_with_timeout(
+                        Command::new(&cfg.python_cmd).arg("-c").arg(
+                            "import torch, transformers; print(torch.__version__); print(transformers.__version__); print('cuda' if torch.cuda.is_available() else 'cpu')",
+                        ),
+                        Duration::from_secs(120),
+                    ) {
+                        let text = String::from_utf8_lossy(&probe.stdout);
+                        let parts: Vec<&str> = text.split_whitespace().collect();
+                        if probe.status.success() && parts.len() >= 3 {
+                            // torch 本体可用，仅 torchaudio 缺失：torch_ok 保持 true，
+                            // 但给出安装命令让前端能一键补齐
+                            report.torch_ok = true;
+                            report.torch_info = Some(format!(
+                                "torch {} / transformers {} / {} / torchaudio 缺失（参考音频重采样需要，点「一键安装依赖」补齐）",
+                                parts[0], parts[1], parts[2]
+                            ));
+                            report.torch_install_cmd =
+                                Some(torch_install_cmd_display(&cfg.python_cmd));
+                        } else {
+                            report.torch_error = Some(stderr);
+                        }
+                    } else {
+                        report.torch_error = Some(stderr);
+                    }
+                } else {
+                    report.torch_error = Some(stderr);
+                }
             }
             Err(e) => report.torch_error = Some(e),
         }
     }
     if !report.torch_ok && report.python_version.is_some() {
         report.torch_install_cmd = Some(torch_install_cmd_display(&cfg.python_cmd));
+    }
+
+    // 6) Kokoro 模型文件（纯文件检查，任何引擎下都填，前端按引擎选择性展示）
+    let (kokoro_model_ok, kokoro_model_hint, kokoro_voices_ok, kokoro_voices_hint) =
+        check_kokoro_model_dir(&cfg.kokoro_model_dir);
+    report.kokoro_model_ok = kokoro_model_ok;
+    report.kokoro_model_hint = kokoro_model_hint;
+    report.kokoro_voices_ok = kokoro_voices_ok;
+    report.kokoro_voices_hint = kokoro_voices_hint;
+
+    // 6.5) 可选源码目录：留空 = pip 包（视为 ok）；填写校验 kokoro/__init__.py
+    let repo_trim = cfg.kokoro_repo_dir.trim();
+    if repo_trim.is_empty() {
+        report.kokoro_repo_ok = true;
+        report.kokoro_repo_hint = "未填写（使用 pip 安装的 kokoro 包）".into();
+    } else if Path::new(repo_trim).join("kokoro").join("__init__.py").is_file() {
+        report.kokoro_repo_ok = true;
+        report.kokoro_repo_hint = format!("{repo_trim}/kokoro/__init__.py（优先于 pip 包加载）");
+    } else {
+        report.kokoro_repo_hint =
+            format!("{repo_trim}/kokoro/__init__.py 未找到（目录无效，请留空或修正）");
+    }
+
+    // 7) Kokoro 依赖包（只 import 探测，不加载模型； Audio8 引擎下同样填，
+    //    供两个引擎 A/B 期间共用一次自检）。填了源码目录时按 worker 的真实
+    //    加载路径注入 PYTHONPATH，保证「自检通过」=「worker 能跑」
+    if report.python_version.is_some() {
+        let mut probe = Command::new(&cfg.python_cmd);
+        probe.arg("-c").arg(KOKORO_PKG_PROBE);
+        if !repo_trim.is_empty() {
+            let injected = match std::env::var_os("PYTHONPATH") {
+                Some(existing) => format!("{repo_trim};{}", existing.to_string_lossy()),
+                None => repo_trim.to_string(),
+            };
+            probe.env("PYTHONPATH", injected);
+        }
+        match run_with_timeout(&mut probe, Duration::from_secs(120)) {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let parts: Vec<&str> = text.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    report.kokoro_pkg_ok = true;
+                    let zh_note = if parts[2] == "zh-ok" {
+                        "中文G2P 就绪"
+                    } else {
+                        "中文G2P 缺失（pip install \"misaki[zh]\" 后中文音色可用）"
+                    };
+                    report.kokoro_pkg_info =
+                        Some(format!("kokoro {} / misaki {} / {}", parts[0], parts[1], zh_note));
+                } else {
+                    report.kokoro_pkg_error = Some(format!("无法解析输出: {text}"));
+                }
+            }
+            Ok(out) => {
+                report.kokoro_pkg_error =
+                    Some(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            Err(e) => report.kokoro_pkg_error = Some(e),
+        }
+    }
+    if !report.kokoro_pkg_ok && report.python_version.is_some() {
+        report.kokoro_install_cmd = Some(kokoro_install_cmd_display(&cfg.python_cmd));
     }
     Ok(report)
 }
@@ -1372,7 +1664,11 @@ fn has_nvidia_gpu() -> bool {
         .unwrap_or(false)
 }
 
-/// 生成安装步骤参数（与 torch_install_cmd_display 共用，保证展示 = 实际执行）
+/// 生成安装步骤参数（与 torch_install_cmd_display 共用，保证展示 = 实际执行）。
+/// torchaudio 是 Audio8 官方 requirements 的一部分（参考音频重采样必需）：
+/// CUDA 机器走步骤 2 的 PyPI 包（CPU 版 wheel 即可——functional resample 纯
+/// torch 算子实现，不需要 CUDA 定制内核，且版本由 pip 对齐已装的 torch）；
+/// CPU 机器并入单步。
 fn torch_install_steps(cuda: bool) -> Vec<Vec<String>> {
     let mirror: Vec<String> = pypi_mirror_args().into_iter().map(String::from).collect();
     if cuda {
@@ -1383,14 +1679,14 @@ fn torch_install_steps(cuda: bool) -> Vec<Vec<String>> {
                 "--index-url".into(),
                 "https://download.pytorch.org/whl/cu128".into(),
             ],
-            ["install", "transformers", "soundfile", "numpy"]
+            ["install", "transformers", "soundfile", "numpy", "torchaudio"]
                 .iter()
                 .map(|s| s.to_string())
                 .chain(mirror)
                 .collect(),
         ]
     } else {
-        vec![["install", "torch", "transformers", "soundfile", "numpy"]
+        vec![["install", "torch", "transformers", "soundfile", "numpy", "torchaudio"]
             .iter()
             .map(|s| s.to_string())
             .chain(mirror)
@@ -1476,9 +1772,7 @@ pub async fn tts_speak_test(
     text: Option<String>,
 ) -> Result<(), String> {
     let cfg = state.voice.lock().unwrap().clone();
-    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
-        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
-    {
+    if let Err(e) = validate_engine_paths(&cfg) {
         return Err(e);
     }
     let text = text
@@ -1563,6 +1857,82 @@ fn check_model_dir(model_dir: &str) -> (bool, String, bool, String) {
     (model_ok, model_hint, codec_ok, codec_hint)
 }
 
+/// Kokoro 依赖探测脚本（python -c）：打印 kokoro/misaki 版本与中文 G2P 关键
+/// 依赖（jieba/pypinyin）是否就绪，空白分隔的三段输出。只 import 不加载模型。
+const KOKORO_PKG_PROBE: &str = r#"
+import sys
+try:
+    from importlib.metadata import version
+    import kokoro  # noqa: F401
+    import misaki  # noqa: F401
+    print(version("kokoro"), version("misaki"), end=" ")
+    try:
+        import jieba, pypinyin  # noqa: F401
+        print("zh-ok")
+    except Exception:
+        print("zh-missing")
+except Exception as e:
+    print(f"{type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(1)
+"#;
+
+/// Kokoro 权重定位（纯函数，供单测）：kokoro-v1_0.pth 优先，回退目录内排序
+/// 第一个 .pth；都没有返回 None
+fn find_kokoro_weights(model_dir: &Path) -> Option<PathBuf> {
+    let preferred = model_dir.join("kokoro-v1_0.pth");
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+    let mut others: Vec<PathBuf> = std::fs::read_dir(model_dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().map(|x| x == "pth").unwrap_or(false))
+        .collect();
+    others.sort();
+    others.into_iter().next()
+}
+
+/// Kokoro 模型目录布局识别（纯函数，供单测）。期望布局 = git clone
+/// https://www.modelscope.cn/AI-ModelScope/Kokoro-82M.git 的产物：
+/// config.json + kokoro-v1_0.pth（约 327MB 权重）+ voices/*.pt（音色包）
+/// 返回 (model_ok, model_hint, voices_ok, voices_hint)
+fn check_kokoro_model_dir(model_dir: &str) -> (bool, String, bool, String) {
+    if model_dir.trim().is_empty() {
+        return (
+            false,
+            "未填写模型目录".to_string(),
+            false,
+            "未填写模型目录".to_string(),
+        );
+    }
+    let dir = Path::new(model_dir);
+    let config_ok = dir.join("config.json").is_file();
+    let weights = find_kokoro_weights(dir);
+    let model_ok = config_ok && weights.is_some();
+    let model_hint = match (config_ok, &weights) {
+        (true, Some(w)) => w.display().to_string(),
+        (true, None) => {
+            format!("{model_dir}/config.json 已就绪，但缺少权重文件 kokoro-v1_0.pth")
+        }
+        (false, _) => format!("{model_dir}/config.json 未找到"),
+    };
+    let count = std::fs::read_dir(dir.join("voices"))
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().extension().map(|x| x == "pt").unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0);
+    let voices_ok = count > 0;
+    let voices_hint = if voices_ok {
+        format!("{model_dir}/voices/*.pt 共 {count} 个音色")
+    } else {
+        format!("{model_dir}/voices/*.pt 未找到音色包")
+    };
+    (model_ok, model_hint, voices_ok, voices_hint)
+}
+
 // ---------------------------------------------------------------------------
 // 子进程小工具
 // ---------------------------------------------------------------------------
@@ -1608,6 +1978,110 @@ const EXPORTS_KEEP: usize = 20;
 /// 拼接时段间静音（毫秒）：模拟自然句间停顿
 const SYNTH_GAP_MS: u64 = 180;
 
+/// 工具窗口规格（Audio8 / Kokoro 两个引擎的独立窗口共用同一形态：1100px
+/// 无边框 + 自绘标题栏 + hash 路由，仅窗口标签/标题/路由前缀不同）
+struct StudioWindowSpec {
+    /// WebviewWindow 标签（唯一标识，已开则聚焦）
+    label: &'static str,
+    /// 原生窗口标题
+    title: &'static str,
+    /// hash 路由前缀（如 "/tts-studio"）
+    route: &'static str,
+}
+
+const AUDIO8_STUDIO: StudioWindowSpec = StudioWindowSpec {
+    label: "tts-studio",
+    title: "语音合成工具",
+    route: "/tts-studio",
+};
+
+const KOKORO_STUDIO: StudioWindowSpec = StudioWindowSpec {
+    label: "kokoro-studio",
+    title: "Kokoro 语音合成工具",
+    route: "/kokoro-studio",
+};
+
+/// 打开引擎工具窗口的全局串行锁：双击/快速连点会让两个 async 命令并发进入
+/// [`open_studio_window`]，两边都在 `get_webview_window` 返回 None 后同时
+/// build，后到者报 “a window with label `xxx` already exists”（设置页入口
+/// 曾把错误静默吞掉，表现为“点了没反应”）。串行化后第二击必然走聚焦分支。
+/// 主线程事件循环不会取该锁，build() 等主线程不会自锁。
+static OPEN_STUDIO_SERIAL: Mutex<()> = Mutex::new(());
+
+/// 打开引擎工具窗口（已开则聚焦并原地路由到目标页）：Audio8 与 Kokoro 完全
+/// 同构，仅 spec 不同——两套 UI/交互形态保持一致。
+/// section：None/"synth" → 合成页；"history" → 生成历史页。
+fn open_studio_window(app: &AppHandle, spec: &StudioWindowSpec, history: bool) -> Result<(), String> {
+    let _serial = OPEN_STUDIO_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let sub = if history { "/history" } else { "" };
+    let eval_js = format!("window.location.hash = '#{}{}';", spec.route, sub);
+    // 已开则聚焦并原地路由到目标页（hash 变化由前端 HashRouter 消费）
+    if let Some(w) = app.get_webview_window(spec.label) {
+        // 存活探测必须用 getter（is_visible）：show/set_focus 等 setter 在 wry
+        // 里是发完即忘，窗口已销毁也返回 Ok；getter 的响应通道会随窗口销毁被
+        // 事件循环丢弃，调用侧收到 Err——这是唯一可靠的死亡信号。否则会命中
+        // 「关闭窗口后立刻重开」的竞态：Destroyed 事件派发前 get_webview_window
+        // 仍返回濒死句柄，聚焦分支静默成功，窗口却不出现（残留僵尸 label 时
+        // 更是永远打不开，直到重启应用）。
+        if w.is_visible().is_ok() {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+            let _ = w.eval(&eval_js);
+            return Ok(());
+        }
+        // 濒死句柄：销毁残留并等 label 释放（destroy → Destroyed 事件 →
+        // on_window_close 移除注册，同一事件循环 tick 内完成，通常 1~2 次轮询）
+        eprintln!("[tts] {} 窗口句柄已失效（关闭竞态/残留），销毁后重建", spec.title);
+        let _ = w.destroy();
+        for _ in 0..50 {
+            if app.get_webview_window(spec.label).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    // 窗口尺寸：放大宽度到 1100px
+    let win_w = 1100.0_f64;
+    let win_h = 820.0_f64;
+
+    let url = format!("index.html#{}{}", spec.route, sub);
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        spec.label,
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title(spec.title)
+    .inner_size(win_w, win_h)
+    .min_inner_size(900.0, 680.0)
+    .decorations(false);
+
+    // 优先使用 Tauri 的 center() 方法（若可用），否则回退到手动计算
+    // Tauri 2 的 WebviewWindowBuilder 支持 .center() 使窗口真正居中（而非仅设置左上角）
+    builder = builder.center();
+
+    match builder.build() {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // 兜底：build 报错但 label 已注册（其他路径并发建窗等极小概率事件）
+            // 说明窗口其实已建好，回落聚焦路径而不是向用户抛错
+            if let Some(w) = app.get_webview_window(spec.label) {
+                if w.is_visible().is_ok() {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                    let _ = w.eval(&eval_js);
+                    return Ok(());
+                }
+                let _ = w.destroy();
+                return Err(format!("{} 窗口正在关闭，请重试（{e}）", spec.title));
+            }
+            Err(format!("创建{}窗口失败: {e}", spec.title))
+        }
+    }
+}
+
 /// 打开语音合成工具独立窗口（已开则聚焦），主窗口设置页「语音播报」卡片入口。
 /// 复用同一前端 bundle 经 hash 路由到 /tts-studio；无边框 + 自绘标题栏与主窗口
 /// 观感一致（WindowControls 按 getCurrentWindow 对本窗口操作）。
@@ -1615,42 +2089,16 @@ const SYNTH_GAP_MS: u64 = 180;
 #[tauri::command]
 pub async fn tts_open_studio(app: AppHandle, section: Option<String>) -> Result<(), String> {
     let history = matches!(section.as_deref(), Some("history"));
-    if let Some(w) = app.get_webview_window("tts-studio") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-        // 已开则聚焦并原地路由到目标页（hash 变化由前端 HashRouter 消费）
-        let _ = w.eval(&format!(
-            "window.location.hash = '#/tts-studio{}';",
-            if history { "/history" } else { "" }
-        ));
-        return Ok(());
-    }
-    // 窗口尺寸：放大宽度到 1100px
-    let win_w = 1100.0_f64;
-    let win_h = 820.0_f64;
+    open_studio_window(&app, &AUDIO8_STUDIO, history)
+}
 
-    let url = if history {
-        "index.html#/tts-studio/history"
-    } else {
-        "index.html#/tts-studio"
-    };
-
-    let mut builder =
-        tauri::WebviewWindowBuilder::new(&app, "tts-studio", tauri::WebviewUrl::App(url.into()))
-            .title("语音合成工具")
-            .inner_size(win_w, win_h)
-            .min_inner_size(900.0, 680.0)
-            .decorations(false);
-
-    // 优先使用 Tauri 的 center() 方法（若可用），否则回退到手动计算
-    // Tauri 2 的 WebviewWindowBuilder 支持 .center() 使窗口真正居中（而非仅设置左上角）
-    builder = builder.center();
-
-    builder
-        .build()
-        .map_err(|e| format!("创建语音合成工具窗口失败: {e}"))?;
-    Ok(())
+/// 打开 Kokoro 语音合成工具独立窗口（与 Audio8 的窗口同构，仅配置面板为
+/// Kokoro 字段）：设置页「Kokoro 配置」与引擎切换引导的入口。
+/// section：None/"synth" → 合成页；"history" → 生成历史页（历史两引擎共用）。
+#[tauri::command]
+pub async fn tts_open_kokoro_studio(app: AppHandle, section: Option<String>) -> Result<(), String> {
+    let history = matches!(section.as_deref(), Some("history"));
+    open_studio_window(&app, &KOKORO_STUDIO, history)
 }
 
 /// Audio8_TTS 仓库地址（自动配置 / 一键克隆共用）
@@ -1811,6 +2259,419 @@ pub async fn tts_download_model(
         "skipped": skipped,
         "actions": actions,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Kokoro 引擎（可选轻量引擎）：模型下载 / 依赖安装 / 音色列表
+// ---------------------------------------------------------------------------
+
+/// Kokoro-82M 模型仓库（ModelScope 镜像，国内快）
+const KOKORO_MODEL_URL_MODELSCOPE: &str =
+    "https://www.modelscope.cn/AI-ModelScope/Kokoro-82M.git";
+/// HF 官方仓库（回退源）
+const KOKORO_MODEL_URL_HF: &str = "https://huggingface.co/hexgrad/Kokoro-82M";
+/// 模型在应用数据目录 `tts/` 下的默认目录名
+const KOKORO_MODEL_DIR_NAME: &str = "Kokoro-82M";
+/// 权重文件小于该字节数视为 git-lfs 指针文件（git-lfs 未装时 clone 出来只有
+/// ~130B 文本而非 327MB 权重，运行必失败，必须在此拦下）
+const KOKORO_LFS_MIN_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 音色包元数据（Kokoro 配置弹框音色下拉框数据源；与前端 KokoroVoiceMeta 同形）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KokoroVoiceMeta {
+    /// 音色 id（voices/ 下 .pt 文件名去扩展名，如 "zf_xiaoxiao"）
+    pub id: String,
+    /// 语言码（音色名首字母，与 KPipeline lang_code 一致）
+    pub lang: String,
+    /// 语言展示名（中文 / 英语（美）…）
+    pub lang_label: String,
+}
+
+/// 音色名首字母 → 语言展示名（与 kokoro 官方语言表一致；纯函数供单测）
+fn kokoro_lang_label(prefix: char) -> &'static str {
+    match prefix {
+        'a' => "英语（美）",
+        'b' => "英语（英）",
+        'e' => "西班牙语",
+        'f' => "法语",
+        'h' => "印地语",
+        'i' => "意大利语",
+        'j' => "日语",
+        'p' => "葡萄牙语",
+        'z' => "中文",
+        _ => "未知语言",
+    }
+}
+
+/// 扫描 Kokoro 模型目录下的音色包（voices/*.pt，按文件名排序保证稳定）
+fn scan_kokoro_voices(model_dir: &str) -> Vec<KokoroVoiceMeta> {
+    let mut ids: Vec<String> = std::fs::read_dir(Path::new(model_dir).join("voices"))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().map(|x| x == "pt").unwrap_or(false))
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.into_iter()
+        .map(|id| {
+            let lang = id.chars().next().map(String::from).unwrap_or_default();
+            let lang_label = id
+                .chars()
+                .next()
+                .map(kokoro_lang_label)
+                .unwrap_or("未知语言")
+                .to_string();
+            KokoroVoiceMeta { id, lang, lang_label }
+        })
+        .collect()
+}
+
+/// 音色列表命令（Kokoro 配置弹框）：目录不存在/为空返回空列表（前端提示
+/// 先下载模型），不报错——弹框在模型未就绪时也要能打开
+#[tauri::command]
+pub async fn tts_kokoro_voices(model_dir: String) -> Result<Vec<KokoroVoiceMeta>, String> {
+    Ok(scan_kokoro_voices(&model_dir))
+}
+
+/// 目录是否为合法 Kokoro 模型目录：config.json + 任一权重 .pth + voices/*.pt
+fn is_valid_kokoro_model_dir(dir: &Path) -> bool {
+    dir.is_dir()
+        && dir.join("config.json").is_file()
+        && find_kokoro_weights(dir).is_some()
+        && std::fs::read_dir(dir.join("voices"))
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().extension().map(|x| x == "pt").unwrap_or(false))
+            })
+            .unwrap_or(false)
+}
+
+/// 目录是否为合法 kokoro 库源码目录：kokoro/__init__.py 存在
+fn is_valid_kokoro_repo_dir(dir: &Path) -> bool {
+    dir.is_dir() && dir.join("kokoro").join("__init__.py").is_file()
+}
+
+/// 自动探测结果（Kokoro 配置弹框打开时回填；与前端 KokoroAutodetect 同形）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KokoroAutodetect {
+    pub model_dir: Option<String>,
+    pub repo_dir: Option<String>,
+}
+
+/// 候选目录扫描（纯函数，供单测）：按顺序取第一个合法目录
+fn first_valid_dir(candidates: &[PathBuf], valid: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    candidates.iter().map(|c| c.as_path()).find(|c| valid(c)).map(Path::to_path_buf)
+}
+
+/// 常见开发目录根：各盘符下的 code / projects / work / repos。自动探测扫描这些
+/// 根的一级子目录，覆盖「手动把模型/源码克隆在开发目录里」的布局
+/// （实测案例：D:\code\owner\Kokoro-82M 与 D:\code\owner\kokoro 并排）。
+/// 只做存在性检查 + 一层 read_dir，开销可忽略。
+fn kokoro_dev_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for letter in b'C'..=b'Z' {
+        let drive = format!("{}:\\", letter as char);
+        if !Path::new(&drive).is_dir() {
+            continue;
+        }
+        for name in ["code", "projects", "work", "repos"] {
+            let root = Path::new(&drive).join(name);
+            if root.is_dir() {
+                roots.push(root);
+            }
+        }
+    }
+    roots
+}
+
+/// 从给定根目录扫描（一级子目录） kokoro 源码与 Kokoro-82M 模型候选：
+/// `<子目录>/kokoro`（含 __init__.py 才算合法，校验在 first_valid_dir）与
+/// `<子目录>/Kokoro-82M`。纯逻辑供单测（roots 由 kokoro_dev_roots 提供）。
+fn scan_kokoro_dev_roots(roots: &[PathBuf], repos: &mut Vec<PathBuf>, models: &mut Vec<PathBuf>) {
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if !sub.is_dir() {
+                continue;
+            }
+            repos.push(sub.join("kokoro"));
+            models.push(sub.join("Kokoro-82M"));
+        }
+    }
+}
+
+/// 自动探测 Kokoro 模型 / 源码目录，候选顺序：
+/// 1. 应用数据目录（「一键下载模型」的默认位置）；
+/// 2. 工作目录及其父目录（开发习惯把模型/源码克隆在代码仓库旁）；
+/// 3. 常见开发目录（`<盘>:\code` 等的一级子目录，覆盖手动克隆到开发目录的布局）；
+/// 4. exe 所在目录。
+#[tauri::command]
+pub async fn tts_kokoro_autodetect(app: AppHandle) -> Result<KokoroAutodetect, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd_parent = cwd.parent().map(Path::to_path_buf).unwrap_or_default();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+
+    let mut model_candidates = vec![base.join("Kokoro-82M")];
+    let mut repo_candidates = vec![cwd_parent.join("kokoro")];
+    // 常见开发目录扫描（手动克隆布局，如 D:\code\owner\{kokoro,Kokoro-82M}）
+    scan_kokoro_dev_roots(&kokoro_dev_roots(), &mut repo_candidates, &mut model_candidates);
+    // 其余固定候选
+    repo_candidates.push(cwd.join("kokoro"));
+    repo_candidates.push(exe_dir.join("kokoro"));
+    model_candidates.push(cwd.join("Kokoro-82M"));
+    model_candidates.push(cwd_parent.join("Kokoro-82M"));
+    model_candidates.push(exe_dir.join("Kokoro-82M"));
+
+    let model_dir = first_valid_dir(&model_candidates, is_valid_kokoro_model_dir)
+        .map(|p| p.to_string_lossy().into_owned());
+    // 源码目录只作提示性探测：无 src 布局时返回 None（前端留空 = pip 包）
+    let repo_dir = first_valid_dir(&repo_candidates, is_valid_kokoro_repo_dir)
+        .map(|p| p.to_string_lossy().into_owned());
+    Ok(KokoroAutodetect { model_dir, repo_dir })
+}
+
+/// 权重文件是否完整落地（存在且 ≥ 10MB，排除 LFS 指针文本）
+fn kokoro_weights_ready(target_dir: &Path) -> bool {
+    find_kokoro_weights(target_dir)
+        .and_then(|w| w.metadata().ok())
+        .map(|m| m.len() >= KOKORO_LFS_MIN_BYTES)
+        .unwrap_or(false)
+}
+
+/// 在已克隆的模型目录内补拉 LFS 权重（git-lfs 未安装时返回带指引的错误）
+fn git_lfs_pull(target_dir: &Path) -> Result<(), String> {
+    let status = Command::new("git")
+        .args(["-C", &target_dir.to_string_lossy(), "lfs", "pull"])
+        .status()
+        .map_err(|e| format!("执行 git lfs pull 失败（请确认已安装 git-lfs）: {e}"))?;
+    if !status.success() {
+        return Err(
+            "git lfs pull 失败：请安装 git-lfs（https://git-lfs.com）后重试，\
+             或在模型目录内手动执行 git lfs pull"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// 一键下载 Kokoro-82M 模型到 `target_dir`：目录已存在且权重完整 → 跳过；
+/// 目录存在但权重是指针文件 → git lfs pull 补齐；否则 ModelScope 优先、
+/// HF 回退克隆，克隆后再校验权重落地（防 git-lfs 缺失）。
+/// 返回 (是否跳过, 动作描述列表)。
+fn ensure_kokoro_model(target_dir: &Path) -> Result<(bool, Vec<String>), String> {
+    let mut actions = Vec::new();
+    if target_dir.exists() {
+        if kokoro_weights_ready(target_dir) {
+            actions.push("模型目录已存在，跳过下载".into());
+            return Ok((true, actions));
+        }
+        actions.push("模型目录已存在但权重不完整，尝试 git lfs pull 补齐…".into());
+        git_lfs_pull(target_dir)?;
+        actions.push("LFS 权重补齐完成".into());
+        return Ok((false, actions));
+    }
+    if let Some(parent) = target_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    actions.push(format!(
+        "git clone {KOKORO_MODEL_URL_MODELSCOPE} {}",
+        target_dir.display()
+    ));
+    let ms = Command::new("git")
+        .args([
+            "clone",
+            KOKORO_MODEL_URL_MODELSCOPE,
+            &target_dir.to_string_lossy(),
+        ])
+        .status();
+    match ms {
+        Ok(s) if s.success() => {
+            actions.push("模型仓库克隆完成（ModelScope）".into());
+        }
+        _ => {
+            actions.push("ModelScope 克隆失败，尝试 Hugging Face 回退…".into());
+            let status = Command::new("git")
+                .args([
+                    "clone",
+                    KOKORO_MODEL_URL_HF,
+                    &target_dir.to_string_lossy(),
+                ])
+                .status()
+                .map_err(|e| format!("执行 git clone (HF) 失败: {e}"))?;
+            if !status.success() {
+                return Err("模型下载失败，请手动执行 git clone 或配置 HF_ENDPOINT".into());
+            }
+            actions.push("模型仓库（HF）克隆完成".into());
+        }
+    }
+    // LFS 指针文件防护：clone 成功 ≠ 权重落地（git-lfs 缺失时是文本指针）
+    if !kokoro_weights_ready(target_dir) {
+        actions.push("权重文件不完整（疑似 git-lfs 指针），尝试 git lfs pull…".into());
+        git_lfs_pull(target_dir)?;
+        actions.push("LFS 权重补齐完成".into());
+    }
+    Ok((false, actions))
+}
+
+/// 一键下载 Kokoro-82M 模型（Kokoro 配置弹框「一键下载模型」按钮）。
+/// `target` 省略/空 → `app_data/tts/Kokoro-82M`；填了路径 → 该路径。
+/// 完成后前端把 `modelDir` 回填输入框。
+#[tauri::command]
+pub async fn tts_download_kokoro_model(
+    app: AppHandle,
+    target: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    let target_dir = resolve_clone_target(target, &base, KOKORO_MODEL_DIR_NAME);
+    let (skipped, actions) = ensure_kokoro_model(&target_dir)?;
+    Ok(json!({
+        "modelDir": target_dir.to_string_lossy().to_string(),
+        "skipped": skipped,
+        "actions": actions,
+    }))
+}
+
+/// kokoro 库源码仓库地址（一键克隆共用；与 Audio8_TTS 仓库克隆同构）
+const KOKORO_REPO_URL: &str = "https://github.com/hexgrad/kokoro";
+/// 源码仓库在应用数据目录 `tts/` 下的默认目录名
+const KOKORO_REPO_DIR_NAME: &str = "kokoro";
+
+/// 克隆 kokoro 源码到 `target_dir`（已存在则跳过）。返回 (是否跳过, 动作描述)。
+/// 注意：源码目录对 Kokoro 引擎是可选项（留空 = pip 安装的 kokoro 包，二者等价），
+/// 克隆只为「跟踪上游 main」的场景。
+fn ensure_kokoro_repo(target_dir: &Path) -> Result<(bool, Vec<String>), String> {
+    let mut actions = Vec::new();
+    if target_dir.exists() {
+        actions.push("仓库目录已存在，跳过克隆".into());
+        return Ok((true, actions));
+    }
+    if let Some(parent) = target_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    actions.push(format!(
+        "git clone {KOKORO_REPO_URL} {}",
+        target_dir.display()
+    ));
+    let status = Command::new("git")
+        .args(["clone", KOKORO_REPO_URL, &target_dir.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("执行 git clone 失败（请确保已安装 git）: {e}"))?;
+    if !status.success() {
+        return Err("kokoro 源码仓库克隆失败".into());
+    }
+    actions.push("kokoro 源码仓库克隆完成".into());
+    Ok((false, actions))
+}
+
+/// 一键克隆 kokoro 源码仓库（仓库输入框旁按钮，与 Audio8 的「一键克隆」同构）。
+/// `target` 省略/空 → `app_data/tts/kokoro`；填了路径 → 克隆到该路径。
+/// 目录已存在时 `skipped=true` 直接返回，前端把 `repoDir` 回填输入框。
+#[tauri::command]
+pub async fn tts_clone_kokoro_repo(
+    app: AppHandle,
+    target: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {e}"))?
+        .join("tts");
+    let target_dir = resolve_clone_target(target, &base, KOKORO_REPO_DIR_NAME);
+    let (skipped, actions) = ensure_kokoro_repo(&target_dir)?;
+    Ok(json!({
+        "repoDir": target_dir.to_string_lossy().to_string(),
+        "skipped": skipped,
+        "actions": actions,
+    }))
+}
+
+/// Kokoro 依赖安装步骤：kokoro（>=0.9.4，自带 torch/misaki[en] 依赖；已有
+/// torch 则满足不重装）+ misaki[zh]（中文 G2P：jieba/pypinyin 等）+ soundfile
+/// （写 WAV，Audio8 环境通常已有）。
+fn kokoro_install_steps() -> Vec<Vec<String>> {
+    let mirror: Vec<String> = pypi_mirror_args().into_iter().map(String::from).collect();
+    vec![["install", "--upgrade", "kokoro>=0.9.4", "soundfile", "misaki[zh]"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(mirror)
+        .collect()]
+}
+
+/// 自检报告里展示的完整安装命令（与 kokoro_install_steps 保证展示 = 实际执行；
+/// `>=`/`[]` 在 shell 里有特殊含义，展示串加引号）
+fn kokoro_install_cmd_display(python_cmd: &str) -> String {
+    let py = quote_if_spaced(python_cmd);
+    let pkgs = r#""kokoro>=0.9.4" soundfile "misaki[zh]""#;
+    let mirror = pypi_mirror_args().join(" ");
+    if mirror.is_empty() {
+        format!("{py} -m pip install --upgrade {pkgs}")
+    } else {
+        format!("{py} -m pip install --upgrade {pkgs} {mirror}")
+    }
+}
+
+/// 一键安装 Kokoro 依赖（Kokoro 配置弹框）：逐条执行 pip 并把输出逐行推给
+/// 前端（复用 VOICE_INSTALL_LOG_EVENT）。命令在全部步骤结束后才返回。
+#[tauri::command]
+pub async fn tts_install_kokoro_deps(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let cfg = state.voice.lock().unwrap().clone();
+    if cfg.python_cmd.trim().is_empty() {
+        return Err("请先填写 Python 解释器路径".into());
+    }
+    if VOICE_INSTALL_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("依赖安装已在进行中".into());
+    }
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        for args in &kokoro_install_steps() {
+            let mut cmd = Command::new(&cfg.python_cmd);
+            cmd.arg("-m").arg("pip").args(args);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = match crate::dsh::hide_window(&mut cmd).spawn() {
+                Ok(c) => c,
+                Err(_) => return Err("无法启动 pip 进程，请检查 Python 解释器".to_string()),
+            };
+            let code = crate::dsh::pump_streams_until_exit(&app, child, VOICE_INSTALL_LOG_EVENT);
+            if code != 0 {
+                return Err(format!(
+                    "pip 安装失败（退出码 {code}），详见安装日志，或手动执行自检报告里的命令"
+                ));
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => Err(e.to_string()),
+    };
+    VOICE_INSTALL_RUNNING.store(false, Ordering::SeqCst);
+    result
 }
 
 /// 长文本分段（纯函数，供单测）：先按句末标点（。！？!?；;\n）分句，贪心组段
@@ -1989,9 +2850,7 @@ pub async fn tts_synthesize(
     text: String,
 ) -> Result<String, String> {
     let cfg = state.voice.lock().unwrap().clone();
-    if let Err(e) = validate_audio_path(&cfg.repo_dir, "Audio8 仓库目录")
-        .and_then(|_| validate_audio_path(&cfg.model_dir, "模型目录"))
-    {
+    if let Err(e) = validate_engine_paths(&cfg) {
         return Err(e);
     }
     let text = text.trim().to_string();
@@ -2192,9 +3051,17 @@ mod tests {
         assert!(!d.enabled);
         assert_eq!(d.speak_content, "summary");
         assert_eq!(d.python_cmd, "python");
+        // 默认引擎 audio8：老配置行为不变；默认 Kokoro 音色/语速就绪
+        assert_eq!(d.engine, ENGINE_AUDIO8);
+        assert!(!d.is_kokoro());
+        assert_eq!(d.kokoro_voice, "zf_xiaoxiao");
+        assert_eq!(d.kokoro_speed, 1.0);
         // 默认音色锚定内置音色：不再走模型原生默认（音色漂移）
         assert_eq!(d.voice_id, DEFAULT_VOICE_ID);
-        assert_eq!(d.worker_key(), "python\u{1f}\u{1f}");
+        assert_eq!(
+            d.worker_key(),
+            format!("{ENGINE_AUDIO8}\u{1f}python\u{1f}\u{1f}")
+        );
         // 采样参数默认与 worker 原硬编码值一致（行为不变）
         assert_eq!(
             d.params_tag(),
@@ -2212,6 +3079,136 @@ mod tests {
             "采样参数不应触发 worker 重建"
         );
         assert_ne!(c.params_tag(), d.params_tag(), "换 seed 必须换缓存");
+    }
+
+    /// 引擎字段归一：仅 "kokoro" 保留，空/未知/缺省一律 audio8（默认引擎是
+    /// 原始方案）；worker 键与缓存标签按引擎隔离
+    #[test]
+    fn 引擎归一与kokoro_worker键缓存标签() {
+        assert_eq!(normalize_engine(""), ENGINE_AUDIO8);
+        assert_eq!(normalize_engine("audio8"), ENGINE_AUDIO8);
+        assert_eq!(normalize_engine("bogus"), ENGINE_AUDIO8);
+        assert_eq!(normalize_engine(ENGINE_KOKORO), ENGINE_KOKORO);
+
+        let d = VoiceConfig::default();
+        let mut k = d.clone();
+        k.engine = ENGINE_KOKORO.into();
+        k.kokoro_model_dir = "D:\\tts\\Kokoro-82M".into();
+        assert!(k.is_kokoro());
+        // 换引擎必须换 worker（两引擎 worker 脚本与启动参数都不同）
+        assert_ne!(k.worker_key(), d.worker_key());
+        assert!(
+            k.worker_key().starts_with(&format!("{ENGINE_KOKORO}\u{1f}")),
+            "kokoro 键必须带引擎前缀: {}",
+            k.worker_key()
+        );
+        // 换 kokoro 模型目录/源码目录重建 worker；换音色/语速不重建（按请求携带）
+        let mut k2 = k.clone();
+        k2.kokoro_model_dir = "D:\\tts\\other".into();
+        assert_ne!(k2.worker_key(), k.worker_key());
+        k2.kokoro_model_dir = k.kokoro_model_dir.clone();
+        k2.kokoro_repo_dir = "D:\\code\\owner\\kokoro".into();
+        assert_ne!(k2.worker_key(), k.worker_key(), "换源码目录必须重建 worker");
+        k2.kokoro_repo_dir = String::new();
+        k2.kokoro_voice = "zm_yunxi".into();
+        assert_eq!(k2.worker_key(), k.worker_key(), "音色不应触发 worker 重建");
+        assert_ne!(k2.params_tag(), k.params_tag(), "换音色必须换缓存");
+        k2.kokoro_voice = k.kokoro_voice.clone();
+        k2.kokoro_speed = 1.5;
+        assert_eq!(k2.worker_key(), k.worker_key(), "语速不应触发 worker 重建");
+        assert_ne!(k2.params_tag(), k.params_tag(), "换语速必须换缓存");
+        // kokoro 缓存标签格式：带音色与语速
+        assert_eq!(
+            k.params_tag(),
+            format!("kokoro\u{1f}v{}\u{1f}sp{}", k.kokoro_voice, k.kokoro_speed)
+        );
+    }
+
+    /// Kokoro 模型目录布局：config.json + 权重（v1_0 优先）+ voices/*.pt；
+    /// 空目录/未填写给出可行动的提示
+    #[test]
+    fn kokoro模型目录校验() {
+        let tmp = std::env::temp_dir().join("dsh-tts-kokoro-layout");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // 未填写
+        let (ok, hint, vok, vhint) = check_kokoro_model_dir("");
+        assert!(!ok && hint.contains("未填写") && !vok && vhint.contains("未填写"));
+        // 空目录
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (ok, hint, _, _) = check_kokoro_model_dir(tmp.to_str().unwrap());
+        assert!(!ok && hint.contains("config.json"));
+        // 只有 config：提示缺权重
+        std::fs::write(tmp.join("config.json"), b"{}").unwrap();
+        let (ok, hint, _, _) = check_kokoro_model_dir(tmp.to_str().unwrap());
+        assert!(!ok && hint.contains("kokoro-v1_0.pth"));
+        // config + 权重 + 音色：通过，权重提示指向 v1_0
+        std::fs::write(tmp.join("kokoro-v0_19.pth"), b"x").unwrap();
+        std::fs::write(tmp.join("kokoro-v1_0.pth"), b"x").unwrap();
+        std::fs::create_dir_all(tmp.join("voices")).unwrap();
+        std::fs::write(tmp.join("voices").join("zf_xiaoxiao.pt"), b"x").unwrap();
+        std::fs::write(tmp.join("voices").join("zm_yunxi.pt"), b"x").unwrap();
+        let (ok, hint, vok, vhint) = check_kokoro_model_dir(tmp.to_str().unwrap());
+        assert!(ok, "完整布局应通过: {hint}");
+        assert!(hint.ends_with("kokoro-v1_0.pth"), "权重优先 v1_0: {hint}");
+        assert!(vok && vhint.contains("2 个音色"), "{vhint}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Kokoro 音色扫描：文件名去扩展名即 id、按字节序排序、首字母映射语言；
+    /// 目录不存在返回空
+    #[test]
+    fn kokoro音色扫描与语言标签() {
+        assert_eq!(kokoro_lang_label('z'), "中文");
+        assert_eq!(kokoro_lang_label('a'), "英语（美）");
+        assert_eq!(kokoro_lang_label('x'), "未知语言");
+        let tmp = std::env::temp_dir().join("dsh-tts-kokoro-voices");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("voices")).unwrap();
+        std::fs::write(tmp.join("voices").join("zm_yunxi.pt"), b"x").unwrap();
+        std::fs::write(tmp.join("voices").join("zf_xiaoxiao.pt"), b"x").unwrap();
+        std::fs::write(tmp.join("voices").join("说明.txt"), b"x").unwrap();
+        let voices = scan_kokoro_voices(tmp.to_str().unwrap());
+        assert_eq!(
+            voices.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            vec!["zf_xiaoxiao", "zm_yunxi"],
+            "按文件名排序、去扩展名即 id"
+        );
+        assert_eq!(voices[0].lang, "z");
+        assert_eq!(voices[0].lang_label, "中文");
+        assert!(scan_kokoro_voices(tmp.join("nope").to_str().unwrap()).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 自动探测候选扫描：按顺序取第一个合法目录；布局不合法的候选跳过；
+    /// 全部不合法返回 None
+    #[test]
+    fn kokoro自动探测候选扫描() {
+        let tmp = std::env::temp_dir().join("dsh-tts-kokoro-autodetect");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // 候选 1 存在但布局不完整（缺权重）→ 跳过；候选 2 完整 → 命中
+        let bad = tmp.join("a");
+        std::fs::create_dir_all(bad.join("voices")).unwrap();
+        std::fs::write(bad.join("config.json"), b"{}").unwrap();
+        let good = tmp.join("b");
+        std::fs::create_dir_all(good.join("voices")).unwrap();
+        std::fs::write(good.join("config.json"), b"{}").unwrap();
+        std::fs::write(good.join("kokoro-v1_0.pth"), b"x").unwrap();
+        std::fs::write(good.join("voices").join("zf_xiaoxiao.pt"), b"x").unwrap();
+        assert_eq!(
+            first_valid_dir(&[bad.clone(), good.clone()], is_valid_kokoro_model_dir),
+            Some(good)
+        );
+        // 全部不合法 → None
+        assert_eq!(first_valid_dir(&[bad], is_valid_kokoro_model_dir), None);
+        // 源码目录：kokoro/__init__.py 即合法
+        let src = tmp.join("c");
+        std::fs::create_dir_all(src.join("kokoro")).unwrap();
+        std::fs::write(src.join("kokoro").join("__init__.py"), b"").unwrap();
+        assert_eq!(
+            first_valid_dir(&[tmp.join("nope"), src.clone()], is_valid_kokoro_repo_dir),
+            Some(src)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2233,6 +3230,12 @@ mod tests {
         assert!(cfg.ref_text.is_empty());
         // 老版本存储没有音色字段：默认内置音色补齐（resolve 时等价生效）
         assert_eq!(cfg.voice_id, DEFAULT_VOICE_ID);
+        // 老版本存储没有引擎字段：默认 audio8（原始方案行为不变）
+        assert_eq!(cfg.engine, ENGINE_AUDIO8);
+        assert!(!cfg.is_kokoro());
+        assert_eq!(cfg.kokoro_voice, "zf_xiaoxiao");
+        assert_eq!(cfg.kokoro_speed, 1.0);
+        assert!(cfg.kokoro_model_dir.is_empty());
     }
 
     /// 参考音频缓存指纹：换参考（路径/原文/文件内容）必须换缓存；无参考
@@ -2499,6 +3502,16 @@ mod tests {
         assert_eq!(v["seed"], json!(42));
         assert_eq!(v["max_new_tokens"], json!(512));
         assert_eq!(v["greedy"], json!(false));
+        // kokoro：untagged 枚举序列化为平铺对象（speed + voice）
+        let mut k = VoiceConfig::default();
+        k.engine = ENGINE_KOKORO.into();
+        k.kokoro_speed = 1.25;
+        let kv = serde_json::to_value(GenerateParams::from(&k)).unwrap();
+        assert_eq!(
+            kv,
+            json!({ "speed": 1.25f32, "voice": "zf_xiaoxiao" }),
+            "kokoro params 必须带 speed 与 voice（否则 worker 永远用默认音色）"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2860,7 +3873,8 @@ for line in sys.stdin:
     }
 
     /// 一键安装步骤：CUDA 版拆 torch/其余依赖两步（torch 必须走 pytorch 官方源），
-    /// CPU 版单步全装；中文系统（本机默认）会追加华为云 PyPI 镜像参数
+    /// CPU 版单步全装；torchaudio 是参考音频重采样的必需依赖（Audio8 官方
+    /// requirements 含它），两路都必须包含；中文系统（本机默认）追加华为云镜像
     #[test]
     fn 安装步骤_cuda与cpu布局() {
         let cuda = torch_install_steps(true);
@@ -2870,7 +3884,7 @@ for line in sys.stdin:
             t.contains("torch") && t.contains("--index-url") && t.contains("download.pytorch.org")
         );
         let rest = cuda[1].join(" ");
-        for pkg in ["transformers", "soundfile", "numpy"] {
+        for pkg in ["transformers", "soundfile", "numpy", "torchaudio"] {
             assert!(rest.contains(pkg));
         }
         assert!(!rest.contains("download.pytorch.org"));
@@ -2878,7 +3892,7 @@ for line in sys.stdin:
         let cpu = torch_install_steps(false);
         assert_eq!(cpu.len(), 1);
         let all = cpu[0].join(" ");
-        for pkg in ["torch", "transformers", "soundfile", "numpy"] {
+        for pkg in ["torch", "transformers", "soundfile", "numpy", "torchaudio"] {
             assert!(all.contains(pkg));
         }
     }

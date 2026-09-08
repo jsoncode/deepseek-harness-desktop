@@ -36,6 +36,13 @@ const VOICE_DEFAULT: VoiceConfig = {
   refAudio: "",
   refText: "",
   ...VOICE_SYNTH_DEFAULTS,
+  // 引擎默认 audio8（原始方案）：老版本存储缺 engine/kokoro 字段时经合并补齐
+  // 后行为不变；kokoroVoice 取 ModelScope Kokoro-82M 自带中文女声
+  engine: "audio8",
+  kokoroModelDir: "",
+  kokoroRepoDir: "",
+  kokoroVoice: "zf_xiaoxiao",
+  kokoroSpeed: 1.0,
 };
 
 function loadVoice(): VoiceConfig {

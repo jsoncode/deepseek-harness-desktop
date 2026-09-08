@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { App as AntApp } from "antd";
 import { Button, Space, Tag, Typography } from "antd";
 import {
@@ -34,14 +34,18 @@ function baseName(p: string) {
 }
 
 /**
- * 语音生成历史页（语音合成工具窗口 /tts-studio/history）：记录所有生成过的
- * 语音——通知播报、试听与长文本合成导出（Rust 侧 history.jsonl，LRU 200 条）。
+ * 语音生成历史页（语音合成工具窗口 /tts-studio/history 或 Kokoro 语音合成工具
+ * 窗口 /kokoro-studio/history）：记录所有生成过的语音——通知播报、试听与长文本
+ * 合成导出（Rust 侧 history.jsonl，LRU 200 条，两引擎共用一份）。
  * 支持播放预览（rodio 原生播放，与通知同通道）、删除（无其他引用时连 WAV 一起删）、
  * 打开所在文件夹；文件已被缓存上限清理的条目标记「文件已缺失」并禁用播放。
  */
 export default function TtsHistory() {
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
+  // 返回路径跟随打开本页的工具窗口：Kokoro 窗口 → /kokoro-studio，否则 Audio8
+  const { pathname } = useLocation();
+  const studioBase = pathname.startsWith("/kokoro-studio") ? "/kokoro-studio" : "/tts-studio";
   const [items, setItems] = useState<VoiceHistoryEntry[] | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -100,7 +104,7 @@ export default function TtsHistory() {
       <div className="settings-nav">
         <span className="settings-nav-title">语音生成历史</span>
         <div className="settings-nav-actions">
-          <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => navigate("/tts-studio")}>
+          <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => navigate(studioBase)}>
             返回合成
           </Button>
           <Button size="small" icon={<ReloadOutlined />} loading={items === null} onClick={() => void refresh()}>

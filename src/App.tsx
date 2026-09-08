@@ -110,7 +110,7 @@ function Shell() {
   if (location.pathname.startsWith("/tts-studio")) {
     return (
       <div className="app-shell">
-        <StudioTitleBar />
+        <StudioTitleBar title="语音合成工具" />
         <div className="app-content">
           <Routes>
             <Route path="/tts-studio" element={<TtsStudio />} />

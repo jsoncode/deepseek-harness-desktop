@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "kokoro-studio",
+  "description": "Kokoro 语音合成工具窗口 capability：窗口操作（自绘标题栏拖拽/最小化/最大化/关闭）+ 对话框。与 tts-studio 同款——缺这份授权时右上角窗口控制按钮与标题栏拖拽全部无效",
+  "windows": ["kokoro-studio"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "snap-layout:default",
+    "dialog:default"
+  ]
+}

@@ -147,7 +147,12 @@ def main() -> None:
             sf.write(out_path, audio, sample_rate)
             emit({"id": req_id, "ok": True, "code_frames": code_length})
         except Exception as exc:  # noqa: BLE001 - 单条失败回复后继续服务
-            emit({"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            err = f"{type(exc).__name__}: {exc}"
+            # 参考音频采样率 ≠ 模型采样率时官方代码走 torchaudio 重采样；缺失时
+            # 给出可行动的修复指引（44.1kHz 音频不触发，故环境问题可能潜伏）
+            if "torchaudio" in err and "resample" in err:
+                err += "（修复：python -m pip install torchaudio，或在语音配置面板点「一键安装依赖」）"
+            emit({"id": req_id, "ok": False, "error": err})
 
 
 if __name__ == "__main__":
