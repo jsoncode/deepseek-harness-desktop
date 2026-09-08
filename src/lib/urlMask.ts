@@ -1,5 +1,5 @@
 /**
- * 服务地址展示打码（仅影响只读展示，复制/浏览器打开仍使用真实完整地址）。
+ * 服务地址展示打码（仅影响只读展示，托盘打开/健康探测仍使用真实完整地址）。
  *
  * 新版宿主启动后生成带进程 token 的完整地址（形如
  * `http://127.0.0.1:3080/?token=<base64url>`），地址栏/状态文案里直接展示会把
@@ -51,7 +51,7 @@ export function maskServiceUrl(raw: string): string {
  * Cookie 由代理在 Rust 侧持有并注入，浏览器无需任何 Cookie。本函数仅供浏览器
  * 预览（非 Tauri、顶层为 http://localhost）时兜底使用。
  *
- * 仅用于 iframe src；复制/浏览器打开/健康探测仍使用日志解析出的原始地址。
+ * 仅用于 iframe src；托盘打开/健康探测仍使用日志解析出的原始地址。
  */
 export function sameSiteEmbedUrl(raw: string): string {
   try {

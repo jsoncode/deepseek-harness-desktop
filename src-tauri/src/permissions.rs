@@ -1,4 +1,4 @@
-//! 内嵌服务的 Web 权限申请（麦克风 / 摄像头 / 剪贴板 / 系统通知 / 地理位置 等）。
+//! 内嵌服务的 Web 权限申请（麦克风 / 摄像头 / 剪贴板 / 系统通知 / 地理位置 / 文件读写 等）。
 //!
 //! 背景：wry 的 WebView2 后端只自动放行「剪贴板读取」一种权限（见 wry
 //! `webview2/mod.rs` 的 `if attributes.clipboard` 分支），其余权限请求走 WebView2
@@ -9,11 +9,31 @@
 //! Preview.tsx 的 iframe `allow` 属性（浏览器回退路径的跨源权限委托）保证；原生子
 //! webview 路径（preview.rs）下宿主页是顶层文档，不存在文档层权限委托的问题。
 //!
+//! # 本回调里绝不能同步等待用户
+//!
+//! `PermissionRequested` 在**主线程**（WebView2 控制器所属的 UI 线程）派发。曾经在此
+//! 同步弹 `MessageBoxW`，后果是把主线程钉死在一个嵌套模态消息泵里：
+//!
+//! - WebView2 的合成与浏览器进程 IPC 一并饿死 → 子 webview 停止呈现（画面发黑）、
+//!   窗口不再响应，即「点宿主页里的文件/链接把电脑搞到黑屏卡死」；
+//! - 托盘图标事件同样在主线程派发 → 点托盘毫无反应，只能重启应用；
+//! - 申请发生在主窗口隐藏/非前台时（例如从托盘恢复期间页面重跑），Windows 前台锁会让
+//!   `MB_SETFOREGROUND` 失效，对话框根本不出现，主线程就永久挂在一个用户看不见的
+//!   模态框上——这是最恶劣的一种，症状与「应用彻底死掉」无法区分。
+//!
+//! 现在的做法：回调内只取 `GetDeferral()` 把申请挂起（不阻塞，WebView2 就是为此提供
+//! deferral 的），弹窗交给异步原生对话框（plugin-dialog，与前端 `nativeConfirm` 同一套），
+//! 用户决定后经 `run_on_main_thread` 回主线程写 `SetState` + `Complete`。主线程全程不阻塞。
+//!
+//! COM 句柄（args / deferral）内部是裸指针、**非 `Send`**，无法移进对话框回调线程；
+//! 而 WebView2 回调与 `run_on_main_thread` 闭包都在主线程执行，故待决申请存在
+//! `thread_local` 槽位表里，跨线程只传 `usize` 索引。
+//!
 //! 平台范围：仅 Windows 需要——macOS 上 wry 的 WKUIDelegate 已自动 Grant 媒体
 //! 采集权限（见 wry `wry_web_view_ui_delegate.rs`），Linux 非本应用目标平台。
 //! 注册点：主窗口（setup 后 `register`，覆盖浏览器回退 iframe）与 preview 子
-//! webview（preview.rs 创建后 `attach_platform`）。tts-studio 等纯 UI 窗口不承载
-//! 服务内容，无需处理。
+//! webview（preview.rs 创建后 `attach_platform`）。tts-studio / settings 等纯 UI
+//! 窗口不承载服务内容，无需处理。
 
 /// 给主窗口 WebView2 注册权限申请处理器。在 setup（主窗口构建完成）后调用一次。
 #[cfg(windows)]
@@ -25,8 +45,9 @@ pub fn register(app: &tauri::AppHandle) {
         return;
     };
     // with_webview 把闭包派发到主线程执行；注册在页面导航前完成，不会漏申请
-    if let Err(e) = win.with_webview(|webview| {
-        if let Err(e) = attach_permission_handler(&webview) {
+    let handle = app.clone();
+    if let Err(e) = win.with_webview(move |webview| {
+        if let Err(e) = attach_permission_handler(&handle, &webview) {
             eprintln!("[permissions] 权限处理器注册失败: {e}");
         }
     }) {
@@ -41,36 +62,57 @@ pub fn register(_app: &tauri::AppHandle) {}
 /// 给任意已创建的 webview（主窗口或 preview 子 webview）挂权限申请处理器。
 /// 仅 Windows 有实现；其他平台为 no-op（调用方无需再判平台）。
 #[cfg(windows)]
-pub fn attach_platform(webview: &tauri::webview::PlatformWebview) -> Result<(), String> {
-    attach_permission_handler(webview)
+pub fn attach_platform(
+    app: &tauri::AppHandle,
+    webview: &tauri::webview::PlatformWebview,
+) -> Result<(), String> {
+    attach_permission_handler(app, webview)
+}
+
+#[cfg(windows)]
+type PermissionArgs =
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PermissionRequestedEventArgs;
+
+#[cfg(windows)]
+type PermissionDeferral = webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral;
+
+/// 一条已挂起、等待用户决定的权限申请。仅主线程读写（理由见模块注释）。
+#[cfg(windows)]
+struct PendingRequest {
+    args: PermissionArgs,
+    deferral: PermissionDeferral,
+}
+
+#[cfg(windows)]
+thread_local! {
+    /// 待决申请槽位表：索引即跨线程传递的凭据，决定落地后槽位置空供复用
+    static PENDING: std::cell::RefCell<Vec<Option<PendingRequest>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// 挂 `PermissionRequested` 事件：整 webview 生效（含 Preview 的跨源 iframe）。
-/// 事件在 UI 线程触发，对话框在处理器内同步弹出（MessageBox 自带模态消息泵，
-/// 与浏览器原生权限气泡同形态：页面在此期间等待用户决定）。
 #[cfg(windows)]
-fn attach_permission_handler(webview: &tauri::webview::PlatformWebview) -> Result<(), String> {
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Controller};
+fn attach_permission_handler(
+    app: &tauri::AppHandle,
+    webview: &tauri::webview::PlatformWebview,
+) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2;
     use webview2_com::PermissionRequestedEventHandler;
-    use windows::Win32::Foundation::HWND;
 
-    let controller: ICoreWebView2Controller = webview.controller();
-    // 同一 windows 0.61 类型域（webview2-com 0.38 与本 crate 的 windows 依赖一致），
-    // 宿主窗口的 HWND 可直接传给本模块的 MessageBoxW。
+    let controller = webview.controller();
     let core: ICoreWebView2 =
         unsafe { controller.CoreWebView2() }.map_err(|e| format!("CoreWebView2: {e}"))?;
-    let mut hwnd = HWND::default();
-    unsafe { controller.ParentWindow(&mut hwnd) }.map_err(|e| format!("ParentWindow: {e}"))?;
 
+    let handle = app.clone();
     let mut token = Default::default();
     unsafe {
         core.add_PermissionRequested(
             &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
-                if let Some(state) = decide_permission(&args, hwnd) {
-                    args.SetState(state)?;
-                }
-                Ok(())
+                let Some(label) = permission_to_ask(&args) else {
+                    return Ok(());
+                };
+                defer_and_ask(&handle, args, &label)
             })),
             &mut token,
         )
@@ -79,14 +121,12 @@ fn attach_permission_handler(webview: &tauri::webview::PlatformWebview) -> Resul
     Ok(())
 }
 
-/// 单条权限申请的决策。已知/未知权限一律弹「允许 / 拒绝」对话框（需求：所有
-/// 申请都要能被用户看到并决定）。若 wry 自带处理器已放行（剪贴板读取），state
-/// 已是 ALLOW——直接放行不再弹窗，避免同一条申请打扰两次。
+/// 单条权限申请的预处理：返回需要询问用户的权限标签。
+/// 已知/未知权限一律要问（需求：所有申请都要能被用户看到并决定）。
+/// `None` = 不必弹窗——wry 自带处理器已放行（剪贴板读取，state 已是 ALLOW，
+/// 再问一次等于同一条申请打扰两遍），或读不出权限类型（已就地拒绝）。
 #[cfg(windows)]
-fn decide_permission(
-    args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PermissionRequestedEventArgs,
-    hwnd: windows::Win32::Foundation::HWND,
-) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_STATE> {
+fn permission_to_ask(args: &PermissionArgs) -> Option<String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_STATE,
         COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
@@ -100,14 +140,80 @@ fn decide_permission(
     let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
     if let Err(e) = unsafe { args.PermissionKind(&mut kind) } {
         eprintln!("[permissions] 读取权限类型失败: {e}");
-        return Some(COREWEBVIEW2_PERMISSION_STATE_DENY);
+        let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
+        return None;
     }
-    let allow = ask_permission(hwnd, &permission_label(kind));
-    Some(if allow {
+    Some(permission_label(kind))
+}
+
+/// 挂起申请（deferral）并弹异步对话框。本函数在主线程上执行且**立即返回**——
+/// 用户的决定稍后由 [`resolve_pending`] 在主线程落地。
+#[cfg(windows)]
+fn defer_and_ask(
+    app: &tauri::AppHandle,
+    args: PermissionArgs,
+    label: &str,
+) -> windows::core::Result<()> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_STATE_DENY;
+
+    let Ok(deferral) = (unsafe { args.GetDeferral() }) else {
+        // 拿不到 deferral 就无法把决定推迟到弹窗之后：就地拒绝，绝不退回同步弹窗
+        eprintln!("[permissions] GetDeferral 失败，直接拒绝本次权限申请");
+        let _ = unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
+        return Ok(());
+    };
+
+    let index = PENDING.with(|slots| {
+        let mut slots = slots.borrow_mut();
+        let req = PendingRequest { args, deferral };
+        match slots.iter_mut().position(|slot| slot.is_none()) {
+            Some(i) => {
+                slots[i] = Some(req);
+                i
+            }
+            None => {
+                slots.push(Some(req));
+                slots.len() - 1
+            }
+        }
+    });
+
+    // 不设 parent：模态父窗口会被禁用，而申请可能来自主窗口隐藏期间（见模块注释），
+    // 那会变成「看不见的原因把整个窗口锁住」。无主对话框只挂起这一条权限申请。
+    let owner = app.clone();
+    app.dialog()
+        .message(format!("内嵌网页申请使用「{label}」权限。\n\n是否允许？"))
+        .title("Web 权限申请")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::YesNo)
+        .show(move |allow| {
+            // 回调在 rfd 的对话框线程上，SetState/Complete 必须回主线程执行
+            let _ = owner.run_on_main_thread(move || resolve_pending(index, allow));
+        });
+    Ok(())
+}
+
+/// 主线程执行：把用户决定写回 WebView2 并完成 deferral，释放挂起的申请。
+#[cfg(windows)]
+fn resolve_pending(index: usize, allow: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
+    };
+
+    let taken = PENDING.with(|slots| slots.borrow_mut().get_mut(index).and_then(Option::take));
+    let Some(req) = taken else { return };
+    let state = if allow {
         COREWEBVIEW2_PERMISSION_STATE_ALLOW
     } else {
         COREWEBVIEW2_PERMISSION_STATE_DENY
-    })
+    };
+    if let Err(e) = unsafe { req.args.SetState(state) } {
+        eprintln!("[permissions] 写回权限决定失败: {e}");
+    }
+    if let Err(e) = unsafe { req.deferral.Complete() } {
+        eprintln!("[permissions] 完成 deferral 失败: {e}");
+    }
 }
 
 /// WebView2 权限类型 → 中文标签（未知类型给通用文案，同样弹窗）。
@@ -135,27 +241,6 @@ fn permission_label(
         _ => "未识别的权限",
     }
     .to_string()
-}
-
-/// 原生「允许 / 拒绝」对话框。父窗口 = WebView2 宿主窗口（模态于本应用）。
-#[cfg(windows)]
-fn ask_permission(hwnd: windows::Win32::Foundation::HWND, label: &str) -> bool {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
-    };
-
-    let text = HSTRING::from(format!("内嵌网页申请使用「{label}」权限。\n\n是否允许？"));
-    let title = HSTRING::from("Web 权限申请");
-    let answer = unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            &text,
-            &title,
-            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
-        )
-    };
-    answer == IDYES
 }
 
 #[cfg(all(test, windows))]

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, EVENTS, onEvent, tauri, withTimeout, type CredentialsCheck, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type ToolCheck, type UrlPayload } from "../lib/tauri";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
 
@@ -113,6 +114,13 @@ interface AppStore {
 let logSeq = 0;
 let wired = false;
 
+/** 当前是否主窗口：启动链、服务日志镜像、健康轮询等全局职责只在主窗口承担；
+ *  独立设置窗口（label "settings"）仅接插件操作事件、仅拉一次状态——
+ *  Rust 事件是全窗口广播（app.emit），接多了会重复消费、日志重复落盘，
+ *  多窗口并发全量环境探测会争抢 CPU 导致版本读取超时误报（见 wireEvents/init 注释）。
+ *  浏览器预览模式（非 Tauri）视作主窗口，保持既有行为 */
+const isMain = !tauri || getCurrentWindow().label === "main";
+
 /** 日志会话写入串行队列：保证 invoke 到达 Rust 的顺序与 store 日志顺序一致
  *  （并发 IPC 可能乱序，会破坏会话文件的日志顺序） */
 let logFlush: Promise<void> = Promise.resolve();
@@ -202,8 +210,10 @@ function healthTick() {
     .catch(markDead);
 }
 
-/** 按 url/phase 启停健康轮询定时器（由 store subscribe 驱动） */
+/** 按 url/phase 启停健康轮询定时器（由 store subscribe 驱动）；
+ *  仅主窗口轮询——设置窗口的服务状态来自 app_status 快照，无需重复探测 */
 function syncHealthPolling() {
+  if (!isMain) return;
   const s = useAppStore.getState();
   const shouldPoll = Boolean(s.url) && s.phase === "running";
   if (shouldPoll && healthTimer === null) {
@@ -251,6 +261,24 @@ export const useAppStore = create<AppStore>((set, get) => {
   function wireEvents() {
     if (wired) return;
     wired = true;
+
+    // 独立设置窗口：只接插件操作事件（插件管理面板在本窗口发起操作，
+    // pluginOpExit handler 自带 op.running 守卫，与主窗口并发消费无竞态）。
+    // 启动链/服务日志事件不接：那些职责在主窗口，接了会把同一份日志再次
+    // invoke log_append 镜像进会话文件（重复落盘）
+    if (!isMain) {
+      onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
+        const stream: StreamKind =
+          p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
+        get().appendPluginOpLog(stream, p.line);
+      });
+      onEvent<ExitPayload>(EVENTS.pluginOpExit, (p) => {
+        const op = get().pluginOp;
+        if (!op || !op.running) return;
+        set({ pluginOp: { ...op, running: false, exitCode: p.code } });
+      });
+      return;
+    }
 
     onEvent<LogLine>(EVENTS.installLog, (p) => {
       const stream: StreamKind =
@@ -618,6 +646,14 @@ export const useAppStore = create<AppStore>((set, get) => {
         set({ phase: "idle", initialized: true });
         return;
       }
+      // 独立设置窗口：不跑全量环境探测（主窗口已做/在做，多窗口并发探测会
+      // 争抢 CPU 导致版本读取超时误报），只做一次 app_status 收尾取插件清单
+      // 与服务状态；failToIdle=true，失败也落 idle + 检查行完成，防 About 页
+      // 卡在「检测中」
+      if (!isMain) {
+        await settleStatus("idle", true);
+        return;
+      }
       // 环境检测拆分为「逐项 + 收尾」两段【串行】执行：先并发跑 node/pnpm/dsh
       // 三次 check_tool（每项完成即写回 store，检查行立即点亮），全部落定后再跑
       // app_status 收尾（提供权威的服务/插件/phase 值并最终落定全部检查行）。
@@ -641,13 +677,17 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (statusRefreshInFlight) return;
       statusRefreshInFlight = true;
       try {
-        // 与 init 相同的逐项 + 收尾链路（两段串行，理由见 init 内注释）：
-        // 进入环境区块时检查行同样逐项刷新，不再等全部检测结束才一次性更新
-        await Promise.allSettled([
-          runToolCheck("node"),
-          runToolCheck("pnpm"),
-          runToolCheck("dsh"),
-        ]);
+        // 独立设置窗口：跳过逐项 check_tool（避免与主窗口并发全量探测互相
+        // 争抢 CPU 导致版本读取超时误报），只做 app_status 收尾
+        if (isMain) {
+          // 与 init 相同的逐项 + 收尾链路（两段串行，理由见 init 内注释）：
+          // 进入环境区块时检查行同样逐项刷新，不再等全部检测结束才一次性更新
+          await Promise.allSettled([
+            runToolCheck("node"),
+            runToolCheck("pnpm"),
+            runToolCheck("dsh"),
+          ]);
+        }
         await settleStatus(cur, false);
       } finally {
         statusRefreshInFlight = false;

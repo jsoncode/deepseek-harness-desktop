@@ -3,7 +3,7 @@ import { App as AntApp } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
-import { tauri } from "../lib/tauri";
+import { api, tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /**
@@ -140,7 +140,7 @@ export default function Loading() {
             <button className="btn-secondary loading-btn" type="button" onClick={startNow} disabled={starting}>
               <ReloadOutlined style={{ fontSize: 14 }} /> {starting ? "启动中…" : "重试"}
             </button>
-            <button className="btn-secondary loading-btn" type="button" onClick={() => navigate("/settings?section=logs")}>
+            <button className="btn-secondary loading-btn" type="button" onClick={() => api.openSettings("logs").catch(() => navigate("/settings?section=logs"))}>
               查看日志
             </button>
           </div>
@@ -154,7 +154,7 @@ export default function Loading() {
             <button className="btn-secondary loading-btn" type="button" onClick={startNow} disabled={starting}>
               <ReloadOutlined style={{ fontSize: 14 }} /> {starting ? "启动中…" : "启动服务"}
             </button>
-            <button className="btn-secondary loading-btn" type="button" onClick={() => navigate("/settings?section=logs")}>
+            <button className="btn-secondary loading-btn" type="button" onClick={() => api.openSettings("logs").catch(() => navigate("/settings?section=logs"))}>
               查看日志
             </button>
           </div>

@@ -240,13 +240,11 @@ fn clickable_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
             // 托盘驻留期窗口可能隐藏：点击通知即恢复前台。WinRT 激活事件跑在
             // 非主线程，窗口操作必须转回主线程。回调是 FnMut（可能多次触发），
             // 接收者借用外层 handle、闭包移入独立克隆，避免 move 冲突。
+            // 复用 crate::show_main_window：与托盘「打开」同一条恢复链（含 Windows
+            // 前台锁兜底），避免两处实现分叉
             let main_handle = handle.clone();
             let _ = handle.run_on_main_thread(move || {
-                if let Some(window) = main_handle.get_webview_window("main") {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                crate::show_main_window(&main_handle);
             });
             Ok(())
         });

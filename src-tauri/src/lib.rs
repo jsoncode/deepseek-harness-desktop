@@ -6,13 +6,14 @@ mod permissions;
 mod preview;
 mod proxy_config;
 mod session_events;
+mod settings;
 mod tts;
 
 use dsh::AppState;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, RunEvent, WindowEvent,
+    Manager, RunEvent, WindowEvent,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -42,6 +43,7 @@ pub fn run() {
             dsh::start_dsh_web,
             dsh::stop_dsh_web,
             dsh::open_in_browser,
+            settings::open_settings,
             dsh::remove_plugin,
             dsh::run_plugin_op,
             dsh::cancel_plugin_op,
@@ -118,7 +120,7 @@ pub fn run() {
 
             let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
             let browser = MenuItem::with_id(app, "browser", "浏览器中打开", true, None::<&str>)?;
-            // 设置直达：主项 + 设置页各分区（与设置页左侧菜单一致），点击恢复窗口并深链
+            // 设置直达：主项 + 设置窗口各分区（与设置页左侧菜单一致），点击打开/聚焦独立设置窗口
             let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let sec_plugins =
                 MenuItem::with_id(app, "sec-plugins", "插件管理", true, None::<&str>)?;
@@ -157,11 +159,9 @@ pub fn run() {
                     "browser" => open_service_in_browser(app),
                     "quit" => app.exit(0),
                     id => {
-                        if let Some(path) = tray_settings_path(id) {
-                            show_main_window(app);
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ =
-                                    window.emit(TRAY_NAVIGATE_EVENT, TrayNavigatePayload { path });
+                        if let Some(section) = tray_settings_section(id) {
+                            if let Err(e) = settings::open_settings_window(app, section) {
+                                eprintln!("[tray] 打开设置窗口失败: {e}");
                             }
                         }
                     }
@@ -238,40 +238,66 @@ fn quit_label() -> &'static str {
     }
 }
 
-/// 恢复主窗口到前台（托盘"打开"、左键单击、单实例回调共用）
+/// 恢复主窗口到前台（托盘"打开"、左键单击、单实例回调共用）。
+///
+/// 顺序必须是 show → unminimize → set_focus：窗口被 hide() 收起时若仍带最小化
+/// 状态，先 unminimize 在隐藏窗口上是空操作，随后 show() 会把它按最小化态显示出来
+/// （表现为"点了托盘只闪一下任务栏，窗口不出现"）。
+///
+/// 仅靠这三步在 Windows 上仍可能不置顶：前台锁（foreground lock）规定只有"当前
+/// 前台进程"才能抢焦点，托盘点击的输入落在 explorer.exe 上，`SetForegroundWindow`
+/// 会被静默忽略——窗口其实已显示，却仍被别的窗口盖住，用户观感就是"点托盘没反应"。
+/// [`raise_to_front`] 用不依赖前台权限的 z 序手段兜底。
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
+        raise_to_front(&window);
     }
 }
 
-/// 托盘「设置/分区」菜单 → 前端路由跳转事件（前端 TrayNavigateHandler 监听）
-const TRAY_NAVIGATE_EVENT: &str = "dsh://tray-navigate";
+/// Windows：把已显示的窗口抬到 z 序最前。
+/// 置顶→取消置顶两次 `SetWindowPos` 不需要前台权限就能改变 z 序（TOPMOST 窗口必然
+/// 位于所有非 TOPMOST 窗口之上，取消置顶后停在同层最前），因此比单独调用
+/// `SetForegroundWindow` 可靠；最小化时先 `SW_RESTORE` 真正还原。
+#[cfg(windows)]
+fn raise_to_front(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
+    };
 
-/// 托盘设置分区跳转事件负载（与前端 TrayNavigateHandler 的 payload 同形）
-#[derive(serde::Serialize, Clone)]
-struct TrayNavigatePayload {
-    path: String,
+    let Ok(hwnd) = window.hwnd() else { return };
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+    }
 }
 
-/// 托盘菜单 id → 前端 hash 路由路径；非设置类菜单返回 None
-fn tray_settings_path(id: &str) -> Option<String> {
-    let section = match id {
-        "settings" => None,
-        "sec-plugins" => Some("plugins"),
-        "sec-notify" => Some("notify"),
-        "sec-theme" => Some("theme"),
-        "sec-proxy" => Some("proxy"),
-        "sec-logs" => Some("logs"),
-        "sec-about" => Some("about"),
-        _ => return None,
-    };
-    Some(match section {
-        Some(s) => format!("/settings?section={s}"),
-        None => "/settings".to_string(),
-    })
+/// 非 Windows：`show` + `unminimize` + `set_focus` 已足够（无前台锁机制）。
+#[cfg(not(windows))]
+fn raise_to_front(_window: &tauri::WebviewWindow) {}
+
+/// 托盘菜单 id → 设置窗口分区（外层 None = 非设置类菜单；内层 None = 设置主分区，
+/// 不指定具体页签——仅聚焦，不重置用户当前所在分区）
+fn tray_settings_section(id: &str) -> Option<Option<&'static str>> {
+    match id {
+        "settings" => Some(None),
+        "sec-plugins" => Some(Some("plugins")),
+        "sec-notify" => Some(Some("notify")),
+        "sec-theme" => Some(Some("theme")),
+        "sec-proxy" => Some(Some("proxy")),
+        "sec-logs" => Some(Some("logs")),
+        "sec-about" => Some(Some("about")),
+        _ => None,
+    }
 }
 
 /// 托盘"浏览器中打开"：读取已探测到的服务 URL 并在默认浏览器打开
@@ -303,7 +329,7 @@ fn tray_tooltip_text(app_name: &str) -> String {
 
 #[cfg(test)]
 mod tray_tooltip_tests {
-    use super::{tray_settings_path, tray_tooltip_text};
+    use super::{tray_settings_section, tray_tooltip_text};
 
     const NAME: &str = "DeepSeek Harness Desktop";
 
@@ -314,17 +340,11 @@ mod tray_tooltip_tests {
     }
 
     #[test]
-    fn 托盘设置分区映射到前端路由() {
-        assert_eq!(tray_settings_path("settings").as_deref(), Some("/settings"));
-        assert_eq!(
-            tray_settings_path("sec-plugins").as_deref(),
-            Some("/settings?section=plugins")
-        );
-        assert_eq!(
-            tray_settings_path("sec-about").as_deref(),
-            Some("/settings?section=about")
-        );
-        assert_eq!(tray_settings_path("quit"), None);
-        assert_eq!(tray_settings_path("open"), None);
+    fn 托盘设置分区映射到设置窗口分区() {
+        assert_eq!(tray_settings_section("settings"), Some(None));
+        assert_eq!(tray_settings_section("sec-plugins"), Some(Some("plugins")));
+        assert_eq!(tray_settings_section("sec-about"), Some(Some("about")));
+        assert_eq!(tray_settings_section("quit"), None);
+        assert_eq!(tray_settings_section("open"), None);
     }
 }

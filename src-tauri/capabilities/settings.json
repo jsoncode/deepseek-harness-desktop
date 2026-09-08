@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings",
+  "description": "设置独立窗口 capability：窗口操作（自绘标题栏拖拽/最小化/最大化/关闭）+ 原生确认框；应用命令经共享 allow-app-commands 放行",
+  "windows": ["settings"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-internal-toggle-devtools",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "snap-layout:default",
+    "dialog:default",
+    "allow-app-commands"
+  ]
+}

@@ -1394,7 +1394,7 @@ html[data-theme="light"] .mk-op-banner {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* 右侧留出更大间距：末尾的"在浏览器中打开"与窗口控制按钮（最小化）分开，不贴在一起 */
+  /* 右侧留出更大间距：末尾的刷新按钮与窗口控制按钮（最小化）分开，不贴在一起 */
   padding: 0 28px 0 8px;
 }
 

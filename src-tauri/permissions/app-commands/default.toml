@@ -19,6 +19,7 @@ commands.allow = [
   "start_dsh_web",
   "stop_dsh_web",
   "open_in_browser",
+  "open_settings",
   "remove_plugin",
   "run_plugin_op",
   "cancel_plugin_op",

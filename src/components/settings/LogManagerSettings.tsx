@@ -99,6 +99,33 @@ export default function LogManagerSettings() {
   // 详情是否实时：桌面端当前活动会话 / 预览模式伪会话
   const isLive = detail !== null && (tauri ? detail.id === logSessionId : true);
 
+  // 非本窗口实时流的活动会话（独立设置窗口内 logSessionId 不在本窗口）：
+  // detail 打开期间轮询磁盘会话内容，兜底「实时输出」观感；主窗口的内存实时流不受影响
+  const detailId = detail?.id ?? null;
+  const pollRemoteActive = Boolean(
+    tauri && detail !== null && detail.status === "active" && detailId !== logSessionId,
+  );
+
+  useEffect(() => {
+    if (!pollRemoteActive || detailId === null) return;
+    let alive = true;
+    const timer = setInterval(() => {
+      void api
+        .logContent(detailId)
+        .then((lines) => {
+          if (alive) setDetailLines(lines);
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [pollRemoteActive, detailId]);
+
+  // 展示口径的「实时」：本窗口内存流，或经轮询跟随的活动会话
+  const isTailing = isLive || pollRemoteActive;
+
   const detailRows: DetailRow[] = isLive
     ? logs.map((l) => ({ key: String(l.id), time: l.time, stream: l.stream, text: l.text }))
     : (detailLines ?? []).map((l, i) => ({ key: String(i), time: l.time, stream: l.stream, text: l.text }));
@@ -297,7 +324,7 @@ export default function LogManagerSettings() {
             {detailLoading ? (
               <div className="term-empty">正在读取日志…</div>
             ) : detailRows.length === 0 ? (
-              <div className="term-empty">{isLive ? "等待输出…" : "该会话暂无日志输出"}</div>
+              <div className="term-empty">{isTailing ? "等待输出…" : "该会话暂无日志输出"}</div>
             ) : (
               detailRows.map((l) => (
                 <div key={l.key} className="term-line">
@@ -305,7 +332,7 @@ export default function LogManagerSettings() {
                 </div>
               ))
             )}
-            {isLive && detailRows.length > 0 ? (
+            {isTailing && detailRows.length > 0 ? (
               <div className="term-line">
                 实时输出中…
                 <span className="term-cursor" />

@@ -129,10 +129,12 @@ pub fn preview_bridge_report(
 
 /// 通知点击「打开对话」：向预览子 webview 下发会话打开指令（eval 调用注入脚本
 /// 暴露的 window.__dshDesktopOpenSession，sessionId 经 JSON 转义防注入）。
+/// 本命令是**同步**命令（跑在主线程）：取句柄后立即放锁，绝不持锁调用 webview，
+/// 否则与持锁阻塞等主线程的 preview_show 互相等待即硬死锁（见 show 内注释）。
 #[tauri::command]
 pub fn preview_open_session(session_id: String) -> Result<(), String> {
-    let slot = PREVIEW.lock().unwrap();
-    let Some(wv) = slot.as_ref() else {
+    let wv = PREVIEW.lock().unwrap().clone();
+    let Some(wv) = wv else {
         return Err("预览子 webview 未创建".into());
     };
     let arg = serde_json::to_string(&session_id).unwrap_or_else(|_| "\"\"".into());
@@ -397,10 +399,11 @@ mod imp {
         height: f64,
     ) -> Result<(), String> {
         let parsed = tauri::Url::parse(url).map_err(|e| format!("无效的服务地址: {e}"))?;
-        let mut slot = PREVIEW.lock().unwrap();
-        if let Some(wv) = slot.as_ref() {
+        // 已存在 → 导航 + 重定位。Webview 是廉价的 Clone 句柄，取出后立即放锁：
+        // 下面的创建路径【全程不得持锁】，见 add_child 处注释。
+        if let Some(wv) = PREVIEW.lock().unwrap().clone() {
             let _ = wv.navigate(parsed);
-            apply_bounds(wv, x, y, width, height);
+            apply_bounds(&wv, x, y, width, height);
             return Ok(());
         }
         let window = app.get_window("main").ok_or("未找到主窗口")?;
@@ -419,7 +422,11 @@ mod imp {
             .initialization_script(THEME_SYNC_BRIDGE)
             .initialization_script(PLUGIN_FAILURE_BRIDGE)
             .initialization_script(SESSION_OPEN_BRIDGE);
-        // add_child 内部会切回主线程执行，必须在非主线程调用（async 命令满足）
+        // add_child 内部会切回主线程执行，必须在非主线程调用（async 命令满足），
+        // 且调用方会【阻塞等待】主线程完成。因此这段期间绝不能持有 PREVIEW 锁：
+        // 主线程上的同步命令 preview_open_session 也要取这把锁，一旦并发就是
+        // 「工作线程持锁等主线程、主线程等锁」的硬死锁——整个应用冻结、托盘失效，
+        // 只能重启（与 permissions.rs 里同步弹框钉死主线程是同一类故障）。
         let wv = window
             .add_child(
                 builder,
@@ -433,26 +440,40 @@ mod imp {
         // Web 权限申请（麦克风/摄像头等）也要能在子 webview 上弹窗询问用户
         // （仅 Windows 需要，见 permissions.rs 模块注释）
         #[cfg(target_os = "windows")]
-        if let Err(e) = wv.with_webview(|pw| {
-            if let Err(e) = crate::permissions::attach_platform(&pw) {
-                eprintln!("[preview] 权限处理器挂载失败: {e}");
+        {
+            let handle = app.clone();
+            if let Err(e) = wv.with_webview(move |pw| {
+                if let Err(e) = crate::permissions::attach_platform(&handle, &pw) {
+                    eprintln!("[preview] 权限处理器挂载失败: {e}");
+                }
+            }) {
+                eprintln!("[preview] with_webview 派发失败: {e}");
             }
-        }) {
-            eprintln!("[preview] with_webview 派发失败: {e}");
         }
-        *slot = Some(wv);
+        // 短锁写回。仅当槽位仍为空：label "preview" 唯一，并发创建时后者会在
+        // add_child 就失败，这里再兜一层避免覆盖掉已生效的句柄
+        let mut slot = PREVIEW.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(wv);
+        }
         Ok(())
     }
 
     pub fn resize(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
-        if let Some(wv) = PREVIEW.lock().unwrap().as_ref() {
-            apply_bounds(wv, x, y, width, height);
+        // 与 show 同理：取出 Clone 句柄后立即放锁，锁不跨越任何 webview 调用
+        if let Some(wv) = PREVIEW.lock().unwrap().clone() {
+            apply_bounds(&wv, x, y, width, height);
         }
         Ok(())
     }
 
     pub fn hide() -> Result<(), String> {
-        if let Some(wv) = PREVIEW.lock().unwrap().take() {
+        // 先 take 到局部变量再放锁：写成 `if let Some(wv) = PREVIEW.lock().unwrap().take()`
+        // 时临时 MutexGuard 会活到 if-let 块结束，close() 全程持锁。close() 内部经
+        // manager 摘除 webview，属"可能阻塞的调用"，与主线程同步命令
+        // preview_open_session 争锁即同类死锁（见 show 内注释）。
+        let taken = PREVIEW.lock().unwrap().take();
+        if let Some(wv) = taken {
             let _ = wv.close();
         }
         Ok(())

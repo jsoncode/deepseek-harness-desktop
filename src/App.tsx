@@ -13,10 +13,9 @@ import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
 import TtsStudio from "./pages/TtsStudio";
 import TtsHistory from "./pages/TtsHistory";
-import { useThemeStore } from "./store/useThemeStore";
+import { useThemeStore, EFFECTIVE_STORAGE_KEY } from "./store/useThemeStore";
 import { initNotifySync } from "./store/useNotifyStore";
 import { startNotifyListener } from "./lib/notify";
-import TrayNavigateHandler from "./components/TrayNavigateHandler";
 
 const FONT_FAMILY =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
@@ -62,6 +61,13 @@ export default function App() {
     const el = document.documentElement;
     el.dataset.theme = effective;
     el.style.colorScheme = effective;
+    // 写入跨窗口生效主题键：storage 事件不回送写入方，设置/语音合成等窗口经此
+    // 跟随真实生效主题——含 host 模式（宿主主题只到达主窗口）
+    try {
+      localStorage.setItem(EFFECTIVE_STORAGE_KEY, effective);
+    } catch {
+      /* ignore */
+    }
   }, [effective]);
 
   return (
@@ -77,8 +83,6 @@ export default function App() {
       <AntApp>
         <div className="app-bg" />
         <HashRouter>
-          {/* 托盘「设置/分区」菜单跳转：任何路由（含语音工具窗口）下都要响应 */}
-          <TrayNavigateHandler />
           <Shell />
         </HashRouter>
       </AntApp>
@@ -88,7 +92,7 @@ export default function App() {
 
 /**
  * 壳层分流：主窗口壳（TitleBar + 内容区 + BottomBar + 主窗口级弹窗）与
- * 独立工具窗口壳（语音合成工具：StudioTitleBar + 页面，无底部导航与凭据/
+ * 独立工具窗口壳（语音合成工具/设置：StudioTitleBar + 页面，无底部导航与凭据/
  * 通知激活等主窗口专属弹窗）共用同一 bundle，经 hash 路由区分。
  */
 function Shell() {
@@ -112,6 +116,22 @@ function Shell() {
     );
   }
 
+  // 设置独立窗口壳：桌面端由 Rust open_settings 命令创建（index.html#/settings），
+  // 主窗口不再内嵌设置页；浏览器预览模式下入口回退 navigate 时也走此壳
+  if (location.pathname.startsWith("/settings")) {
+    return (
+      <div className="app-shell">
+        <StudioTitleBar title="设置" />
+        <div className="app-content">
+          <Routes>
+            <Route path="/settings" element={<Settings />} />
+            <Route path="*" element={<Navigate to="/settings" replace />} />
+          </Routes>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <CredentialsFixModal />
@@ -128,7 +148,6 @@ function Shell() {
             <Route path="/" element={<Navigate to="/loading" replace />} />
             <Route path="/loading" element={<Loading />} />
             <Route path="/preview" element={<Preview />} />
-            <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/loading" replace />} />
           </Routes>
         </div>

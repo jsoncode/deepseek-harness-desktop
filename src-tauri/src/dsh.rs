@@ -1603,9 +1603,28 @@ fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 启动 dsh web（流式输出；子进程存活期间持有 pid）
+/// 启动 dsh web（流式输出；子进程存活期间持有 pid）。
+///
+/// 异步命令 + spawn_blocking：启动链要枚举进程（netstat/tasklist）、taskkill 并
+/// 等待端口释放，耗时可达秒级。同步命令在**主线程**执行会把窗口、托盘事件一起
+/// 冻住（与 stop_dsh_web 同一处理，见其注释）。
 #[tauri::command]
-pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn start_dsh_web(app: AppHandle) -> Result<(), String> {
+    // State 不能移进 'static 闭包，闭包内用 AppHandle 取回；状态引用只在闭包内
+    // 有效，不跨 await（spawn_blocking 的闭包同步返回）
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return Err("应用状态未初始化，无法启动服务".to_string());
+        };
+        start_dsh_web_inner(handle.clone(), &state)
+    })
+    .await
+    .map_err(|e| format!("启动服务失败: {e}"))?
+}
+
+/// 启动链实现（阻塞式，仅供 start_dsh_web 在线程池中调用）
+fn start_dsh_web_inner(app: AppHandle, state: &AppState) -> Result<(), String> {
     if state.child_pid.lock().unwrap().is_some() {
         return Ok(()); // 已在运行
     }
@@ -1613,7 +1632,7 @@ pub fn start_dsh_web(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     // 仅收养裸地址可直接使用的实例（旧版宿主，接管后可停止/继续使用）；token 锁死的
     // 遗留实例不收养，落到下方启动链：ensure_port_free 杀掉后重新拉起一个新实例
     // （新实例的 token 会出现在启动日志里，被正常解析并广播）。
-    if adopt_orphan_service(&state) {
+    if adopt_orphan_service(state) {
         emit_log(
             &app,
             WEB_LOG_EVENT,

@@ -1,5 +1,4 @@
-import { App as AntApp } from "antd";
-import { CopyOutlined, ExportOutlined, SyncOutlined } from "@ant-design/icons";
+import { SyncOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router";
 import logo from "../assets/logo.svg";
 import WindowControls from "./WindowControls";
@@ -10,13 +9,14 @@ import { maskServiceUrl } from "../lib/urlMask";
 
 /**
  * 顶部标题栏：品牌区（版本号可点击进设置-关于本应用）+ Home 入口 +
- * 服务地址/刷新/复制/浏览器打开 + 窗口控制。
+ * 服务地址/刷新 + 窗口控制。
  * 停止/重启服务在底部导航条（BottomBar）；插件管理、通知管理、主题设置、
  * 日志管理、系统环境等已迁移到设置页（BottomBar 右侧入口进入）。
  * Home 入口：服务已启动跳服务内（预览页），未启动跳服务状态页（启动过渡页）。
+ * 地址栏只读展示（带 token 时打码）；「复制地址」「在浏览器中打开」两个按钮已移除，
+ * 需要打开服务地址时走系统托盘菜单的「浏览器中打开」。
  */
 export default function TitleBar() {
-  const { message } = AntApp.useApp();
   const navigate = useNavigate();
   const url = useAppStore((s) => s.url);
   const phase = useAppStore((s) => s.phase);
@@ -30,16 +30,6 @@ export default function TitleBar() {
     void refreshStatus();
   };
 
-  const copyUrl = async () => {
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      message.success("地址已复制到剪贴板");
-    } catch {
-      message.error("复制失败");
-    }
-  };
-
   return (
     <header className="titlebar">
       <div className="titlebar-left">
@@ -50,7 +40,9 @@ export default function TitleBar() {
             className="titlebar-version"
             title="关于本应用"
             aria-label="关于本应用"
-            onClick={() => navigate("/settings?section=about")}
+            onClick={() =>
+              api.openSettings("about").catch(() => navigate("/settings?section=about"))
+            }
           >
             {__APP_VERSION__}
         </button>
@@ -69,30 +61,13 @@ export default function TitleBar() {
         </button>
         <div className="url-pill">
           <span className={`dot${!url ? " off" : serviceAlive && phase === "running" ? "" : " down"}`} />
-          {/* 地址栏展示带 token 的完整地址时对 token 打码；复制/浏览器打开仍用真实地址 */}
+          {/* 地址栏只读展示：带 token 的完整地址对 token 打码，避免截屏/录屏泄露 */}
           <span className="url-value" title={url ? maskServiceUrl(url) : undefined}>
             {url ? maskServiceUrl(url) : "未检测到服务"}
           </span>
         </div>
         <button className="icon-btn" type="button" title="刷新（当前页面与环境状态）" aria-label="刷新" onClick={handleRefresh}>
           <SyncOutlined />
-        </button>
-        <button className="icon-btn" type="button" title="复制地址" aria-label="复制地址" onClick={() => void copyUrl()}>
-          <CopyOutlined />
-        </button>
-        <button
-          className="icon-btn"
-          type="button"
-          title="在浏览器中打开"
-          aria-label="在浏览器中打开"
-          onClick={() => {
-            if (url)
-              void api.openInBrowser(url).catch((e) =>
-                message.error(String(e instanceof Error ? e.message : e)),
-              );
-          }}
-        >
-          <ExportOutlined />
         </button>
       </div>
 

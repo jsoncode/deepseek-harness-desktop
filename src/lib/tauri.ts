@@ -126,8 +126,6 @@ export const EVENTS = {
   voiceInstallLog: "dsh://voice-install-log",
   /** 长文本分段合成的逐段进度（Rust tts.rs：第 current/total 段完成） */
   ttsSynthProgress: "dsh://tts-synth-progress",
-  /** 托盘「设置/分区」菜单点击（窗口已由 Rust 恢复）：path 为目标 hash 路由 */
-  trayNavigate: "dsh://tray-navigate",
 } as const;
 
 /** 系统通知点击（toast 激活）负载：与 Rust `notify::ActivatePayload` 同形（serde camelCase） */
@@ -273,6 +271,11 @@ export const api = {
   startDshWeb: () => requireTauri(() => invoke<void>("start_dsh_web")),
   stopDshWeb: () => requireTauri(() => invoke<void>("stop_dsh_web")),
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
+  /** 打开设置独立窗口（已开则聚焦并切到目标分区）：主窗口所有设置入口统一走此命令。
+   *  section 省略时仅聚焦（不重置用户所在分区）；
+   *  失败时由调用方回退主窗口内 /settings 深链（壳层兼容渲染） */
+  openSettings: (section?: string) =>
+    requireTauri(() => invoke<void>("open_settings", { section: section ?? null })),
   removePlugin: (name: string) => requireTauri(() => invoke<void>("remove_plugin", { name })),
   runPluginOp: (op: string, name: string) =>
     requireTauri(() => invoke<void>("run_plugin_op", { op, name })),

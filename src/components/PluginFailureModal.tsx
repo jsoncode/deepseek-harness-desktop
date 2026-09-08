@@ -31,10 +31,14 @@ export default function PluginFailureModal() {
     const err = pluginLoadError;
     if (!err || shownFor.current === err.name) return;
     shownFor.current = err.name;
-    // 预览页的原生子 webview 会盖住 antd 弹框：先切到设置-日志管理再弹
-    //（shownFor 防重复弹；服务仍在运行，取消后可从标题栏 Home 回预览页）
+    // 预览页的原生子 webview 会盖住 antd 弹框：开设置窗口的日志分区给用户看
+    // 上下文，主窗口先切到 DOM 页面再弹（shownFor 防重复弹；服务仍在运行，
+    // 取消后可从标题栏 Home 回预览页）
     if (location.pathname === "/preview") {
-      navigate("/settings?section=logs", { replace: true });
+      void api
+        .openSettings("logs")
+        .catch(() => navigate("/settings?section=logs", { replace: true }));
+      navigate("/loading", { replace: true });
     }
     modal.confirm({
       title: "插件加载失败",
