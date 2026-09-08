@@ -75,6 +75,9 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
 7. **域名来源**：`$DSH_HOME/settings.yaml` 的 `llm-pi-ai.providers.<route>.baseURL`
    与 `llm-deepseek.baseURL`（缺省 `https://api.deepseek.com`）+ 代理实测见过的域名 +
    前端内置的 pi-ai 提供方目录（`src/lib/modelProviders.ts`）。
+8. **添加方式**：下拉选提供方**选中即添加**（不依赖「添加」按钮）；自定义域名走右侧
+   输入框 + 「添加」/ 回车。下拉刻意不控制 `searchValue`——受控搜索框会在选中后被
+   antd 清空（选完即 `onSearch('')`），导致域名丢失、按钮报「请填写域名」。
 
 ## 实现
 
@@ -86,7 +89,7 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
 | `src-tauri/src/proxy_config.rs` | 保存「安装代理」后就地热更新运行中的路由代理上游（不必重启） |
 | `src/lib/modelProviders.ts` | pi-ai 提供方端点目录（候选行） |
 | `src/lib/tauri.ts` | `ModelProxyRule` / `ModelProxyStatus` / `DiscoveredHost` 类型与 API，`restartRequest` 事件 |
-| `src/components/settings/ProxySettings.tsx` | 「模型代理（按提供方）」卡片：规则表（开关 / 删除 / 最近请求）、添加提供方、状态与上游提示、**需重启时的弹框提醒**、最近请求日志 |
+| `src/components/settings/ProxySettings.tsx` | 「模型代理（按提供方）」卡片：规则表（开关 / 删除 / 最近请求）、添加提供方（下拉**选中即添加**，自定义域名走输入框 + 「添加」）、状态与上游提示、**需重启时的弹框提醒**、最近请求日志 |
 | `src/components/PluginManagerPanel.tsx` | 插件安装 / 更新 / 卸载成功后弹框提示「需要重启服务才能生效」（「立即重启」/「稍后」），失败仍走 message |
 | `src/components/ServiceRestartHandler.tsx` | 主窗口侧的跨窗口重启执行者：收到 `dsh://restart-request` 后走与底部导航条相同的 stop → 预置日志标题 → startFlow 流程 |
 

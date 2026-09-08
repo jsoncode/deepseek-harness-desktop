@@ -456,25 +456,34 @@ export default function ProxySettings() {
             ]}
           />
 
+          {/*
+            选提供方：选中即添加，不依赖「添加」按钮。
+            这里刻意不控制 searchValue —— 受控搜索框会在选中后把输入清空
+            （antd 选完即 onSearch('')），导致域名丢失、按钮报「请填写域名」。
+          */}
           <div className="settings-row" style={{ marginTop: 12, gap: 8 }}>
             <Select
-              style={{ width: 340 }}
+              style={{ width: 320 }}
               showSearch
-              placeholder="选择提供方，或直接输入域名"
+              optionFilterProp="label"
+              placeholder="选择提供方（选中即添加）"
               value={null}
-              searchValue={newHost}
-              onSearch={setNewHost}
-              onChange={(value: string) => setNewHost(value)}
+              onChange={(value: string) => {
+                if (value) void saveRules([...rules, { host: value, enabled: true }]);
+              }}
               options={addOptions}
-              filterOption={(input, option) =>
-                String(option?.value ?? "").includes(input.trim().toLowerCase()) ||
-                String(option?.label ?? "").toLowerCase().includes(input.trim().toLowerCase())
-              }
               notFoundContent={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  未收录？直接输入域名后点「添加」
+                  未收录？在右侧直接输入域名
                 </Text>
               }
+            />
+            <Input
+              style={{ width: 240 }}
+              placeholder="或输入域名，如 api.openai.com"
+              value={newHost}
+              onChange={(e) => setNewHost(e.target.value)}
+              onPressEnter={addRule}
             />
             <Button type="primary" icon={<PlusOutlined />} loading={busy} onClick={addRule}>
               添加
