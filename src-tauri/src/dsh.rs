@@ -1,12 +1,12 @@
 //! dsh 进程管理：工具解析、全局安装、dsh web 启动/停止、服务探测与日志流式输出。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -566,6 +566,18 @@ fn parse_pnpm_bin_output(text: &str) -> Option<PathBuf> {
 /// 只在探测出非空结果时写入；pnpm 路径变化时自动失效重探。
 static PNPM_GLOBAL_DIRS_CACHE: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
 
+/// 预热 pnpm 全局 bin 目录探测（后台线程调用，见 lib.rs setup）。
+///
+/// `detect_pnpm_global_dirs` 要跑一次 `pnpm bin -g`（Windows 上 .cmd 垫片冷启动
+/// 约 0.6s），结果进进程内缓存。启动服务时 apply_pnpm_env 会用到它——放在应用启动
+/// 时后台预热，这份开销就与前端加载并行，不再叠加在「点启动到服务起来」之间。
+pub fn prewarm_pnpm_global_dirs() {
+    let _ = detect_pnpm_global_dirs();
+    // 把刚探测到的全局目录补写进磁盘缓存（下次启动可直接播种，省掉 `pnpm bin -g`）
+    let snap = env_snapshot(false);
+    save_env_cache(&snap);
+}
+
 fn detect_pnpm_global_dirs() -> Vec<PathBuf> {
     let Some(pnpm) = resolve_pnpm() else {
         // 无 pnpm：仅返回推导候选（无子进程开销，供 resolve_dsh 兜底查找用）
@@ -747,7 +759,9 @@ fn apply_pnpm_env(app: &AppHandle, event: &'static str, cmd: &mut Command) {
     spawn_persist_user_path(app.clone(), event, strs);
 }
 
-/// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）
+/// 可执行描述：program + 前置 args（ps1 需经 powershell 包装）。
+/// Clone 供环境快照复制（快照是纯数据，克隆成本可忽略）。
+#[derive(Clone)]
 pub struct DshExec {
     pub program: String,
     pub args: Vec<String>,
@@ -807,6 +821,14 @@ fn resolve_dsh() -> Option<DshExec> {
 // ---------------------------------------------------------------------------
 // 服务探测（纯 std TCP 探活）
 // ---------------------------------------------------------------------------
+
+/// app_status / 乐观启动里「服务是否已在运行」的探活超时。
+///
+/// 本机端口无监听时，Windows 上既可能立刻 RST（毫秒级返回），也可能被安全软件
+/// 静默丢弃 SYN——后者会一直等到超时。健康轮询（probe_service 命令）另有 800ms
+/// 的宽松口径；这里的探测只用于判断「要不要启动」，150ms 足够：真正在监听的
+/// 服务，connect 由内核 backlog 立刻完成。
+const PROBE_TIMEOUT_MS: u64 = 150;
 
 pub fn probe_url(url: &str, timeout_ms: u64) -> bool {
     let stripped = url
@@ -963,6 +985,92 @@ $out | Sort-Object -Unique
     {
         Vec::new()
     }
+}
+
+/// 进程身份探测结果的短时缓存：探测要 PowerShell 全量枚举（约 0.6~1s），
+/// 一次启动里「乐观启动的端口占用判断」与「前端首个 app_status」都要用，
+/// 5 秒内共用一次结果，省掉第二次枚举。
+#[cfg(not(debug_assertions))]
+static PROCESS_URLS_CACHE: Mutex<Option<(std::time::Instant, Vec<String>)>> = Mutex::new(None);
+
+#[cfg(not(debug_assertions))]
+fn detect_dsh_process_urls_cached() -> Vec<String> {
+    const TTL: Duration = Duration::from_secs(5);
+    {
+        let guard = PROCESS_URLS_CACHE.lock().unwrap();
+        if let Some((at, urls)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return urls.clone();
+            }
+        }
+    }
+    let urls = detect_dsh_process_urls();
+    *PROCESS_URLS_CACHE.lock().unwrap() = Some((std::time::Instant::now(), urls.clone()));
+    urls
+}
+
+/// 乐观启动：应用打开后不等前端的环境检测，只要条件成立就先把 dsh web 拉起来。
+///
+/// 背景：dsh web 自身启动要 4~6 秒（插件加载 + 起 web 服务），是「点开应用到
+/// 能用」的主要成本。前端要先加载 bundle（~1s）、跑一次 app_status 才能决定启动，
+/// 这段时间完全可以并行——所以由 Rust 在预热线程里先判断、先启动，前端随后的
+/// app_status 会看到 child_running=true，直接进入「启动中」并等 URL 事件。
+///
+/// 判断条件（任一不成立就安静退出，交给前端原有链路，行为与从前一致）：
+/// - 端口上已有服务（本应用上次遗留的实例 / 用户自启的实例）→ 不抢占、不重启；
+/// - dsh 未安装或安装损坏（读不出版本）→ 交给前端安装链；
+/// - pnpm 主版本 ≥11 → 必须由前端先降级，不能抢跑；
+/// - 已有自家子进程在跑 → 无事可做。
+pub fn optimistic_start_service(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state.child_pid.lock().unwrap().is_some() {
+        return;
+    }
+    // 环境不满足就先不启动（先看快照：磁盘缓存命中时是毫秒级的）
+    let snap = env_snapshot(false);
+    if snap.dsh.is_none() || snap.dsh_version.is_none() {
+        return;
+    }
+    if pnpm_major_at_least_11(&snap.pnpm_version) {
+        return;
+    }
+    // 外部实例（含使用者以自定义端口启动的 dsh web）：本次不启动，交给前端的
+    // app_status 识别并收养；否则会出现「应用自己起一个 + 用户的还在跑」两个服务。
+    // 进程身份探测要 PowerShell 全量枚举（约 1s），与端口探测并行跑：固定端口
+    // 已占用时直接返回、不等它（它的结果会进 TTL 缓存，供随后的 app_status 复用）。
+    #[cfg(not(debug_assertions))]
+    let detect_handle = std::thread::spawn(detect_dsh_process_urls_cached);
+    if probe_parallel(&default_candidates(), PROBE_TIMEOUT_MS).is_some() {
+        return;
+    }
+    #[cfg(not(debug_assertions))]
+    let external = detect_handle.join().unwrap_or_default();
+    #[cfg(debug_assertions)]
+    let external: Vec<String> = Vec::new();
+    if !external.is_empty() && probe_parallel(&external, PROBE_TIMEOUT_MS).is_some() {
+        return;
+    }
+    // 拉起 dsh 之前先把注册表 PATH 合并好（PowerShell 冷启动约 0.4~1s）：
+    // ①保证 dsh 子进程拿到合并后的 PATH（它是个 .cmd 垫片，需要 node 在 PATH 上，
+    //   而 GUI 进程继承的 PATH 可能是登录时的旧值）；②这一步与 dsh 自身的启动都
+    //   吃 CPU，重叠会互相拖慢。实测「串行付掉 vs 并行重叠」总时长基本持平，
+    //   故取语义更稳的串行。
+    ensure_search_path();
+    if let Err(e) = start_dsh_web_inner(app.clone(), &state) {
+        // 乐观启动失败不弹错、不改状态：前端随后的启动链会给出正式错误提示
+        eprintln!("[optimistic] 预启动 dsh web 未成功: {e}");
+    }
+}
+
+/// pnpm 主版本是否 ≥11（dsh 与 pnpm 11 的全局虚拟仓库布局不兼容）
+fn pnpm_major_at_least_11(version: &Option<String>) -> bool {
+    let Some(v) = version else { return false };
+    v.split('.')
+        .next()
+        .and_then(|s| s.trim_start_matches('v').parse::<u64>().ok())
+        .is_some_and(|major| major >= 11)
 }
 
 /// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与本应用的默认端口，
@@ -1126,6 +1234,11 @@ fn extract_urls(line: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
+    // 服务日志在日志会话建立前到达时暂存（乐观启动会先于前端订阅事件拉起 dsh web）：
+    // 会话建立后补写进文件首部，避免日志记录缺了启动头部
+    if event == WEB_LOG_EVENT {
+        crate::logs::stash_service_log_if_unsessioned(app, stream, line);
+    }
     let _ = app.emit(
         event,
         LogLine {
@@ -1259,11 +1372,287 @@ pub async fn app_status(state: State<'_, AppState>) -> Result<StatusPayload, Str
     Ok(payload)
 }
 
-fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> StatusPayload {
-    // macOS 先合并登录 shell PATH（GUI 启动时 PATH 常缺 /opt/homebrew/bin 等目录）
+/// 环境工具快照：where 解析 + 版本读取 + 插件清单的结果。
+///
+/// 一次探测约 1.5s（Windows 上 pnpm/dsh 是 .cmd 垫片，要经 cmd.exe → node，且
+/// 三个工具并发时互相争抢），而这三个值在一次会话里几乎不变。应用启动时后台
+/// 预热一次，前端首个 app_status 直接命中——这份开销就与前端的 bundle 加载并行，
+/// 不再串行压在「点开应用 → 服务开始启动」之间。
+///
+/// 服务探测（端口/进程）不进快照：它必须反映调用时刻的真实状态。
+#[derive(Clone)]
+struct EnvSnapshot {
+    dsh: Option<DshExec>,
+    dsh_version: Option<String>,
+    pnpm_path: Option<PathBuf>,
+    pnpm_version: Option<String>,
+    node_path: Option<PathBuf>,
+    node_version: Option<String>,
+    profile_ready: bool,
+    plugins: Vec<String>,
+    taken_at: std::time::Instant,
+    /// true = 来自磁盘缓存（版本号是上次启动读到的，需要后台校正）
+    from_cache: bool,
+}
+
+static ENV_SNAPSHOT: Mutex<Option<EnvSnapshot>> = Mutex::new(None);
+
+/// 快照有效期：只用于吸收「同一轮启动里的重复探测」，不追求长期缓存——
+/// 用户手动装完工具后 8 秒内再点刷新仍可能看到旧值，超过则自然重探。
+const ENV_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(8);
+
+// ---------------------------------------------------------------------------
+// 跨启动的环境缓存（env-cache.json）
+// ---------------------------------------------------------------------------
+
+/// 缓存结构版本：结构变更时递增，旧文件直接忽略
+const ENV_CACHE_SCHEMA: u32 = 1;
+/// 缓存文件最长有效期：超过则忽略（工具可能被装到别处/卸载，靠路径校验兜底）
+const ENV_CACHE_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
+
+/// 单个工具的缓存项：可执行路径 + 上次读到的版本号
+#[derive(Serialize, Deserialize, Clone)]
+struct CachedTool {
+    path: String,
+    version: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct EnvCacheFile {
+    schema: u32,
+    dsh: Option<CachedTool>,
+    pnpm: Option<CachedTool>,
+    node: Option<CachedTool>,
+    pnpm_global_dirs: Vec<String>,
+    written_at: i64,
+}
+
+/// 应用数据目录（setup 时写入）；未设置时缓存功能整体退化为「每次真读」
+static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn init_env_cache_dir(dir: PathBuf) {
+    let _ = CACHE_DIR.set(dir);
+}
+
+fn env_cache_file() -> Option<PathBuf> {
+    CACHE_DIR.get().map(|d| d.join("env-cache.json"))
+}
+
+fn read_env_cache() -> Option<EnvCacheFile> {
+    let path = env_cache_file()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let cache: EnvCacheFile = serde_json::from_str(&text).ok()?;
+    if cache.schema != ENV_CACHE_SCHEMA {
+        return None;
+    }
+    // 超期（工具可能被卸载或换位置）：忽略，走真读
+    let age = now_unix().saturating_sub(cache.written_at);
+    if age > ENV_CACHE_MAX_AGE_SECS {
+        return None;
+    }
+    Some(cache)
+}
+
+fn write_env_cache(cache: &EnvCacheFile) {
+    let Some(path) = env_cache_file() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string(cache) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn drop_env_cache_file() {
+    if let Some(path) = env_cache_file() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 缓存项校验：路径仍存在，且文件名仍是该工具自己的名字。
+///
+/// 名字校验是刻意的：缓存文件在用户可写的应用数据目录里，不能让它成为
+/// 「让应用执行任意可执行文件」的入口——只有 dsh*/pnpm*/node* 这类文件名才认。
+fn cached_tool_ok(t: &CachedTool, expected_prefix: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(&t.path);
+    if !p.exists() {
+        return None;
+    }
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !name.starts_with(expected_prefix) {
+        return None;
+    }
+    Some(p)
+}
+
+fn to_cached_tool(program: &str, version: Option<&String>) -> Option<CachedTool> {
+    version.map(|v| CachedTool {
+        path: program.to_string(),
+        version: v.clone(),
+    })
+}
+
+/// 用磁盘缓存直接拼一个快照（不拉起任何子进程）。任一路径校验失败则返回 None，
+/// 由调用方退回真读。
+fn snapshot_from_cache(cache: &EnvCacheFile) -> Option<EnvSnapshot> {
+    let dsh_path = cached_tool_ok(cache.dsh.as_ref()?, "dsh")?;
+    let pnpm_path = cached_tool_ok(cache.pnpm.as_ref()?, "pnpm")?;
+    let node_path = cached_tool_ok(cache.node.as_ref()?, "node")?;
+    let dsh = cache.dsh.clone()?;
+    let pnpm = cache.pnpm.clone()?;
+    let node = cache.node.clone()?;
+    // .ps1 垫片要靠 powershell 前置参数执行，缓存里只存了路径 → 退回真读
+    if dsh_path.to_string_lossy().to_lowercase().ends_with(".ps1") {
+        return None;
+    }
+    // pnpm 全局目录：缓存里有就顺带播种进程内缓存，省掉启动服务时的 `pnpm bin -g`
+    if !cache.pnpm_global_dirs.is_empty() {
+        let dirs: Vec<PathBuf> = cache
+            .pnpm_global_dirs
+            .iter()
+            .map(PathBuf::from)
+            .filter(|d| d.exists())
+            .collect();
+        if !dirs.is_empty() {
+            *PNPM_GLOBAL_DIRS_CACHE.lock().unwrap() = Some((pnpm_path.clone(), dirs));
+        }
+    }
+    let (profile_ready, plugins) = read_profile_plugins();
+    Some(EnvSnapshot {
+        dsh: Some(DshExec {
+            program: dsh.path,
+            args: Vec::new(),
+            display: dsh_path.to_string_lossy().into_owned(),
+        }),
+        dsh_version: Some(dsh.version),
+        pnpm_path: Some(pnpm_path),
+        pnpm_version: Some(pnpm.version),
+        node_path: Some(node_path),
+        node_version: Some(node.version),
+        profile_ready,
+        plugins,
+        taken_at: std::time::Instant::now(),
+        from_cache: true,
+    })
+}
+
+/// 把快照写回磁盘缓存（供下次启动免子进程读取版本）。
+/// 某项解析不到时该项留空——`snapshot_from_cache` 要求三项齐全才会采用，
+/// 因此缺项的缓存只会被忽略并触发真读，不会造成误判。
+fn save_env_cache(snap: &EnvSnapshot) {
+    let dirs: Vec<String> = PNPM_GLOBAL_DIRS_CACHE
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|(p, _)| Some(p.clone()) == snap.pnpm_path)
+        .map(|(_, d)| d.iter().map(|x| x.to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let cache = EnvCacheFile {
+        schema: ENV_CACHE_SCHEMA,
+        dsh: snap
+            .dsh
+            .as_ref()
+            .and_then(|d| to_cached_tool(&d.program, snap.dsh_version.as_ref())),
+        pnpm: snap
+            .pnpm_path
+            .as_ref()
+            .and_then(|p| to_cached_tool(&p.to_string_lossy(), snap.pnpm_version.as_ref())),
+        node: snap
+            .node_path
+            .as_ref()
+            .and_then(|p| to_cached_tool(&p.to_string_lossy(), snap.node_version.as_ref())),
+        pnpm_global_dirs: dirs,
+        written_at: now_unix(),
+    };
+    write_env_cache(&cache);
+}
+
+/// 后台预热第一步（lib.rs setup 调用，在构建窗口之前发起）：
+/// 用磁盘缓存装出一个快照（零子进程，毫秒级），前端首个 app_status 与乐观启动
+/// 立刻可用。缓存里的版本号是上次启动读到的，够用（只用于「是否已安装/是否
+/// pnpm 11/是否低于 node 最低版本」这类门禁判断）。
+///
+/// 返回 true 表示本次是从磁盘缓存装出来的 → 调用方应接着调用
+/// `refresh_env_snapshot_background()` 做一次真读校正。
+pub fn prewarm_env_snapshot() -> bool {
+    env_snapshot(false).from_cache
+}
+
+/// 后台预热第二步：真读一次（注册表 PATH 合并 + where + 三个版本子进程），
+/// 校正版本/路径漂移并回写磁盘缓存，供本次会话后续刷新与下次启动使用。
+///
+/// 刻意**不持 ENV_SNAPSHOT 锁**（见 refresh_env_snapshot_background）：读者
+/// （app_status / check_tool）随时能拿到当前快照，不被这 2s 的校正阻塞。
+pub fn refresh_env_snapshot_background() {
+    ensure_search_path();
+    let snap = compute_env_snapshot();
+    *ENV_SNAPSHOT.lock().unwrap() = Some(snap.clone());
+    save_env_cache(&snap);
+}
+
+/// 环境发生变化的命令（安装 node/pnpm/dsh、刷新 PATH、增删插件）调用：
+/// 丢弃快照，下一次探测重新读真实值。
+fn invalidate_env_snapshot() {
+    *ENV_SNAPSHOT.lock().unwrap() = None;
+    // 磁盘缓存同样失效：否则下一次探测又会用旧版本号把内存快照装回来
+    drop_env_cache_file();
+}
+
+/// 取环境快照。
+///
+/// 快路径（`force=false`，即 app_status）：内存快照 TTL 内直接返回；否则先试磁盘
+/// 缓存（零子进程）。两条都不可用才真读，真读期间持锁做单飞——等锁的并发调用若
+/// 发现已有比它更晚算出的结果就直接复用，不会把 where/版本子进程拉三遍。
+///
+/// `force=true`（check_tool 这类「必须看真实状态」的场景）跳过缓存，但仍受单飞保护。
+fn env_snapshot(force: bool) -> EnvSnapshot {
+    let started = std::time::Instant::now();
+    if !force {
+        {
+            let guard = ENV_SNAPSHOT.lock().unwrap();
+            if let Some(s) = guard.as_ref() {
+                if s.taken_at.elapsed() < ENV_SNAPSHOT_TTL {
+                    return s.clone();
+                }
+            }
+        }
+        // 内存快照不可用：先看磁盘缓存（零子进程）——这是「打开应用秒出状态」的关键，
+        // 校验失败（路径没了/文件名不对/超期）自然落到下面的真读
+        if let Some(cache) = read_env_cache() {
+            if let Some(snap) = snapshot_from_cache(&cache) {
+                *ENV_SNAPSHOT.lock().unwrap() = Some(snap.clone());
+                return snap;
+            }
+        }
+    }
+    let mut guard = ENV_SNAPSHOT.lock().unwrap();
+    if let Some(s) = guard.as_ref() {
+        if s.taken_at >= started || (!force && s.taken_at.elapsed() < ENV_SNAPSHOT_TTL) {
+            return s.clone();
+        }
+    }
+    let snap = compute_env_snapshot();
+    *guard = Some(snap.clone());
+    save_env_cache(&snap);
+    snap
+}
+
+fn compute_env_snapshot() -> EnvSnapshot {
+    // 先合并注册表/登录 shell 的 PATH（GUI 进程继承的 PATH 可能是登录时的旧值，
+    // 刚装好的工具会解析不到）——所有真读都以合并后的 PATH 为准
     ensure_search_path();
     // 工具解析与版本读取并行执行：每个子进程调用都带超时（见 run_with_timeout），
-    // 并行后 app_status 最坏耗时约等于最慢单次调用，而不是三者之和。
+    // 并行后最坏耗时约等于最慢单次调用，而不是三者之和。
     let (dsh, pnpm, node) = std::thread::scope(|s| {
         let hd = s.spawn(resolve_dsh);
         let hp = s.spawn(resolve_pnpm);
@@ -1284,12 +1673,43 @@ fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> Sta
             hn.join().ok().flatten(),
         )
     });
-    let dsh_installed = dsh.is_some();
-    let dsh_path = dsh.map(|d| d.display);
-    let pnpm_path = pnpm.map(|p| p.to_string_lossy().into_owned());
-    let node_path = node.map(|p| p.to_string_lossy().into_owned());
-
     let (profile_ready, plugins) = read_profile_plugins();
+    EnvSnapshot {
+        dsh,
+        dsh_version,
+        pnpm_path: pnpm,
+        pnpm_version,
+        node_path: node,
+        node_version,
+        profile_ready,
+        plugins,
+        taken_at: std::time::Instant::now(),
+        from_cache: false,
+    }
+}
+
+fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> StatusPayload {
+    // macOS 先合并登录 shell PATH（GUI 启动时 PATH 常缺 /opt/homebrew/bin 等目录）
+    ensure_search_path();
+    // 进程身份探测（release 才有：PowerShell + Get-CimInstance 全量枚举，约 0.6~3s）
+    // 与下面的工具解析/版本读取并行跑：固定端口命中时它的结果直接丢弃（线程自然结束，
+    // 不 join 不阻塞），只有端口未命中（本次要自行拉起服务）才等它——那时它多半已跑完。
+    // 传入的 detected_url 说明已知一个可用地址，端口探测必然命中，连启动都省掉。
+    #[cfg(not(debug_assertions))]
+    let detect_handle = if detected_url.is_none() {
+        Some(std::thread::spawn(detect_dsh_process_urls_cached))
+    } else {
+        None
+    };
+    // 工具解析/版本读取/插件清单走快照：启动预热过则此处几乎零成本
+    let snap = env_snapshot(false);
+    let dsh_installed = snap.dsh.is_some();
+    let dsh_path = snap.dsh.map(|d| d.display);
+    let pnpm_path = snap.pnpm_path.map(|p| p.to_string_lossy().into_owned());
+    let node_path = snap.node_path.map(|p| p.to_string_lossy().into_owned());
+    let (dsh_version, pnpm_version, node_version) =
+        (snap.dsh_version, snap.pnpm_version, snap.node_version);
+    let (profile_ready, plugins) = (snap.profile_ready, snap.plugins);
 
     // child_running / detected_url 已由 async 包装层快照传入
     let mut candidates: Vec<String> = Vec::new();
@@ -1302,16 +1722,19 @@ fn app_status_blocking(child_running: bool, detected_url: Option<String>) -> Sta
     // dev 下不重赋值 → 不可变绑定，避免 unused_mut 警告；
     // release 下可能按进程身份复探并重赋值 → 可变绑定
     #[cfg(debug_assertions)]
-    let url = probe_parallel(&candidates, 400);
+    let url = probe_parallel(&candidates, PROBE_TIMEOUT_MS);
     #[cfg(not(debug_assertions))]
-    let mut url = probe_parallel(&candidates, 400);
+    let mut url = probe_parallel(&candidates, PROBE_TIMEOUT_MS);
     // 仅 release 在固定端口未命中时按进程身份探测（使用者以自定义端口启动的实例）；
     // dev 固定 6088，不做动态识别，避免与用户自启的 dsh 进程/正式版实例冲突
     #[cfg(not(debug_assertions))]
     if url.is_none() {
-        let extra = detect_dsh_process_urls();
+        // 等上面并行启动的进程身份探测（多数情况下已跑完，等待成本接近零）
+        let extra = detect_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
         if !extra.is_empty() {
-            url = probe_parallel(&extra, 400);
+            url = probe_parallel(&extra, PROBE_TIMEOUT_MS);
         }
     }
     // 端口可达但需要 token（裸地址恒 401）的实例不算「可运行」：token 只出现在
@@ -1352,32 +1775,26 @@ pub struct ToolCheck {
 
 /// 单项环境检测：只探测指定工具（node / pnpm / dsh）的路径与版本。
 ///
-/// 与 app_status 拆开的原因：app_status 一次性返回全部结果，启动页必须等所有
-/// 检测（含服务探测/插件读取）结束才能渲染结果；本命令供前端并发逐项调用，
-/// 每项完成后独立返回，启动页对应检查行立即从「检测中」点亮为结果，
-/// 减少整页等待时间。与 app_status 同为 async + spawn_blocking：
-/// 子进程解析/版本读取可能秒级阻塞主线程。
+/// 供前端并发逐项调用，每项完成后独立返回（设置页/关于页的环境区块按行点亮）。
+/// 与 app_status 同为 async + spawn_blocking：子进程解析/版本读取可能秒级阻塞主线程。
+/// 走 env_snapshot(force=true) 强制重探：本命令的调用点都是「安装完成后复检」这类
+/// 必须看到真实状态的场景，绝不能命中可能仍反映安装前状态的缓存。
 #[tauri::command]
 pub async fn check_tool(tool: String) -> Result<ToolCheck, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // macOS 先合并登录 shell PATH（与 app_status 行为一致）
         ensure_search_path();
+        let snap = env_snapshot(true);
         let (path, version): (Option<String>, Option<String>) = match tool.as_str() {
-            "node" => {
-                let p = resolve_node();
-                let version = p.as_ref().and_then(read_tool_version);
-                (p.map(|x| x.to_string_lossy().into_owned()), version)
-            }
-            "pnpm" => {
-                let p = resolve_pnpm();
-                let version = p.as_ref().and_then(read_tool_version);
-                (p.map(|x| x.to_string_lossy().into_owned()), version)
-            }
-            "dsh" => {
-                let d = resolve_dsh();
-                let version = d.as_ref().and_then(read_dsh_version);
-                (d.map(|x| x.display.clone()), version)
-            }
+            "node" => (
+                snap.node_path.map(|p| p.to_string_lossy().into_owned()),
+                snap.node_version,
+            ),
+            "pnpm" => (
+                snap.pnpm_path.map(|p| p.to_string_lossy().into_owned()),
+                snap.pnpm_version,
+            ),
+            "dsh" => (snap.dsh.map(|d| d.display), snap.dsh_version),
             _ => return Err(format!("不支持的检测项: {tool}")),
         };
         Ok(ToolCheck { path, version })
@@ -1502,6 +1919,8 @@ fn install_tool_node(app: AppHandle) -> Result<(), String> {
 }
 
 fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
+    // 安装会改变 pnpm 的解析结果/版本：先让环境快照失效
+    invalidate_env_snapshot();
     let npm =
         resolve_npm().ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
     log_npm_mirror(&app, ENV_INSTALL_LOG_EVENT);
@@ -1555,6 +1974,8 @@ fn refresh_windows_path() -> Result<(), String> {
 }
 
 fn refresh_search_path_blocking() -> Result<(), String> {
+    // PATH 变化意味着工具解析结果可能变化：让环境快照失效
+    invalidate_env_snapshot();
     ensure_search_path();
     #[cfg(windows)]
     refresh_windows_path()?;
@@ -1572,6 +1993,8 @@ pub async fn install_dsh(app: AppHandle) -> Result<(), String> {
 }
 
 fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
+    // 安装会改变 dsh 的解析结果/版本：先让环境快照失效
+    invalidate_env_snapshot();
     let pnpm =
         resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
     log_npm_mirror(&app, INSTALL_LOG_EVENT);
@@ -1667,10 +2090,16 @@ fn start_dsh_web_inner(app: AppHandle, state: &AppState) -> Result<(), String> {
             ),
         }
     }
-    let dsh = resolve_dsh().ok_or("未找到 dsh，请先执行全局安装 @deepseek-ai/dsh")?;
+    // 工具快照里已有 dsh 的解析结果与版本（启动预热/前端 app_status 刚用过），
+    // 这里直接取用，省掉又一次 where + 版本子进程（约 0.6s）；安装过 dsh 时快照
+    // 会被 install_dsh 失效，因此不会用到过期路径。
+    let snap = env_snapshot(false);
+    let dsh = snap
+        .dsh
+        .ok_or("未找到 dsh，请先执行全局安装 @deepseek-ai/dsh")?;
     // 启动前完整性校验：命令入口存在但读不出版本 = 安装已损坏（全局目录被清理、
     // 路径失效、shim 悬空等）。直接返回可操作的错误而非用崩溃堆栈糊弄用户。
-    if read_dsh_version(&dsh).is_none() {
+    if snap.dsh_version.is_none() {
         emit_log(
             &app,
             WEB_LOG_EVENT,

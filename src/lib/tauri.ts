@@ -362,9 +362,12 @@ export const api = {
   /** 保存安装临时代理配置：仅对后续的安装类子进程生效 */
   setProxyConfig: (config: ProxyConfig) =>
     requireTauri(() => invoke<void>("set_proxy_config", { config })),
-  /** 开始新日志会话（finalize 旧会话），返回会话 id */
+  /** 开始新日志会话（finalize 旧会话），返回会话 id 与会话建立前暂存的服务日志
+   *  （乐观启动时 Rust 会先于前端订阅事件拉起服务，那些行由后端补写文件并回传） */
   logStartSession: (title: string) =>
-    requireTauri(() => invoke<string>("log_start_session", { title })),
+    requireTauri(() =>
+      invoke<{ id: string; pending?: SessionLogEntry[] }>("log_start_session", { title }),
+    ),
   /** 追加一条日志到当前活动会话（无活动会话时静默忽略） */
   logAppend: (entry: SessionLogEntry) =>
     requireTauri(() => invoke<void>("log_append", { entry })),

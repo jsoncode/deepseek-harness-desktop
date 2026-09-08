@@ -46,6 +46,12 @@ export default function App() {
     initTheme();
   }, [initTheme]);
 
+  // 移除 index.html 里的内联启动画面：effect 在 React 提交后执行，此时真实界面已
+  // 挂到 DOM，拆掉覆盖层不会闪出空白帧（bundle 加载期间它挡着白屏）
+  useEffect(() => {
+    document.getElementById("boot")?.remove();
+  }, []);
+
   // 订阅 Rust 侧投递过的推送消息（供前端通道消费，目前是语音留桩）；幂等，整个 App 生命周期只挂一次
   useEffect(() => {
     startNotifyListener();

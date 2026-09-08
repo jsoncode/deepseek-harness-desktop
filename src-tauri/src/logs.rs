@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
@@ -17,6 +18,48 @@ use crate::dsh::AppState;
 /// 当前活动日志会话（内存态；文件路径由 id 推导）
 pub struct ActiveLog {
     pub id: String,
+}
+
+/// log_start_session 的返回值：会话 id + 会话建立前暂存的服务日志
+#[derive(Serialize, Clone)]
+pub struct StartSessionResult {
+    pub id: String,
+    pub pending: Vec<LogEntry>,
+}
+
+/// 服务会话建立之前到达的服务日志。
+///
+/// 乐观启动下 Rust 可能在（前端订阅事件、创建会话之前）就已拉起 dsh web，
+/// 早期行（命令回显、插件加载等）若只发事件就会丢失——会话文件里就少了启动
+/// 头部。这里暂存，`log_start_session` 建立会话时补写到文件首部并回传前端。
+/// 上限 500 条：只可能发生在启动的头几秒，超限说明状态异常，丢弃最旧的。
+static PENDING_SERVICE_LOGS: Mutex<Vec<LogEntry>> = Mutex::new(Vec::new());
+
+/// 服务日志在会话建立前到达时暂存（会话已建立则什么都不做——那些行由前端
+/// 镜像写入，重复写会得到两份）。
+pub fn stash_service_log_if_unsessioned(app: &AppHandle, stream: &str, text: &str) {
+    let has_active = app
+        .try_state::<AppState>()
+        .map(|s| s.active_log.lock().unwrap().is_some())
+        .unwrap_or(false);
+    if has_active {
+        return;
+    }
+    let mut buf = PENDING_SERVICE_LOGS.lock().unwrap();
+    if buf.len() >= 500 {
+        buf.remove(0);
+    }
+    buf.push(LogEntry {
+        time: hhmm_now(),
+        stream: stream.to_string(),
+        text: text.to_string(),
+    });
+}
+
+/// 本地时间 HH:MM:SS（与前端 `now()` 的 toLocaleTimeString 口径一致，
+/// 暂存的服务日志由 Rust 侧写入文件，时间不能是 UTC）
+fn hhmm_now() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 /// 单条日志（与前端 useAppStore 的 LogEntry 同构）
@@ -176,16 +219,27 @@ fn append_to_session(app: &AppHandle, id: &str, entry: &LogEntry) -> Result<(), 
     Ok(())
 }
 
-/// 开始新服务日志会话：先 finalize 旧会话，再创建新会话文件并返回会话 id
+/// 开始新服务日志会话：先 finalize 旧会话，再创建新会话文件并返回会话 id。
+///
+/// 返回值含 `pending`：会话建立之前就到达的服务日志（见
+/// `stash_service_log_if_unsessioned`，乐观启动时会命中）。这些行已补写进会话
+/// 文件首部，同时回传前端以便实时日志视图也完整显示（前端订阅事件前发出的行
+/// 不会作为事件到达）。
 #[tauri::command]
-pub fn log_start_session(app: AppHandle, title: String) -> Result<String, String> {
+pub fn log_start_session(app: AppHandle, title: String) -> Result<StartSessionResult, String> {
     finalize_active(&app);
     let dir = logs_dir(&app)?;
     let id = create_session(&dir, &title, "service")?;
     if let Some(state) = app.try_state::<AppState>() {
         *state.active_log.lock().unwrap() = Some(ActiveLog { id: id.clone() });
     }
-    Ok(id)
+    // 会话建立前暂存的服务日志（乐观启动：Rust 已拉起 dsh web，前端还没订阅事件）
+    // 补写到本会话文件首部，保证记录从命令回显开始完整
+    let pending: Vec<LogEntry> = std::mem::take(&mut *PENDING_SERVICE_LOGS.lock().unwrap());
+    for entry in &pending {
+        let _ = append_to_session(&app, &id, entry);
+    }
+    Ok(StartSessionResult { id, pending })
 }
 
 /// 开始插件操作日志会话（Rust 侧直接写入，前端无需调用）：

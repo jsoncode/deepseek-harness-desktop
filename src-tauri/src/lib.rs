@@ -86,6 +86,46 @@ pub fn run() {
             preview::preview_open_session,
         ])
         .setup(|app| {
+            // 启动预热：必须赶在【构建窗口之前】发起。窗口构建（WebView2 环境初始化）
+            // 本身要 ~0.8s，前端还要再花 ~1s 加载 bundle 才会调 app_status；把预热
+            // 线程提前到这里，等于白得一段并行窗口——实测这样前端首个 app_status
+            // 才真正命中快照（放在窗口构建之后发起时，预热还没算完，前端就得等）。
+            //
+            // 线程内串行做四件事（后一件都依赖前一件，且刻意不并发：三个 where/版本
+            // 子进程与 PowerShell/pnpm 同时跑会互相争抢，反而拖慢前端的首个探测）：
+            // ①注册表 PATH 刷新（PowerShell 冷启动约 0.4s）→ ②环境快照（where 解析 +
+            //   node/pnpm/dsh 版本读取；有磁盘缓存时毫秒级命中，无缓存约 1.5s）→
+            // ③乐观启动 dsh web（端口空闲且环境就绪时抢跑，见 dsh::optimistic_start_service）
+            //   → ④pnpm 全局 bin 目录（`pnpm bin -g` 约 0.6s，start_dsh_web 注入子进程
+            //   PATH 时要用；通常已由缓存播种）。
+            // 失败静默：与各步骤原有语义一致，探测不到就退回调用点自己再算一遍。
+            // 环境缓存的落盘目录（见 dsh::env_cache）：必须在预热线程之前设置，
+            // 否则预热只能退回每次真读（pnpm --version 单次可达 1.9s）
+            if let Ok(dir) = app.path().app_data_dir() {
+                dsh::init_env_cache_dir(dir);
+            }
+            let prewarm_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                // ①毫秒级：磁盘缓存装出环境快照（无缓存时这一步自己真读）
+                let needs_refresh = dsh::prewarm_env_snapshot();
+                // ②乐观启动：环境快照已就绪且端口空闲时立刻拉起 dsh web，
+                // 与前端加载 bundle / 环境检测并行（dsh web 自身要 4~6s 才就绪，
+                // 这是「点开应用到能用」的主要成本）。条件不满足则安静退出，
+                // 由前端原有启动链接管。
+                dsh::optimistic_start_service(&prewarm_handle);
+                // ③后台真读校正版本/路径漂移（不阻塞任何调用点）。
+                // 刻意延后 10 秒：这一步要跑 where + 三个版本子进程（1~3s，pnpm 的
+                // 垫片尤其重），与 dsh web 自身的启动（4~6s，同样吃 CPU）重叠时会
+                // 明显拖慢服务就绪（实测重叠时启动多花 1s 以上）。它的产物只用于
+                // 「下次启动的缓存」与本次会话的后续刷新，晚几秒没有任何影响。
+                if needs_refresh {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    dsh::refresh_env_snapshot_background();
+                }
+                // ④pnpm 全局 bin 目录（start_dsh_web 注入子进程 PATH 要用）
+                dsh::prewarm_pnpm_global_dirs();
+            });
+
             // 主窗口改为 setup 内手动构建（tauri.conf.json 中 create:false）：
             // 注册 on_new_window，把页面内 target=_blank / window.open 的外链请求
             // 转交系统默认浏览器打开（wry 默认会静默吞掉新窗口请求，外链点击无反应）。
@@ -97,12 +137,29 @@ pub fn run() {
                 .find(|w| w.label == "main")
                 .cloned()
                 .expect("tauri.conf.json must declare the main window");
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)?
+            let window = tauri::WebviewWindowBuilder::from_config(app.handle(), &window_cfg)?
+                .visible(false)
                 .on_new_window(|url, _features| {
                     let _ = dsh::open_url(url.as_str());
                     tauri::webview::NewWindowResponse::Deny
                 })
                 .build()?;
+
+            // 窗口原生底色：WebView2 首帧（bundle 解析 + React 首次渲染）之前显示的是
+            // 窗口背景色，默认纯白——深色用户观感就是「点开先白屏卡一下」。窗口以
+            // visible(false) 创建，这里按系统主题（theme() 创建后即可用）设成与应用
+            // 底色一致的深浅色，再 show()，配合 index.html 的内联启动画面，打开瞬间
+            // 就是品牌底色而非白板。底色设置失败只影响观感，不影响功能。
+            if let Ok(theme) = window.theme() {
+                let bg = match theme {
+                    tauri::Theme::Light => tauri::window::Color(246, 247, 251, 255), // #f6f7fb
+                    _ => tauri::window::Color(7, 9, 13, 255),                        // #07090d
+                };
+                let _ = window.set_background_color(Some(bg));
+            }
+            // 必须 show()：窗口是按 visible(false) 建的（先定底色再显示），
+            // 漏掉这一步应用就没有可见窗口。
+            window.show()?;
 
             // 内嵌服务的 Web 权限申请（麦克风/摄像头/剪贴板等）：wry 只自动放行
             // 剪贴板读取，其余走 WebView2 默认行为（静默拒绝），页面永远申请不到。
@@ -185,6 +242,7 @@ pub fn run() {
             // dsh web 进程树未被清理、仍占用服务端口，新实例若不接管会导致
             // "停止/重启"静默无效。后台线程执行（netstat 枚举约几十毫秒），
             // 即使此处未完成，start_dsh_web 内也会再做一次同样的收养。
+            // 启动预热已在上方（窗口构建之前）发起，见那段注释
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 if let Some(state) = handle.try_state::<AppState>() {

@@ -92,7 +92,15 @@ export default function Loading() {
       .init()
       .then(() => {
         const s = useAppStore.getState();
-        if (s.phase === "running" || s.phase === "starting" || s.phase === "installing") return;
+        if (s.phase === "running") return;
+        if (s.phase === "starting") {
+          // 后端已提前拉起服务（乐观启动：Rust 在预热线程里先启动了 dsh web），
+          // 此时不必再走启动链，但要补开日志会话——否则本次启动的日志没有归属，
+          // 日志管理里会缺一条记录
+          if (!s.logSessionId) void s.beginLogSession("启动服务");
+          return;
+        }
+        if (s.phase === "installing") return;
         startChain();
       });
   }, []);
@@ -103,7 +111,13 @@ export default function Loading() {
     if (starting) return;
     seenBusy.current = false;
     setStarting(true);
-    startChain();
+    // 先刷新一次环境状态再决定启动链：启动时的环境值可能来自上次启动写下的
+    // 磁盘缓存（如用户在应用关闭期间把 pnpm 升到 11），不刷新会一直走错分支、
+    // 反复失败。刷新失败保持现有值，行为与从前一致。
+    void useAppStore
+      .getState()
+      .refreshStatus()
+      .then(() => startChain());
     // phase 变化（installing/starting/running）后由上方联动接管，忙碌态随即失效
     setTimeout(() => setStarting(false), 1500);
   };

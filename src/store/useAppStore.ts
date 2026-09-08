@@ -614,8 +614,19 @@ export const useAppStore = create<AppStore>((set, get) => {
     beginLogSession: async (title) => {
       if (!tauri) return;
       try {
-        const id = await withTimeout(api.logStartSession(title), 8000, "创建日志会话");
-        set({ logSessionId: id });
+        const r = await withTimeout(api.logStartSession(title), 8000, "创建日志会话");
+        set({ logSessionId: r.id });
+        // 会话建立前到达的服务日志（乐观启动）：后端已写入会话文件，这里补进
+        // 内存日志流，让实时日志视图从命令回显开始完整
+        if (r.pending?.length) {
+          const pending: LogEntry[] = r.pending.map((l) => ({
+            id: ++logSeq,
+            time: l.time,
+            stream: l.stream as StreamKind,
+            text: l.text,
+          }));
+          set((s) => ({ logs: [...s.logs, ...pending] }));
+        }
       } catch {
         /* 会话创建失败不阻塞启动流程（日志仅保留在内存态） */
       }
@@ -654,18 +665,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         await settleStatus("idle", true);
         return;
       }
-      // 环境检测拆分为「逐项 + 收尾」两段【串行】执行：先并发跑 node/pnpm/dsh
-      // 三次 check_tool（每项完成即写回 store，检查行立即点亮），全部落定后再跑
-      // app_status 收尾（提供权威的服务/插件/phase 值并最终落定全部检查行）。
-      // 两段不能并发：check_tool 与 app_status 各自都要做全量探测（where 解析 +
-      // 版本读取），并发叠加时子进程互相争抢 CPU 导致版本读取超时，收尾会用
-      // null 覆盖单项已检出的版本，曾据此误判 node 未安装而触发 winget 重装。
-      // 用 allSettled：任一项失败（如旧后端无 check_tool 命令）不影响其余链路。
-      await Promise.allSettled([
-        runToolCheck("node"),
-        runToolCheck("pnpm"),
-        runToolCheck("dsh"),
-      ]);
+      // 主窗口启动检测只跑一次 app_status（内部已是并行解析 + 版本读取，一次返回
+      // node/pnpm/dsh 路径与版本 + 服务/插件状态）。
+      // 历史上有「先并发 3× check_tool 逐项点亮检查行，再 app_status 收尾」两段串行，
+      // 那是为已移除的启动检查页服务的；两段各自都要做全量探测（where 解析 + 版本
+      // 读取），串行叠加等于把检测耗时翻倍——这里去掉逐项段，检测耗时直接减半。
+      // check_tool 命令仍保留：设置页/关于页的刷新与安装链的复检还要用（见 refreshStatus、
+      // installEnvAndStart）。
       await settleStatus(get().phase, true);
     },
 
@@ -677,17 +683,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (statusRefreshInFlight) return;
       statusRefreshInFlight = true;
       try {
-        // 独立设置窗口：跳过逐项 check_tool（避免与主窗口并发全量探测互相
-        // 争抢 CPU 导致版本读取超时误报），只做 app_status 收尾
-        if (isMain) {
-          // 与 init 相同的逐项 + 收尾链路（两段串行，理由见 init 内注释）：
-          // 进入环境区块时检查行同样逐项刷新，不再等全部检测结束才一次性更新
-          await Promise.allSettled([
-            runToolCheck("node"),
-            runToolCheck("pnpm"),
-            runToolCheck("dsh"),
-          ]);
-        }
+        // 与 init 同理：单次 app_status 即可拿到全部权威值，不再前置逐项探测
         await settleStatus(cur, false);
       } finally {
         statusRefreshInFlight = false;
