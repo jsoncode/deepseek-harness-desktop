@@ -468,9 +468,10 @@ impl crate::notify::NotifyChannel for VoiceChannel {
 
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
         // 平台不支持（Linux 无 rodio/ALSA，见 Cargo.toml）：合成与播放都做不了，
-        // 直接给出可诊断的 skipped 事件而不是白跑一次 Python 推理
+        // 直接给出可诊断的 skipped 事件而不是白跑一次 Python 推理。
+        // 文案常量按平台 cfg 收窄（Windows/macOS 上不存在），故整段也按平台收窄。
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
+        if !voice_supported() {
             emit_voice(
                 app,
                 "skipped",
@@ -589,14 +590,12 @@ fn process_job(job: SpeakJob) {
     let SpeakJob { app, text, force } = job;
     // 平台不支持（Linux 无 rodio/ALSA，见 Cargo.toml）：不合成、不拉 worker，
     // 直接给出 skipped 事件——避免白跑一次 Python 推理后才发现播不出来。
-    // 用 cfg 而非 `if !voice_supported()`：后者在 Windows/macOS 上是常量假分支，
-    // 会被 clippy 判为无意义条件。
+    // 文案常量按平台 cfg 收窄（Windows/macOS 上不存在），故整段也按平台收窄。
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
+    if !voice_supported() {
         emit_voice(&app, "skipped", Some(&text), Some(VOICE_UNSUPPORTED_MSG));
         return;
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let cfg = app.state::<AppState>().voice.lock().unwrap().clone();
     // 排队期间用户关掉总开关：放弃播报（试听 force 除外），同样给出 skipped 事件
     if !cfg.enabled && !force {
