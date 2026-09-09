@@ -2490,8 +2490,13 @@ pub fn stop_dsh_web_sync(state: &AppState) {
 /// 设置窗口里的弹框（模型代理启用后、插件安装/更新/卸载后）只能发这个请求：
 /// 重启涉及主窗口的状态机（phase / 日志会话 / 跳转服务状态页），由主窗口的
 /// `ServiceRestartHandler` 统一执行，避免两个窗口各跑一套。
+///
+/// 先把主窗口带到前台：重启进度（切服务状态页 → 停止 → 重新拉起）全在主窗口里，
+/// 而请求来自设置窗口——不带到前台的话，用户点完「立即重启」在设置窗口里看不到
+/// 任何变化，观感就是「点了没反应」。
 #[tauri::command]
 pub fn request_service_restart(app: AppHandle) {
+    crate::show_main_window(&app);
     let _ = app.emit(RESTART_REQUEST_EVENT, ());
 }
 

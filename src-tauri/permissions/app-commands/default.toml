@@ -6,6 +6,8 @@
 # 因此新增 #[tauri::command] 后必须同步追加到下面的 commands.allow，
 # 清单须与 lib.rs generate_handler! 保持一致（不含 preview_bridge_report，
 # 该命令仅经 allow-bridge-report 授予远程 preview 子 webview）。
+# 这份清单由 scripts/check-acl.mjs 在构建前校验（pnpm build / tauri:build 都会跑）：
+# 漏登记会直接构建失败，而不是等到用户点按钮时静默无反应。
 
 [[permission]]
 identifier = "allow-app-commands"
@@ -19,6 +21,7 @@ commands.allow = [
   "refresh_search_path",
   "start_dsh_web",
   "stop_dsh_web",
+  "request_service_restart",
   "open_in_browser",
   "open_settings",
   "remove_plugin",
@@ -55,6 +58,10 @@ commands.allow = [
   "fix_credentials",
   "get_proxy_config",
   "set_proxy_config",
+  "get_model_proxy_status",
+  "set_model_proxy_config",
+  "clear_model_proxy_log",
+  "discover_model_proxy_hosts",
   "log_start_session",
   "log_append",
   "log_set_status",

@@ -308,7 +308,7 @@ fn quit_label() -> &'static str {
     }
 }
 
-/// 恢复主窗口到前台（托盘"打开"、左键单击、单实例回调共用）。
+/// 恢复主窗口到前台（托盘"打开"、左键单击、单实例回调、通知点击、重启请求共用）。
 ///
 /// 顺序必须是 show → unminimize → set_focus：窗口被 hide() 收起时若仍带最小化
 /// 状态，先 unminimize 在隐藏窗口上是空操作，随后 show() 会把它按最小化态显示出来
@@ -318,8 +318,13 @@ fn quit_label() -> &'static str {
 /// 前台进程"才能抢焦点，托盘点击的输入落在 explorer.exe 上，`SetForegroundWindow`
 /// 会被静默忽略——窗口其实已显示，却仍被别的窗口盖住，用户观感就是"点托盘没反应"。
 /// [`raise_to_front`] 用不依赖前台权限的 z 序手段兜底。
+///
+/// 用 `get_window` 而不是 `get_webview_window`：后者要求该窗口上的**所有** webview
+/// 标签都等于窗口标签（tauri `Window::is_webview_window`），而主窗口挂了 preview
+/// 子 webview（label "preview"），条件不成立 → 返回 None。早期版本这里就是 None，
+/// 于是整个恢复动作是静默空操作：托盘"打开"、通知点击都点不动最小化/后台的主窗口。
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -332,7 +337,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// 位于所有非 TOPMOST 窗口之上，取消置顶后停在同层最前），因此比单独调用
 /// `SetForegroundWindow` 可靠；最小化时先 `SW_RESTORE` 真正还原。
 #[cfg(windows)]
-fn raise_to_front(window: &tauri::WebviewWindow) {
+fn raise_to_front(window: &tauri::Window) {
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, IsIconic, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_NOTOPMOST,
         HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
@@ -353,7 +358,7 @@ fn raise_to_front(window: &tauri::WebviewWindow) {
 
 /// 非 Windows：`show` + `unminimize` + `set_focus` 已足够（无前台锁机制）。
 #[cfg(not(windows))]
-fn raise_to_front(_window: &tauri::WebviewWindow) {}
+fn raise_to_front(_window: &tauri::Window) {}
 
 /// 托盘菜单 id → 设置窗口分区（外层 None = 非设置类菜单；内层 None = 设置主分区，
 /// 不指定具体页签——仅聚焦，不重置用户当前所在分区）

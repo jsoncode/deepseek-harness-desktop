@@ -40,8 +40,12 @@
 pub fn register(app: &tauri::AppHandle) {
     use tauri::Manager;
 
-    let Some(win) = app.get_webview_window("main") else {
-        eprintln!("[permissions] 未找到主窗口，跳过权限处理器注册");
+    // 用 get_webview 而不是 get_webview_window：后者要求窗口上所有 webview 标签都
+    // 等于窗口标签（tauri `Window::is_webview_window`），主窗口挂了 preview 子
+    // webview（label "preview"）→ 条件不成立、返回 None，这里会静默跳过注册，
+    // 浏览器回退 iframe 的媒体权限申请就永远拿不到「允许/拒绝」弹窗。
+    let Some(win) = app.get_webview("main") else {
+        eprintln!("[permissions] 未找到主窗口 webview，跳过权限处理器注册");
         return;
     };
     // with_webview 把闭包派发到主线程执行；注册在页面导航前完成，不会漏申请

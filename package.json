@@ -6,7 +6,8 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node scripts/check-acl.mjs && tsc --noEmit && vite build",
+    "check:acl": "node scripts/check-acl.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "node scripts/dev-tauri.mjs",
