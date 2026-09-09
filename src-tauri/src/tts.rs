@@ -3693,6 +3693,8 @@ for line in sys.stdin:
 
     /// HF 缓存环境覆盖（纯函数）：HF 全家桶一律指向传入的 hf_home。
     /// 这是「系统找不到指定的路径 E:\」的根因修复——worker 不继承宿主 HF_HOME。
+    /// 期望值用 Path::join 拼，避免把 Windows 反斜杠写进断言（Linux CI 上
+    /// Path::join 产出的是正斜杠，写死反斜杠会让用例恒红）。
     #[test]
     fn worker子进程覆盖HF缓存环境变量() {
         let mut cmd = Command::new("python");
@@ -3704,23 +3706,12 @@ for line in sys.stdin:
                 .and_then(|(_, v)| v)
                 .map(|v| v.to_string_lossy().into_owned())
         };
+        let joined = |sub: &str| hf.join(sub).to_string_lossy().into_owned();
         assert_eq!(get("HF_HOME").as_deref(), Some("D:\\anywhere\\hf"));
-        assert_eq!(
-            get("HF_MODULES_CACHE").as_deref(),
-            Some("D:\\anywhere\\hf\\modules")
-        );
-        assert_eq!(
-            get("HF_HUB_CACHE").as_deref(),
-            Some("D:\\anywhere\\hf\\hub")
-        );
-        assert_eq!(
-            get("TRANSFORMERS_CACHE").as_deref(),
-            Some("D:\\anywhere\\hf\\hub")
-        );
-        assert_eq!(
-            get("HF_DATASETS_CACHE").as_deref(),
-            Some("D:\\anywhere\\hf\\datasets")
-        );
+        assert_eq!(get("HF_MODULES_CACHE"), Some(joined("modules")));
+        assert_eq!(get("HF_HUB_CACHE"), Some(joined("hub")));
+        assert_eq!(get("TRANSFORMERS_CACHE"), Some(joined("hub")));
+        assert_eq!(get("HF_DATASETS_CACHE"), Some(joined("datasets")));
     }
 
     /// 端到端回归：宿主环境把 HF_HOME 指到不存在的盘（实机 E:\ 案例）时，
