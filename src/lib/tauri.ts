@@ -412,6 +412,9 @@ export const api = {
     requireTauri(() => invoke<boolean>("tts_stop_voice_service")),
   /** 语音 worker 是否驻留运行（true = 模型已加载、占着内存） */
   ttsVoiceStatus: () => requireTauri(() => invoke<boolean>("tts_voice_status")),
+  /** 当前平台是否支持语音播报（合成 + 本机播放）：Linux 无 rodio/ALSA 依赖，
+   *  返回 false，前端据此隐藏语音播报入口 */
+  ttsSupported: () => requireTauri(() => invoke<boolean>("tts_supported")),
   /** 打开语音合成工具独立窗口（已开则聚焦并切到目标页）：长文本合成 + 导出 + 完整配置。
    *  section：省略/"synth" → 合成页；"history" → 生成历史页 */
   ttsOpenStudio: (section?: "synth" | "history") =>

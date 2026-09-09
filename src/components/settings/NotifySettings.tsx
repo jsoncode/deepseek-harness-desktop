@@ -1,5 +1,5 @@
 import { BellOutlined, ExperimentOutlined, SoundOutlined } from "@ant-design/icons";
-import { App as AntApp, Button, Segmented, Switch, Typography } from "antd";
+import { Alert, App as AntApp, Button, Segmented, Switch, Typography } from "antd";
 import { useNotifyStore, type NotifyStyle } from "../../store/useNotifyStore";
 import { api } from "../../lib/tauri";
 
@@ -20,6 +20,8 @@ export default function NotifySettings() {
   const setStyle = useNotifyStore((s) => s.setStyle);
   const voice = useNotifyStore((s) => s.voice);
   const setVoice = useNotifyStore((s) => s.setVoice);
+  // 平台能力（Rust tts_supported 探测）：Linux 无音频播放链路，整块入口屏蔽
+  const voiceSupported = useNotifyStore((s) => s.voiceSupported);
   const on = mode === "on";
 
   const commitVoice = (patch: Partial<typeof voice>) => setVoice(patch);
@@ -100,6 +102,22 @@ export default function NotifySettings() {
           </p>
         </div>
 
+        {/* 平台能力门控（Rust tts_supported）：Linux 没有音频播放链路，
+            整块入口换成说明而不是留一堆点了会失败的按钮 */}
+        {!voiceSupported ? (
+          <div className="settings-card">
+            <div className="settings-card-title">语音播报</div>
+            <Alert
+              type="info"
+              showIcon
+              message="当前平台不支持语音播报"
+              description={
+                "语音播报依赖本机音频输出（rodio → cpal → ALSA），仅 Windows / macOS " +
+                "安装包提供该链路，因此这里不展示配置入口；系统推送不受影响。"
+              }
+            />
+          </div>
+        ) : (
         <div className="settings-card">
           <div className="settings-card-title">语音播报</div>
           <p className="settings-desc">
@@ -236,6 +254,7 @@ export default function NotifySettings() {
             )}
           </div>
         </div>
+        )}
       </div>
     </>
   );

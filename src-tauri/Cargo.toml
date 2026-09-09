@@ -33,14 +33,23 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 # serde_with（tauri 依赖链）的传递依赖且带 clock 特性，提为直接依赖不新增编译单元。
 chrono = "0.4"
 
-# 语音播报（tts.rs）：WAV 解码 + 本机音频输出（不受 WebView2 后台节流影响）。
-# default-features = false 只留 wav（hound）：避免拉进 mp3/opus/vorbis 等
-# 用不上的解码器。
-rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # 语音合成工具（独立窗口）：hound 读/写 WAV（长文本分段合成后的拼接导出）
 hound = "3.5"
 # 语音合成工具的「另存为」系统对话框
 tauri-plugin-dialog = "2"
+
+# 语音播报（tts.rs）：WAV 解码 + 本机音频输出（不受 WebView2 后台节流影响）。
+# default-features = false 只留 wav（hound）：避免拉进 mp3/opus/vorbis 等
+# 用不上的解码器。
+#
+# 只在 Windows / macOS 编译：rodio 的输出后端是 cpal，Linux 上会链接 ALSA，
+# 即把 alsa-sys 拉进依赖图——它没有 vendored 版本，build.rs 必须找到系统
+# alsa.pc，否则整棵依赖树编译失败（CI 的 quality job 在 ubuntu-latest 上跑
+# cargo test 就是这么挂的）。本应用只发布 Windows / macOS 安装包，Linux 仅
+# 用作测试机，故直接在 Linux 上摘掉这条链路（play_wav 的 Linux 分支返回
+# 明确的「不支持」错误），而不是要求测试机装 libasound2-dev。
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+rodio = { version = "0.19", default-features = false, features = ["wav"] }
 
 # 系统推送（Windows）：两种 toast 实现并存，由 AppState::notify_style 切换
 # （见 notify.rs 的 ToastStyle；设置页「两种提示切换开关」后续接入）。

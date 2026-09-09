@@ -103,6 +103,10 @@ interface NotifyState {
   voice: VoiceConfig;
   /** 局部更新语音配置：合并、持久化并同步 Rust（校验失败只回显，不回滚本地） */
   setVoice: (patch: Partial<VoiceConfig>) => void;
+  /** 当前平台是否支持语音播报（Rust tts_supported 探测；Linux 为 false）。
+   *  非持久化——每次启动探测，默认 true 以免探测完成前入口闪烁 */
+  voiceSupported: boolean;
+  setVoiceSupported: (supported: boolean) => void;
 }
 
 export const useNotifyStore = create<NotifyState>((set, get) => {
@@ -112,9 +116,10 @@ export const useNotifyStore = create<NotifyState>((set, get) => {
   // 样式同理：本机存的值与 Rust 侧初值（clickable）不一致时需回写
   const initialStyle = loadStyle();
   syncStyle(initialStyle);
-  // 语音配置：Rust 侧默认全关，本地存的路径/开关必须一开始就灌回去
+  // 语音配置：Rust 侧默认全关，本地存的路径/开关必须一开始就灌回去。
+  // 回灌动作放在 initNotifySync（App 挂载时）里做——那里先探测平台能力，
+  // 不支持（Linux）时不会把 enabled=true 推给 Rust。
   const initialVoice = loadVoice();
-  syncVoice(initialVoice);
   return {
     mode: initial,
     toggle: () => {
@@ -140,6 +145,8 @@ export const useNotifyStore = create<NotifyState>((set, get) => {
     voice: initialVoice,
     setVoice: (patch) => {
       const next = { ...get().voice, ...patch };
+      // 平台不支持时不允许置为启用（Rust 侧同样拦截，见 tts.rs process_job）
+      if (!get().voiceSupported && next.enabled) next.enabled = false;
       try {
         localStorage.setItem(VOICE_KEY, JSON.stringify(next));
       } catch {
@@ -148,6 +155,8 @@ export const useNotifyStore = create<NotifyState>((set, get) => {
       set({ voice: next });
       syncVoice(next);
     },
+    voiceSupported: true,
+    setVoiceSupported: (supported) => set({ voiceSupported: supported }),
   };
 });
 
@@ -173,10 +182,25 @@ if (typeof window !== "undefined") {
  * 「设置→通知管理」与语音工具窗口引用——应用重启后用户不打开设置页的话，
  * Rust 侧语音配置停留在默认值（enabled=false），所有通知的语音都被静默跳过
  * （「通知弹了但没有声音」的实测根因）。App.tsx 引入本函数后，配置在启动即回灌。
+ *
+ * 语音播报先探测平台能力（Rust tts_supported）：不支持（Linux）时把本地存的
+ * enabled 压成 false 并跳过回灌，避免每次通知都白跑一次合成再失败。
  */
 export function initNotifySync(): void {
   const s = useNotifyStore.getState();
   sync(s.mode);
   syncStyle(s.style);
-  syncVoice(s.voice);
+  void api
+    .ttsSupported()
+    .then((supported) => {
+      useNotifyStore.getState().setVoiceSupported(supported);
+      if (!supported) {
+        const v = useNotifyStore.getState().voice;
+        if (v.enabled) useNotifyStore.getState().setVoice({ enabled: false });
+        return;
+      }
+      syncVoice(useNotifyStore.getState().voice);
+    })
+    // 浏览器预览模式无 Tauri 运行时：保持默认（true）且照常回灌，行为不变
+    .catch(() => syncVoice(useNotifyStore.getState().voice));
 }

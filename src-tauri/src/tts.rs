@@ -467,6 +467,18 @@ impl crate::notify::NotifyChannel for VoiceChannel {
     }
 
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage) {
+        // 平台不支持（Linux 无 rodio/ALSA，见 Cargo.toml）：合成与播放都做不了，
+        // 直接给出可诊断的 skipped 事件而不是白跑一次 Python 推理
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            emit_voice(
+                app,
+                "skipped",
+                Some(&msg.summary),
+                Some(VOICE_UNSUPPORTED_MSG),
+            );
+            return;
+        }
         // 自检通知（push_sample）不朗读：它不是会话事件；试听走 tts_speak_test。
         // 跳过不再纯静默：emit skipped 让语音面板能看到「为什么不响」
         if msg.kind == "sample" {
@@ -575,6 +587,16 @@ fn queue_loop(q: &'static Queue) {
 
 fn process_job(job: SpeakJob) {
     let SpeakJob { app, text, force } = job;
+    // 平台不支持（Linux 无 rodio/ALSA，见 Cargo.toml）：不合成、不拉 worker，
+    // 直接给出 skipped 事件——避免白跑一次 Python 推理后才发现播不出来。
+    // 用 cfg 而非 `if !voice_supported()`：后者在 Windows/macOS 上是常量假分支，
+    // 会被 clippy 判为无意义条件。
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        emit_voice(&app, "skipped", Some(&text), Some(VOICE_UNSUPPORTED_MSG));
+        return;
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let cfg = app.state::<AppState>().voice.lock().unwrap().clone();
     // 排队期间用户关掉总开关：放弃播报（试听 force 除外），同样给出 skipped 事件
     if !cfg.enabled && !force {
@@ -1253,7 +1275,15 @@ fn generate_wav(app: &AppHandle, cfg: &VoiceConfig, text: &str) -> Result<PathBu
     Ok(path)
 }
 
+/// 不支持平台上的统一拦截文案（play_wav 占位与播报队列共用同一措辞）
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const VOICE_UNSUPPORTED_MSG: &str = "当前平台不支持语音播报（仅 Windows / macOS 提供）";
+
 /// rodio 播放 WAV（原生音频输出，不受 WebView2 后台节流影响——窗口隐藏时照常出声）
+///
+/// rodio 依赖按平台收窄（见 Cargo.toml）：Linux 上不引入 cpal/alsa-sys，
+/// 这里给出同签名的「不支持」实现，让调用方与测试无需平台分支。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn play_wav(path: &Path) -> Result<(), String> {
     use rodio::{Decoder, Source};
     let file = std::fs::File::open(path).map_err(|e| format!("打开音频失败: {e}"))?;
@@ -1278,9 +1308,41 @@ fn play_wav(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Linux 构建占位：音频播放链路（rodio → cpal → ALSA）不在依赖图中。
+/// 保留路径存在性校验，错误信息与其它平台同样以「音频」开头，便于调用方/测试识别。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn play_wav(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("打开音频失败: {}", path.display()));
+    }
+    Err(VOICE_UNSUPPORTED_MSG.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri 命令
 // ---------------------------------------------------------------------------
+
+/// 当前平台是否具备语音播报链路（合成 + 本机播放）。
+///
+/// 只有 Windows / macOS 编译 rodio（见 Cargo.toml 的说明）：Linux 上 cpal 会拉进
+/// alsa-sys，其 build.rs 要求系统装 libasound2-dev / 有 alsa.pc，否则整棵依赖树
+/// 编译失败。本应用只发布 Windows / macOS 安装包，故 Linux 直接视为「不支持」，
+/// 前端据此隐藏语音播报入口（不做半残的合成但不能播放的形态）。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub const fn voice_supported() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub const fn voice_supported() -> bool {
+    false
+}
+
+/// 语音播报能力探测（前端启动时查一次）：false 时隐藏语音播报入口
+#[tauri::command]
+pub async fn tts_supported() -> Result<bool, String> {
+    Ok(voice_supported())
+}
 
 /// 内置音色元数据（设置页音色下拉框数据源；与前端 BuiltinVoiceMeta 同形）
 #[derive(Serialize)]
@@ -4001,12 +4063,27 @@ for line in sys.stdin:
         write_beep_wav(&p);
         match play_wav(&p) {
             Ok(()) => {}
+            // 无音频输出设备（CI / 无声卡机器）：跳过而非失败
             Err(e) if e.contains("音频输出设备") => {
                 eprintln!("skip: 无音频输出设备（{e}）");
+            }
+            // Linux 构建不引入 rodio/ALSA（见 Cargo.toml）：预期为「不支持」
+            Err(e) if e.contains("不支持语音播报") => {
+                eprintln!("skip: 当前平台无音频播放链路（{e}）");
             }
             Err(e) => panic!("播放失败: {e}"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// 平台能力探测与前端 tts_supported 命令同源：Windows / macOS 恒为 true，
+    /// 其余平台恒为 false（前端据此隐藏语音播报入口）
+    #[test]
+    fn 语音播报能力探测_按平台() {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        assert!(voice_supported());
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        assert!(!voice_supported());
     }
 
     // -----------------------------------------------------------------------

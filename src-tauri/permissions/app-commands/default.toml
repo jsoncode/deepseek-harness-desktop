@@ -32,6 +32,7 @@ commands.allow = [
   "set_notify_style",
   "http_get_json",
   "set_voice_config",
+  "tts_supported",
   "tts_builtin_voices",
   "tts_env_check",
   "tts_install_voice_deps",

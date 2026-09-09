@@ -54,6 +54,7 @@ pub fn run() {
             dsh::set_notify_style,
             dsh::http_get_json,
             tts::set_voice_config,
+            tts::tts_supported,
             tts::tts_builtin_voices,
             tts::tts_env_check,
             tts::tts_install_voice_deps,
