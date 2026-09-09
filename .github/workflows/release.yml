@@ -70,6 +70,19 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # 诊断（临时）：失败时把测试输出打印成 ::error:: 注解，便于在检查页直接看到
+      # 是哪个用例 panic（GitHub 的 job 日志接口需要 admin 权限，命令行拉不到）
+      - name: Diagnose rust test failure
+        if: failure()
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          cargo test --no-fail-fast 2>&1 | tee /tmp/cargo-test.log | tail -n 0
+          echo "=== tail of cargo test ==="
+          tail -n 60 /tmp/cargo-test.log | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+
   # 先创建已发布的正式 Release（空壳，等矩阵 job 追加资产）。
   create-release:
     needs: quality
