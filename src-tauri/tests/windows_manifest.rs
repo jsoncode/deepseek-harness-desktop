@@ -2,6 +2,12 @@
 //! Common-Controls v6 清单（根因见 build.rs embed_test_manifest 的注释）。
 //! tauri 升级或构建方式变化导致清单缺失时，lib 单测会先于本测试在启动阶段
 //! 就崩（0xc0000139），此文件的存在本身也是 rustc-link-arg-tests 的生效前提。
+//!
+//! 仅 Windows：清单是 PE 资源，build.rs 的 rustc-link-arg 也只在 Windows 生效
+//! （Linux/macOS 走 tauri_build::build()），在其它平台上这两个断言没有意义、
+//! 只会让 CI 的 cargo test 恒红。
+
+#![cfg(target_os = "windows")]
 
 use std::process::Command;
 
