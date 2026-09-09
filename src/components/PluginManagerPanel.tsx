@@ -7,6 +7,8 @@ import SlidingSeg from "./SlidingSeg";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
 import {
+  AUTHOR_LOGIN,
+  AUTHOR_QUERY,
   fetchMarketPage,
   formatCount,
   formatDate,
@@ -20,6 +22,22 @@ const OP_VERB: Record<PluginOpKind, string> = {
   add: "安装",
   update: "更新",
   remove: "卸载",
+};
+
+/** 来源切换顺序：决定滑块分段组的展示次序与穿梭动画方向 */
+const SOURCE_ORDER: MarketSource[] = ["github", "npm", "author"];
+
+const SOURCE_LABEL: Record<MarketSource, string> = {
+  github: "GitHub",
+  npm: "NPM",
+  author: "作者推荐",
+};
+
+/** 各来源的默认排序：NPM 无 Stars、GitHub 无周下载；作者推荐按最近更新优先 */
+const SOURCE_DEFAULT_SORT: Record<MarketSource, MarketSort> = {
+  github: "stars",
+  npm: "weekly",
+  author: "date",
 };
 
 /** 首字母渐变圆标头像（远程头像加载失败时的回退） */
@@ -242,6 +260,10 @@ export default function PluginManagerPanel() {
 
   const running = pluginOp?.running ?? false;
   const installedSet = new Set(plugins);
+  /** 作者推荐：固定检索式来源（无搜索框，数据仍来自 GitHub 仓库搜索） */
+  const isAuthor = source === "author";
+  /** NPM 源专属口径：指标列显示周下载、安装动词为「一键安装」 */
+  const isNpm = source === "npm";
 
   const isOutdated = (n: string) => {
     const c = pluginVers[n]?.current;
@@ -260,9 +282,12 @@ export default function PluginManagerPanel() {
 
   const switchSource = (s: MarketSource) => {
     if (source === s) return;
-    bumpPane(s === "npm" ? "mk-from-right" : "mk-from-left");
+    // 方向按来源在分段组里的次序判定：靠右的来源从右侧滑入，靠左的从左侧滑入
+    bumpPane(
+      SOURCE_ORDER.indexOf(s) > SOURCE_ORDER.indexOf(source) ? "mk-from-right" : "mk-from-left",
+    );
     setSource(s);
-    setSort(s === "github" ? "stars" : "weekly");
+    setSort(SOURCE_DEFAULT_SORT[s]);
     setPage(1);
   };
 
@@ -310,7 +335,7 @@ export default function PluginManagerPanel() {
             setDetailRow(r);
           }}
         >
-          {source === "github" ? "源码安装" : "一键安装"}
+          {isNpm ? "一键安装" : "源码安装"}
         </button>
       ) : null}
       {/* 已安装状态下：所有插件 tab 显示"已安装"占位；已安装 tab 显示更新/卸载 */}
@@ -395,18 +420,18 @@ export default function PluginManagerPanel() {
       ),
     },
     {
-      // 指标列：NPM 源显示周下载，GitHub 源显示 Stars（标题随源切换）
-      title: source === "github" ? "Stars" : "周下载",
+      // 指标列：NPM 源显示周下载，GitHub / 作者推荐显示 Stars（标题随源切换）
+      title: isNpm ? "周下载" : "Stars",
       key: "metric",
       width: 110,
       render: (_, r) =>
-        source === "github" ? (
-          <span className={`mk-num${r.stars === null ? " muted" : ""}`}>
-            {r.stars === null ? "—" : `★ ${formatCount(r.stars)}`}
-          </span>
-        ) : (
+        isNpm ? (
           <span className={`mk-num${r.weekly === null ? " muted" : ""}`}>
             {r.weekly === null ? "—" : formatCount(r.weekly)}
+          </span>
+        ) : (
+          <span className={`mk-num${r.stars === null ? " muted" : ""}`}>
+            {r.stars === null ? "—" : `★ ${formatCount(r.stars)}`}
           </span>
         ),
     },
@@ -487,54 +512,69 @@ export default function PluginManagerPanel() {
             </button>
           </div>
         ) : null}
-        {/* 工具栏两行：第一行 搜索框；第二行 视图tab(左) + 排序·手动安装(右) */}
+        {/* 工具栏两行：第一行 搜索框（作者推荐为固定检索式，改展示来源说明）；
+            第二行 视图tab(左) + 排序·手动安装(右) */}
         <div className="mk-toolbar">
-          <div className="mk-row">
-            <Input
-              className="mk-search"
-              placeholder="搜索插件：NPM 按 keywords 匹配包标签 · GitHub 关键词原样搜索；未输入时展示 dsh-plugin 全集"
-              allowClear
-              prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
-              value={query}
-              onChange={(e) => {
-                const v = e.target.value;
-                setQueries((prev) => ({ ...prev, [tabMode]: v }));
-              }}
-              onPressEnter={submitSearch}
-            />
-            {/* 搜索按钮：与回车等价的唯一显式提交入口；输入过程不自动触发请求 */}
-            <button
-              className="pm-btn pm-btn-sm mk-search-btn"
-              type="button"
-              disabled={marketLoading}
-              onClick={submitSearch}
-            >
-              搜索
-            </button>
-          </div>
+          {isAuthor ? (
+            <div className="mk-row">
+              <div className="mk-reco-hint">
+                <span className="mk-reco-badge">作者推荐</span>
+                <span>
+                  作者 <b>@{AUTHOR_LOGIN}</b> 维护的 dsh 系列插件，实时检索 GitHub：
+                  <code>q={AUTHOR_QUERY}</code>
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="mk-row">
+              <Input
+                className="mk-search"
+                placeholder="搜索插件：NPM 按 keywords 匹配包标签 · GitHub 关键词原样搜索；未输入时展示 dsh-plugin 全集"
+                allowClear
+                prefix={<SearchOutlined style={{ color: "var(--text-3)" }} />}
+                value={query}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setQueries((prev) => ({ ...prev, [tabMode]: v }));
+                }}
+                onPressEnter={submitSearch}
+              />
+              {/* 搜索按钮：与回车等价的唯一显式提交入口；输入过程不自动触发请求 */}
+              <button
+                className="pm-btn pm-btn-sm mk-search-btn"
+                type="button"
+                disabled={marketLoading}
+                onClick={submitSearch}
+              >
+                搜索
+              </button>
+            </div>
+          )}
           <div className="mk-row">
             <SlidingSeg
               value={tabMode}
               options={[
                 {
                   key: "all",
-                  label: "所有插件(" + formatCount(market?.total) + ")",
+                  label:
+                    (isAuthor ? SOURCE_LABEL.author : "所有插件") +
+                    "(" +
+                    formatCount(market?.total) +
+                    ")",
                 },
                 { key: "installed", label: "已安装(" + visibleInstalled.length + ")" },
               ]}
               onChange={switchTab}
             />
             <div className="mk-row-right">
-              {/* 排序项随源动态展示：GitHub 无周下载、NPM 无 Stars */}
+              {/* 排序项随源动态展示：GitHub / 作者推荐无周下载、NPM 无 Stars */}
               {tabMode === "all" ? (
                 <SlidingSeg
                   className="mk-row-sort"
                   value={sort}
                   options={[
-                    ...(source === "npm" ? [{ key: "weekly" as MarketSort, label: "周下载" }] : []),
-                    ...(source === "github"
-                      ? [{ key: "stars" as MarketSort, label: "Stars" }]
-                      : []),
+                    ...(isNpm ? [{ key: "weekly" as MarketSort, label: "周下载" }] : []),
+                    ...(!isNpm ? [{ key: "stars" as MarketSort, label: "Stars" }] : []),
                     { key: "date" as MarketSort, label: "发布日期" },
                   ]}
                   onChange={(k) => {
@@ -575,9 +615,11 @@ export default function PluginManagerPanel() {
                   : "本机尚未安装任何插件"
                 : marketLoading
                   ? "正在搜索…"
-                  : submittedQuery.trim()
-                    ? "没有匹配的插件，可更换关键词重试"
-                    : "无匹配插件",
+                  : isAuthor
+                    ? "作者暂无 dsh 系列插件"
+                    : submittedQuery.trim()
+                      ? "没有匹配的插件，可更换关键词重试"
+                      : "无匹配插件",
           }}
         />
       </div>
@@ -621,15 +663,12 @@ export default function PluginManagerPanel() {
       <div className="settings-body flush">
         {/* 复用 plugin-manager-modal 命名空间：其下的 .mk-* 样式（工具栏/表格/终端）原样生效 */}
         <div className="pm-panel plugin-manager-modal">
-          {/* 面板头部：来源切换（GitHub / NPM）；终端视图不显示，保持安装界面干净 */}
+          {/* 面板头部：来源切换（GitHub / NPM / 作者推荐）；终端视图不显示，保持安装界面干净 */}
           {view === "market" ? (
             <div className="pm-panel-head">
               <SlidingSeg
                 value={source}
-                options={[
-                  { key: "github", label: "GitHub" },
-                  { key: "npm", label: "NPM" },
-                ]}
+                options={SOURCE_ORDER.map((k) => ({ key: k, label: SOURCE_LABEL[k] }))}
                 onChange={(s) => switchSource(s)}
               />
             </div>
@@ -717,7 +756,7 @@ export default function PluginManagerPanel() {
                     void startPluginOp("add", row.spec);
                   }}
                 >
-                  {source === "github" ? "源码安装" : "一键安装"}
+                  {isNpm ? "一键安装" : "源码安装"}
                 </button>
               ) : null}
               {detailRow.installedHere && isOutdated(detailRow.name) ? (

@@ -582,6 +582,48 @@ html[data-theme="light"] .plugin-manager-modal.mk-market .ant-modal-content {
   margin-left: auto;
 }
 
+/* 【作者推荐】来源说明条：该来源使用固定检索式，不接受关键词，故不渲染搜索框 */
+.mk-reco-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border-radius: 10px;
+  background: var(--panel-strong);
+  border: 1px dashed var(--border-strong);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.mk-reco-hint b {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.mk-reco-hint code {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.14);
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 来源徽标：与分段组选中态同一渐变，强化「这是作者精选」的语义 */
+.mk-reco-badge {
+  flex: none;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .mk-wrap {
   flex: 1;
   min-height: 0;

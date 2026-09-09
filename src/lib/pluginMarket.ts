@@ -11,13 +11,25 @@
  * - GitHub：URL 只保留 q 与分页参数（per_page/page）。未输入关键词 →
  *   q=dsh-plugin；输入关键词 → q={关键词} 原样作为搜索词，不追加任何限定符
  *   （用户可自带 topic:/in: 等语法，平台直接解析）；
+ * - 作者推荐（author）：检索式固定为 AUTHOR_QUERY（dsh- user:jsoncode），
+ *   不接受用户关键词，走的仍是 GitHub 仓库搜索接口与同一套分页/排序规则，
+ *   因此 UI 上无需搜索框；
  * - 排序：GitHub stars/date 走服务端 sort 参数；npm 接口无排序参数，
  *   周下载/发布日期在客户端对当前页排序（保持旧行为）。
  */
 import { api, tauri } from "./tauri";
 
-export type MarketSource = "github" | "npm";
+export type MarketSource = "github" | "npm" | "author";
 export type MarketSort = "weekly" | "stars" | "date";
+
+/** 【作者推荐】作者账号（与 AUTHOR_QUERY 保持一致） */
+export const AUTHOR_LOGIN = "jsoncode";
+
+/**
+ * 【作者推荐】固定检索式：GitHub 上该作者名下的 dsh 系列插件。
+ * 原样作为 q 参数发出（见 fetchMarketPage 的 author 分支），不追加任何限定符。
+ */
+export const AUTHOR_QUERY = `dsh- user:${AUTHOR_LOGIN}`;
 
 export interface MarketPlugin {
   key: string;
@@ -43,11 +55,11 @@ const GH_PAGE_SIZE = 20;
 const NPM_PAGE_SIZE = 20;
 
 export function pageSizeOf(source: MarketSource): number {
-  return source === "github" ? GH_PAGE_SIZE : NPM_PAGE_SIZE;
+  return source === "npm" ? NPM_PAGE_SIZE : GH_PAGE_SIZE;
 }
 
-/** 默认搜索词：未输入关键词时展示 dsh-plugin 插件全集 */
-const DEFAULT_TERMS: Record<MarketSource, string> = {
+/** 默认搜索词：未输入关键词时展示 dsh-plugin 插件全集（作者推荐为固定检索式，不在其中） */
+const DEFAULT_TERMS: Record<"github" | "npm", string> = {
   github: "dsh-plugin",
   npm: "keywords:dsh-plugin",
 };
@@ -163,6 +175,7 @@ function mapNpmObject(o: NpmObject): MarketPlugin {
 /**
  * 按关键词拉取一页市场列表（单一请求、纯服务端分页）：
  * - 搜索词组装规则见 buildNpmText / buildGithubQ 与文件头注释；
+ * - author（作者推荐）忽略调用方关键词，使用固定检索式 AUTHOR_QUERY；
  * - total 为服务端返回的真实命中总数，直接驱动分页；
  * - 调用方保证换词时重置 page，避免请求越界页导致搜不到结果。
  */
@@ -172,6 +185,7 @@ export async function fetchMarketPage(
   page: number,
   sort: MarketSort,
 ): Promise<MarketPage> {
+  if (source === "author") return fetchGithubPage(AUTHOR_QUERY, page, sort, true);
   if (source === "github") return fetchGithubPage(query, page, sort);
   return fetchNpmPage(query, page, sort);
 }
@@ -197,14 +211,25 @@ async function fetchGithubSearch(
   }
 }
 
-async function fetchGithubPage(query: string, page: number, sort: MarketSort): Promise<MarketPage> {
-  const sortParam =
-    sort === "stars"
-      ? "&sort=stars&order=desc"
-      : sort === "date"
-        ? "&sort=updated&order=desc"
-        : "";
-  const r = await fetchGithubSearch(buildGithubQ(query), sortParam, page);
+/** GitHub 搜索的排序参数：stars / updated 走服务端，相关度（默认）不带参数 */
+function githubSortParam(sort: MarketSort): string {
+  if (sort === "stars") return "&sort=stars&order=desc";
+  if (sort === "date") return "&sort=updated&order=desc";
+  return "";
+}
+
+/**
+ * GitHub 仓库搜索一页。
+ * @param q 检索式；raw=true 时原样发出（作者推荐的固定检索式），
+ *          否则走 buildGithubQ 补齐「未输入关键词 → dsh-plugin 全集」的默认词。
+ */
+async function fetchGithubPage(
+  q: string,
+  page: number,
+  sort: MarketSort,
+  raw = false,
+): Promise<MarketPage> {
+  const r = await fetchGithubSearch(raw ? q : buildGithubQ(q), githubSortParam(sort), page);
   return { total: r.total_count ?? 0, items: (r.items ?? []).map(mapGhItem) };
 }
 
