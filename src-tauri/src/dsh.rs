@@ -583,8 +583,13 @@ static PNPM_GLOBAL_DIRS_CACHE: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::n
 /// 时后台预热，这份开销就与前端加载并行，不再叠加在「点启动到服务起来」之间。
 pub fn prewarm_pnpm_global_dirs() {
     let _ = detect_pnpm_global_dirs();
-    // 把刚探测到的全局目录补写进磁盘缓存（下次启动可直接播种，省掉 `pnpm bin -g`）
+    // 把刚探测到的全局目录补写进磁盘缓存（下次启动可直接播种，省掉 `pnpm bin -g`）。
+    // 快照本身来自缓存时不必回写：内容没变，只会白白刷新 written_at 让 30 天 TTL
+    // 一直续期（缓存的失效靠路径/文件名/指纹校验，不靠这个时间戳）
     let snap = env_snapshot(false);
+    if snap.from_cache {
+        return;
+    }
     save_env_cache(&snap);
 }
 
@@ -1473,15 +1478,25 @@ const ENV_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(8);
 // ---------------------------------------------------------------------------
 
 /// 缓存结构版本：结构变更时递增，旧文件直接忽略
-const ENV_CACHE_SCHEMA: u32 = 1;
+/// v2：CachedTool 增加 size/mtime_ms 指纹（用于识别工具被升级/重装）
+const ENV_CACHE_SCHEMA: u32 = 2;
 /// 缓存文件最长有效期：超过则忽略（工具可能被装到别处/卸载，靠路径校验兜底）
 const ENV_CACHE_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 
-/// 单个工具的缓存项：可执行路径 + 上次读到的版本号
+/// 单个工具的缓存项：可执行路径 + 上次读到的版本号 + 文件指纹。
+///
+/// 指纹是「版本号不会过期显示」的关键：升级 dsh / pnpm / node 时路径通常不变
+/// （`pnpm add -g @deepseek-ai/dsh@latest` 覆盖写同一个 dsh.CMD 垫片），只看路径
+/// 会把上次启动读到的旧版本号一直用下去——「关于本应用」里就显示旧版号。
+/// 记下 size + mtime（毫秒），读缓存时比对，不一致即视为工具已变 → 退回真读。
 #[derive(Serialize, Deserialize, Clone)]
 struct CachedTool {
     path: String,
     version: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    mtime_ms: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -1543,15 +1558,25 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// 缓存项校验：路径仍存在，且文件名仍是该工具自己的名字。
+/// 文件指纹：size + mtime（毫秒）。取不到元数据返回 None（调用方据此放弃缓存）。
+fn file_fingerprint(p: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(p).ok()?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime_ms))
+}
+
+/// 缓存项校验：路径仍存在、文件名仍是该工具自己的名字、文件指纹未变。
 ///
 /// 名字校验是刻意的：缓存文件在用户可写的应用数据目录里，不能让它成为
 /// 「让应用执行任意可执行文件」的入口——只有 dsh*/pnpm*/node* 这类文件名才认。
+/// 指纹校验负责「工具被升级/重装后立即失效」：路径没变但文件换了，版本号必须重读。
 fn cached_tool_ok(t: &CachedTool, expected_prefix: &str) -> Option<PathBuf> {
     let p = PathBuf::from(&t.path);
-    if !p.exists() {
-        return None;
-    }
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -1559,13 +1584,22 @@ fn cached_tool_ok(t: &CachedTool, expected_prefix: &str) -> Option<PathBuf> {
     if !name.starts_with(expected_prefix) {
         return None;
     }
+    let (size, mtime_ms) = file_fingerprint(&p)?;
+    if size != t.size || mtime_ms != t.mtime_ms {
+        return None;
+    }
     Some(p)
 }
 
 fn to_cached_tool(program: &str, version: Option<&String>) -> Option<CachedTool> {
-    version.map(|v| CachedTool {
-        path: program.to_string(),
-        version: v.clone(),
+    version.map(|v| {
+        let (size, mtime_ms) = file_fingerprint(Path::new(program)).unwrap_or((0, 0));
+        CachedTool {
+            path: program.to_string(),
+            version: v.clone(),
+            size,
+            mtime_ms,
+        }
     })
 }
 
@@ -3167,6 +3201,108 @@ mod tests {
             assert!(d.exists(), "{d:?} 应存在（探测前会主动创建）");
         }
         eprintln!("detected global dirs: {dirs:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 跨启动环境缓存的失效判定（「升级 dsh 后关于页仍显示旧版号」回归）
+    // -----------------------------------------------------------------------
+
+    /// 建一个临时"垫片"文件（文件名前缀符合工具名，否则先卡在名字校验上）
+    fn temp_tool_file(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dsh-envcache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let p = dir.join(name);
+        std::fs::write(&p, body).expect("写临时垫片");
+        p
+    }
+
+    fn cache_entry(path: &Path, version: &str) -> CachedTool {
+        to_cached_tool(&path.to_string_lossy(), Some(&version.to_string()))
+            .expect("有版本号就应能构造缓存项")
+    }
+
+    /// 覆盖写同一个垫片（升级 dsh 的真实形态：路径不变、文件换了）→ 指纹失效
+    #[test]
+    fn cached_tool_fingerprint_invalidates_on_content_change() {
+        let path = temp_tool_file("dsh-fingerprint-size.cmd", "old-shim-body");
+        let tool = cache_entry(&path, "0.1.2-rc.1");
+        assert!(
+            cached_tool_ok(&tool, "dsh").is_some(),
+            "文件未变时缓存应命中（否则每次启动都要重跑版本子进程）"
+        );
+
+        std::fs::write(&path, "new-shim-body-with-a-different-length").expect("覆盖写");
+        assert!(
+            cached_tool_ok(&tool, "dsh").is_none(),
+            "文件大小变了，缓存必须失效（旧版本号不得继续展示）"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 大小相同但修改时间变（同尺寸重装）：同样失效
+    #[test]
+    fn cached_tool_fingerprint_invalidates_on_mtime_change() {
+        let body = "same-length-shim-body";
+        let path = temp_tool_file("dsh-fingerprint-mtime.cmd", body);
+        let tool = cache_entry(&path, "0.1.2-rc.1");
+        assert!(cached_tool_ok(&tool, "dsh").is_some());
+
+        // 内容等长重写 → 只有 mtime 变
+        std::fs::write(&path, body).expect("等长重写");
+        let f = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("打开写");
+        f.set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+            .expect("推后 mtime");
+        drop(f);
+
+        assert!(
+            cached_tool_ok(&tool, "dsh").is_none(),
+            "mtime 变了，缓存必须失效"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 文件名不是该工具自己的名字 → 一律不认（缓存文件在用户可写目录里，
+    /// 不能让它成为「让应用执行任意可执行文件」的入口）
+    #[test]
+    fn cached_tool_rejects_foreign_filename() {
+        let path = temp_tool_file("not-a-tool.exe", "x");
+        let tool = cache_entry(&path, "1.0.0");
+        assert!(
+            cached_tool_ok(&tool, "dsh").is_none(),
+            "非 dsh* 文件名不得当作 dsh 使用"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 路径已不存在（工具被卸载）→ 失效
+    #[test]
+    fn cached_tool_rejects_missing_path() {
+        let dir = std::env::temp_dir().join(format!("dsh-envcache-test-{}", std::process::id()));
+        let tool = CachedTool {
+            path: dir.join("dsh-gone.cmd").to_string_lossy().into_owned(),
+            version: "0.1.2-rc.1".to_string(),
+            size: 1,
+            mtime_ms: 1,
+        };
+        assert!(cached_tool_ok(&tool, "dsh").is_none(), "文件不存在应失效");
+    }
+
+    /// 旧结构（schema 1）的缓存项没有指纹字段 → 反序列化后指纹为 0，
+    /// 与真实文件必然不符 → 不命中。这正是升级后旧缓存被丢弃的原因。
+    #[test]
+    fn legacy_cache_entry_without_fingerprint_is_rejected() {
+        let legacy =
+            r#"{"path":"C:\\Users\\a\\AppData\\Local\\pnpm\\bin\\dsh.CMD","version":"0.1.2-rc.1"}"#;
+        let tool: CachedTool = serde_json::from_str(legacy).expect("旧结构应能反序列化");
+        assert_eq!(tool.size, 0);
+        assert_eq!(tool.mtime_ms, 0);
+        assert!(
+            cached_tool_ok(&tool, "dsh").is_none(),
+            "无指纹的旧缓存项不得命中"
+        );
     }
 
     // -----------------------------------------------------------------------
