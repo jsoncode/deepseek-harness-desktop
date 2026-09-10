@@ -333,14 +333,14 @@ mod tests {
 
     /// logo 回退路径在开发机上必须可解析（打包态由资源目录命中，测试态走 crate 目录）
     #[test]
-    fn logo_文件真实存在() {
+    fn logo_file_exists_on_disk() {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons/icon.png");
         assert!(p.is_file(), "推送 logo 应随仓库存在: {p:?}");
     }
 
     /// 静态通道表不允许出现同名通道（避免重复投递同一提醒）
     #[test]
-    fn 通道名不重复() {
+    fn channel_names_are_unique() {
         let mut names: Vec<&str> = Vec::new();
         for ch in channels() {
             let n = ch.name();
@@ -353,7 +353,7 @@ mod tests {
     /// 「打开对话」按钮只在有真实会话时挂载，且激活参数就是会话 id
     #[cfg(windows)]
     #[test]
-    fn 打开按钮只在有会话时出现() {
+    fn open_button_only_present_with_session() {
         assert_eq!(open_button("session-1"), Some(("打开对话", "session-1")));
         assert_eq!(open_button(""), None);
     }
@@ -362,7 +362,7 @@ mod tests {
     /// 唯一不许发生的是 panic）；顺带验证 AUMID 与 fork 展示 toast 用的 id 一致
     #[cfg(windows)]
     #[test]
-    fn 清理旧驻留通知_不panic() {
+    fn clear_stale_toasts_does_not_panic() {
         clear_stale_toasts();
         clear_stale_toasts(); // 幂等：重复调用同样安全
     }
@@ -372,7 +372,7 @@ mod tests {
     /// false，但不硬断言——万一测试跑在全屏终端里也不该失败。
     #[cfg(windows)]
     #[test]
-    fn 游戏模式判定_不panic() {
+    fn game_mode_check_does_not_panic() {
         let _ = fullscreen_app_running();
     }
 }

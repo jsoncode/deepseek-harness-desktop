@@ -411,12 +411,12 @@ mod tray_tooltip_tests {
 
     // cargo test 默认 debug 构建，cfg!(debug_assertions) 恒真，故断言带「（调试）」。
     #[test]
-    fn 调试构建返回名称加后缀() {
+    fn debug_build_appends_name_suffix() {
         assert_eq!(tray_tooltip_text(NAME), format!("{NAME}（调试）"));
     }
 
     #[test]
-    fn 托盘设置分区映射到设置窗口分区() {
+    fn tray_section_maps_to_settings_window_section() {
         assert_eq!(tray_settings_section("settings"), Some(None));
         assert_eq!(tray_settings_section("sec-plugins"), Some(Some("plugins")));
         assert_eq!(tray_settings_section("sec-about"), Some(Some("about")));

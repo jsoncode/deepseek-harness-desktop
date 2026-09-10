@@ -509,19 +509,19 @@ mod tests {
     }
 
     #[test]
-    fn 最新规范格式通过校验() {
+    fn canonical_format_passes_validation() {
         let doc = "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\nrecords:\n  llm-pi-ai/x:\n    kind: grant\n    payload: {}\n";
         assert!(check(doc).is_ok());
     }
 
     #[test]
-    fn flow风格refs通过校验() {
+    fn flow_style_refs_pass_validation() {
         let doc = "version: 1\nrefs:\n  {\n    DEEPSEEK_API_KEY: sk-abc\n  }\n";
         assert!(check(doc).is_ok());
     }
 
     #[test]
-    fn 空文档与仅版本号通过校验() {
+    fn empty_doc_and_version_only_pass_validation() {
         assert!(check("").is_ok());
         assert!(check("# 只有注释\n").is_ok());
         assert!(check("version: 1\n").is_ok());
@@ -529,42 +529,42 @@ mod tests {
     }
 
     #[test]
-    fn 旧版扁平格式放行由dsh自动迁移() {
+    fn legacy_flat_format_allowed_for_dsh_auto_migration() {
         assert!(check("DEEPSEEK_API_KEY: sk-abc\n").is_ok());
     }
 
     #[test]
-    fn 扁平格式含非字符串值不放行() {
+    fn flat_format_with_non_string_value_rejected() {
         let doc = "DEEPSEEK_API_KEY: sk-abc\nPORT: 3000\n";
         assert!(check(doc).is_err());
     }
 
     #[test]
-    fn 字符串版本号不兼容() {
+    fn string_version_is_incompatible() {
         let doc = "version: \"1\"\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n";
         assert!(check(doc).is_err());
     }
 
     #[test]
-    fn refs非字符串值不兼容() {
+    fn refs_non_string_value_is_incompatible() {
         let doc = "version: 1\nrefs:\n  PORT: 3000\n";
         assert!(check(doc).is_err());
     }
 
     #[test]
-    fn 未知顶层键不兼容() {
+    fn unknown_top_level_key_is_incompatible() {
         let doc = "version: 1\nfoo: bar\n";
         assert!(check(doc).is_err());
     }
 
     #[test]
-    fn refs是序列不兼容() {
+    fn refs_as_sequence_is_incompatible() {
         let doc = "version: 1\nrefs:\n- DEEPSEEK_API_KEY: sk-abc\n";
         assert!(check(doc).is_err());
     }
 
     #[test]
-    fn 打码不泄露完整值() {
+    fn masking_does_not_leak_full_value() {
         let masked = mask_content("version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abcdef\n");
         assert!(masked.contains("sk-a****"));
         assert!(!masked.contains("sk-abcdef"));
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn 修复扁平文档生成规范格式() {
+    fn fix_flat_doc_produces_canonical_format() {
         let (refs, records, dropped) = extract_document("DEEPSEEK_API_KEY: sk-abc\n").unwrap();
         assert_eq!(dropped, 0);
         assert_eq!(refs.len(), 1);
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn 修复损坏的flow文档走逐行兜底() {
+    fn fix_broken_flow_doc_falls_back_to_line_scan() {
         // `{` 顶格 + flow 段缺逗号 → YAML 无法解析，逐行扫描仍能恢复
         let text = "version: 1\nrefs:\n{\n  DEEPSEEK_API_KEY: sk-abc\n}\n";
         let (refs, _, dropped) = extract_document(text).unwrap();
@@ -596,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn 修复时移除空值条目并保留其余() {
+    fn fix_drops_empty_entries_and_keeps_rest() {
         let (refs, _, dropped) =
             extract_document("version: 1\nrefs:\n  KEY1: sk-abc\n  KEY2:\n").unwrap();
         assert_eq!(refs.len(), 1);
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn 非字符串ref值修复为字符串() {
+    fn non_string_ref_value_fixed_to_string() {
         let (refs, _, dropped) = extract_document("version: 1\nrefs:\n  PORT: 3000\n").unwrap();
         assert_eq!(dropped, 0);
         assert_eq!(
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn 修复输出为大括号包裹格式() {
+    fn fix_output_uses_braces_format() {
         let (refs, _, _) =
             extract_document("version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-abc\n  OTHER: \"a: b\"\n")
                 .unwrap();
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn 单条ref输出无逗号() {
+    fn single_ref_output_has_no_trailing_comma() {
         let (refs, _, _) = extract_document("version: 1\nrefs:\n  KEY_A: sk-abc\n").unwrap();
         let out = render_brace_document(&refs, &Mapping::new());
         assert!(out.contains("    KEY_A: sk-abc\n"), "实际: {out}");
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn 修复输出可被dsh读取器识别() {
+    fn fixed_output_is_readable_by_dsh_reader() {
         // 用与 dsh-credentials-local 相同的 yaml 解析语义验证修复输出
         let (refs, records, _) = extract_document("version: 1\nrefs:\n  KEY_A: sk-abc\n").unwrap();
         let out = render_brace_document(&refs, &records);
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn 无法识别的内容返回错误() {
+    fn unrecognized_content_returns_error() {
         assert!(extract_document("!!!\n").is_err());
         assert!(extract_document("just some text without colons\n").is_err());
     }
@@ -666,7 +666,7 @@ mod tests {
     /// 绝不触碰用户的真实凭据文件。注意：本测试会修改进程环境变量，
     /// 因此必须串行执行（Rust 2021 无并行隔离），且本模块内其他用例不读 DSH_HOME。
     #[test]
-    fn 命令级检查修复链路() {
+    fn command_level_check_and_fix_chain() {
         let dir = std::env::temp_dir().join(format!("cred-e2e-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

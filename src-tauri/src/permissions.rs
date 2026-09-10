@@ -253,7 +253,7 @@ mod tests {
 
     /// 标签映射：已知类型给中文、未知类型有兜底文案（弹窗内容不落空）。
     #[test]
-    fn 权限类型中文标签() {
+    fn permission_kind_labels_in_chinese() {
         use webview2_com::Microsoft::Web::WebView2::Win32::*;
         assert_eq!(
             permission_label(COREWEBVIEW2_PERMISSION_KIND_MICROPHONE),

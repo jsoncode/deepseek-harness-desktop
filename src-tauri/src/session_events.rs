@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_desc_省略零值段并用间隔号连接() {
+    fn todo_desc_skips_zero_parts_and_joins_with_separator() {
         assert_eq!(todo_desc(3, 1, 2), "3项已完成 · 1项进行中 · 2项待处理");
         assert_eq!(todo_desc(0, 1, 0), "1项进行中");
         assert_eq!(todo_desc(2, 0, 0), "2项已完成");
@@ -741,7 +741,7 @@ mod tests {
 
     /// follow_open 帧形态与实测一致（args 包 request.address）
     #[test]
-    fn follow_open_帧形态() {
+    fn follow_open_frame_shape() {
         let raw = follow_open("s-1", "session-x");
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["type"], "open");
@@ -759,7 +759,7 @@ mod tests {
 
     /// snapshot 只置就绪、不产生推送；其后的实时 event 正常渲染
     #[test]
-    fn 快照不推_后续实时事件推送() {
+    fn snapshot_not_pushed_but_later_events_are() {
         let mut notes = Notes::new();
         let mut live = Live::new();
         live.streams
@@ -802,7 +802,7 @@ mod tests {
 
     /// 计数未变化时不重复推送；计数变了才推
     #[test]
-    fn 计数未变化时不重复推送() {
+    fn unchanged_count_not_pushed_again() {
         let mut notes = Notes::new();
         let mut live = open_live();
         let f1 = follow_event(
@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn 空清单不推送() {
+    fn empty_list_not_pushed() {
         let mut notes = Notes::new();
         let mut live = open_live();
         let frame = follow_event(
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_end_描述行只带时刻() {
+    fn turn_end_desc_line_has_time_only() {
         let mut notes = Notes::new();
         let mut live = open_live();
         merge_title(&mut notes, "s1", Some("修 Bug".into()), true);
@@ -861,7 +861,7 @@ mod tests {
     /// （title/desc）——也就是语音通道可能朗读的全部内容——都不得出现时间。
     /// 锁死「时间只进文字版、不被语音念出来」这条需求边界。
     #[test]
-    fn 时分秒只进描述行body() {
+    fn hms_only_in_desc_line_body() {
         let msgs = [
             todo_message(
                 "s1",
@@ -896,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn ignorable_事件被丢弃() {
+    fn ignorable_event_is_dropped() {
         let mut notes = Notes::new();
         let mut live = open_live();
         let frame = follow_event(
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn end_帧摘除follow流() {
+    fn end_frame_removes_follow_stream() {
         let mut live = Live::new();
         live.streams.insert("t-x".into(), ("s1".into(), true));
         let raw = r#"{"type":"end","streamId":"t-x"}"#;
@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_解析token() {
+    fn endpoint_parses_token() {
         let ep = Endpoint::parse("http://127.0.0.1:6088/?token=abc-123").unwrap();
         assert_eq!((ep.host.as_str(), ep.port), ("127.0.0.1", 6088));
         assert_eq!(ep.token.as_deref(), Some("abc-123"));
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc信封带args() {
+    fn rpc_envelope_carries_args() {
         let v = rpc_envelope("session/list", serde_json::json!({ "_request": {} }));
         assert_eq!(v["type"], "client-request");
         assert_eq!(v["method"], "session/list");
@@ -938,7 +938,7 @@ mod tests {
 
     /// 确保每个 live 会话只 follow 一次（同 id 不会重复开流）
     #[test]
-    fn follow流同会话不重复() {
+    fn follow_stream_not_duplicated_for_same_session() {
         let mut live = Live::new();
         let s1 = live.next_stream();
         live.streams.insert(s1.clone(), ("session-x".into(), false));
@@ -953,7 +953,7 @@ mod tests {
     /// 手建 Request 会被 tungstenite 原样透传（不注入 Sec-WebSocket-Key 等），
     /// 握手恒定失败且错误被静默吞掉——这里锁死 build_ws_request 的输出形态。
     #[test]
-    fn ws升级请求带全部必需头与cookie() {
+    fn ws_upgrade_request_has_all_required_headers_and_cookie() {
         let req = build_ws_request(
             "ws://127.0.0.1:6199/api/remote.mux",
             "dsh-auth-abc=v1.body.sig",
@@ -990,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn ws升级请求拒绝非法cookie值() {
+    fn ws_upgrade_request_rejects_invalid_cookie_value() {
         // 非可见 ASCII 的 HeaderValue 会被拒绝 → 返回 None（由 supervisor 重试）
         assert!(build_ws_request("ws://127.0.0.1:1/x", "bad\u{0}value").is_none());
     }

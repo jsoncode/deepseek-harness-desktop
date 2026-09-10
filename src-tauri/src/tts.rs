@@ -3027,7 +3027,7 @@ mod tests {
 
     /// 克隆目标解析：命令 target 非空（含前后空白）优先，None/空白回退默认目录
     #[test]
-    fn 克隆目标解析_target优先_留空回默认() {
+    fn resolve_clone_target_prefers_target_else_default() {
         let base = Path::new("C:\\data\\tts");
         assert_eq!(
             resolve_clone_target(None, base, AUDIO8_REPO_DIR_NAME),
@@ -3061,7 +3061,7 @@ mod tests {
     }
 
     #[test]
-    fn 播报文本按配置选择() {
+    fn speak_text_selected_by_config() {
         let m = msg();
         assert_eq!(
             speak_text(&m, "summary"),
@@ -3077,14 +3077,14 @@ mod tests {
     }
 
     #[test]
-    fn 自检通知不朗读走独立常量() {
+    fn sample_notification_skipped_by_dedicated_constant() {
         // VoiceChannel 对 kind=="sample" 的跳过在 deliver 里；这里锁定
         // push_sample 使用的 kind 值，防止有人改名后静默失效。
         assert_eq!(crate::notify::SAMPLE_KIND, "sample");
     }
 
     #[test]
-    fn 缓存键随文本模型与参数变化() {
+    fn cache_key_varies_with_text_model_and_params() {
         let a = cache_key("你好", "model_a", "p1");
         assert_eq!(a, cache_key("你好", "model_a", "p1"), "同输入必须稳定");
         assert_ne!(a, cache_key("再见", "model_a", "p1"));
@@ -3097,7 +3097,7 @@ mod tests {
     }
 
     #[test]
-    fn 配置默认值与worker键() {
+    fn config_defaults_and_worker_key() {
         let d = VoiceConfig::default();
         assert!(!d.enabled);
         assert_eq!(d.speak_content, "summary");
@@ -3135,7 +3135,7 @@ mod tests {
     /// 引擎字段归一：仅 "kokoro" 保留，空/未知/缺省一律 audio8（默认引擎是
     /// 原始方案）；worker 键与缓存标签按引擎隔离
     #[test]
-    fn 引擎归一与kokoro_worker键缓存标签() {
+    fn engine_normalize_and_kokoro_worker_key_cache_tag() {
         assert_eq!(normalize_engine(""), ENGINE_AUDIO8);
         assert_eq!(normalize_engine("audio8"), ENGINE_AUDIO8);
         assert_eq!(normalize_engine("bogus"), ENGINE_AUDIO8);
@@ -3178,7 +3178,7 @@ mod tests {
     /// Kokoro 模型目录布局：config.json + 权重（v1_0 优先）+ voices/*.pt；
     /// 空目录/未填写给出可行动的提示
     #[test]
-    fn kokoro模型目录校验() {
+    fn kokoro_model_dir_validation() {
         let tmp = std::env::temp_dir().join("dsh-tts-kokoro-layout");
         let _ = std::fs::remove_dir_all(&tmp);
         // 未填写
@@ -3208,7 +3208,7 @@ mod tests {
     /// Kokoro 音色扫描：文件名去扩展名即 id、按字节序排序、首字母映射语言；
     /// 目录不存在返回空
     #[test]
-    fn kokoro音色扫描与语言标签() {
+    fn kokoro_voice_scan_and_lang_label() {
         assert_eq!(kokoro_lang_label('z'), "中文");
         assert_eq!(kokoro_lang_label('a'), "英语（美）");
         assert_eq!(kokoro_lang_label('x'), "未知语言");
@@ -3233,7 +3233,7 @@ mod tests {
     /// 自动探测候选扫描：按顺序取第一个合法目录；布局不合法的候选跳过；
     /// 全部不合法返回 None
     #[test]
-    fn kokoro自动探测候选扫描() {
+    fn kokoro_autodetect_candidate_scan() {
         let tmp = std::env::temp_dir().join("dsh-tts-kokoro-autodetect");
         let _ = std::fs::remove_dir_all(&tmp);
         // 候选 1 存在但布局不完整（缺权重）→ 跳过；候选 2 完整 → 命中
@@ -3263,7 +3263,7 @@ mod tests {
     }
 
     #[test]
-    fn 配置反序列化容忍缺省字段() {
+    fn config_deserialize_tolerates_missing_fields() {
         let cfg: VoiceConfig =
             serde_json::from_str(r#"{"enabled":true,"repoDir":"D:/a","modelDir":"D:/m"}"#)
                 .expect("缺 speakContent/pythonCmd 时用 default");
@@ -3292,7 +3292,7 @@ mod tests {
     /// 参考音频缓存指纹：换参考（路径/原文/文件内容）必须换缓存；无参考
     /// （custom 空对）时 cache_tag 与 params_tag 相同
     #[test]
-    fn 参考音频进缓存键() {
+    fn reference_audio_enters_cache_key() {
         let tmp = std::env::temp_dir().join("dsh-tts-ref-tag");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -3339,7 +3339,7 @@ mod tests {
     /// 音色归一化：内置 id 原样生效；空/未知 id 回退默认音色（默认项被移除时
     /// 回退排序第一个）；custom 走用户参考音频；目录无音频走模型原生默认
     #[test]
-    fn 音色选择归一化() {
+    fn voice_selection_normalization() {
         let voices = vec![fake_voice("晚晚"), fake_voice("知夏"), fake_voice("云舒")];
         let mut c = VoiceConfig::default();
         match effective_voice(&c, &voices) {
@@ -3391,7 +3391,7 @@ mod tests {
     /// 拒绝（拒绝会让启动回灌整体失败）；custom 时参考音频成对且文件存在；
     /// 空值（老配置兼容）原样通过
     #[test]
-    fn 音色校验与自愈归一() {
+    fn voice_validation_self_heals_to_default() {
         let tmp = std::env::temp_dir().join("dsh-tts-voice-validate");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -3442,7 +3442,7 @@ mod tests {
     /// 名排序；同名 .txt 提供参考原文，缺省用内置语料；非音频/子目录忽略；
     /// 目录不存在返回空
     #[test]
-    fn 音色目录扫描_文件名即音色() {
+    fn voice_dir_scan_filename_is_voice_id() {
         let tmp = std::env::temp_dir().join("dsh-tts-voice-scan");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -3479,7 +3479,7 @@ mod tests {
 
     /// 默认音色：DEFAULT_VOICE_ID 优先，缺失时回退排序第一个；空目录无默认
     #[test]
-    fn 默认音色回退() {
+    fn default_voice_fallback() {
         let voices = vec![fake_voice("知夏"), fake_voice(DEFAULT_VOICE_ID)];
         assert_eq!(
             default_voice(&voices).map(|v| v.id.as_str()),
@@ -3495,7 +3495,7 @@ mod tests {
 
     /// 参考音频成对校验：只填一边拒绝；文件不存在拒绝；成对且存在通过
     #[test]
-    fn 参考音频配置必须成对且文件存在() {
+    fn reference_audio_config_requires_pair_and_existing_file() {
         let tmp = std::env::temp_dir().join("dsh-tts-ref-validate");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -3521,7 +3521,7 @@ mod tests {
     }
 
     #[test]
-    fn 合成参数校验_边界() {
+    fn generate_params_validation_bounds() {
         let mut c = VoiceConfig::default();
         assert!(validate_generate_params(&c).is_ok(), "默认参数应合法");
         c.temperature = 0.0;
@@ -3542,7 +3542,7 @@ mod tests {
     }
 
     #[test]
-    fn generate参数序列化为python侧字段名() {
+    fn generate_params_serialize_to_python_field_names() {
         // 锁定 JSONL wire 格式：worker 按 snake_case 取值，误加 rename_all 会静默失效
         let v = serde_json::to_value(GenerateParams::from(&VoiceConfig::default())).unwrap();
         // temperature/top_p 按 f32 精度写 JSONL（0.8f32 → 0.800000011920929，
@@ -3632,7 +3632,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 桩worker协议联调_握手生成与错误回传() {
+    fn stub_worker_protocol_handshake_generate_and_error() {
         let Some(python) = python_for_tests() else {
             eprintln!("skip: 测试机无可用 Python");
             return;
@@ -3674,7 +3674,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 桩worker致命错误置死并快速失败() {
+    fn stub_worker_fatal_marks_dead_and_fails_fast() {
         let Some(python) = python_for_tests() else {
             eprintln!("skip: 测试机无可用 Python");
             return;
@@ -3696,7 +3696,7 @@ for line in sys.stdin:
     /// 期望值用 Path::join 拼，避免把 Windows 反斜杠写进断言（Linux CI 上
     /// Path::join 产出的是正斜杠，写死反斜杠会让用例恒红）。
     #[test]
-    fn worker子进程覆盖HF缓存环境变量() {
+    fn worker_child_overrides_hf_cache_env() {
         let mut cmd = Command::new("python");
         let hf = Path::new("D:\\anywhere\\hf");
         apply_worker_env(&mut cmd, hf);
@@ -3718,7 +3718,7 @@ for line in sys.stdin:
     /// worker 子进程必须收到覆盖后的应用内缓存路径，而不是继承的坏值。
     /// 桩把子进程里的 HF_MODULES_CACHE 原样回传，Rust 侧断言其等于 hf_home/modules。
     #[test]
-    fn 桩worker继承的HF缓存环境被覆盖() {
+    fn stub_worker_inherited_hf_cache_env_is_overridden() {
         let Some(python) = python_for_tests() else {
             eprintln!("skip: 测试机无可用 Python");
             return;
@@ -3776,7 +3776,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 缓存LRU超出上限删最旧() {
+    fn cache_lru_evicts_oldest_over_limit() {
         use std::time::{Duration as D, SystemTime};
         let dir = std::env::temp_dir().join("dsh-tts-lru");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3840,7 +3840,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 模型目录校验_两种布局不混用() {
+    fn model_dir_validation_two_layouts_not_mixed() {
         let tmp = std::env::temp_dir().join("dsh-tts-layout");
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -3901,7 +3901,7 @@ for line in sys.stdin:
 
     /// 真实模型目录回归（机器相关）：设 DSH_TTS_MODEL_DIR 才启用
     #[test]
-    fn 本机真实模型目录自检() {
+    fn real_model_dir_env_check() {
         let Some(dir) = std::env::var("DSH_TTS_MODEL_DIR")
             .ok()
             .filter(|d| !d.is_empty())
@@ -3918,7 +3918,7 @@ for line in sys.stdin:
     /// CPU 版单步全装；torchaudio 是参考音频重采样的必需依赖（Audio8 官方
     /// requirements 含它），两路都必须包含；中文系统（本机默认）追加华为云镜像
     #[test]
-    fn 安装步骤_cuda与cpu布局() {
+    fn install_steps_cuda_and_cpu_layouts() {
         let cuda = torch_install_steps(true);
         assert_eq!(cuda.len(), 2);
         let t = cuda[0].join(" ");
@@ -3940,7 +3940,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 命令引用_含空格才加引号() {
+    fn quote_command_only_when_spaced() {
         assert_eq!(quote_if_spaced("python"), "python");
         assert_eq!(
             quote_if_spaced("C:\\Program Files\\py\\python.exe"),
@@ -3965,7 +3965,7 @@ for line in sys.stdin:
 
     /// 追加超上限按时间倒序截断，最新保留；同毫秒按 id 兜底稳定
     #[test]
-    fn 历史LRU超出上限删最旧() {
+    fn history_lru_evicts_oldest_over_limit() {
         let mut records: Vec<HistoryRecord> = Vec::new();
         for i in 0..(HISTORY_KEEP + 5) {
             merge_history(
@@ -3982,7 +3982,7 @@ for line in sys.stdin:
 
     /// 历史记录 wire 格式锁定：camelCase（前端 VoiceHistoryEntry 同形）
     #[test]
-    fn 历史记录序列化为camelCase() {
+    fn history_record_serializes_to_camel_case() {
         let v = serde_json::to_value(hist_rec("x", 1234)).unwrap();
         assert_eq!(v["id"], json!("x"));
         assert_eq!(v["tsMs"], json!(1234));
@@ -3997,7 +3997,7 @@ for line in sys.stdin:
     /// append → list → delete 全链路（用 AppHandle 的 tts_dir 依赖真实 app，
     /// 这里只测纯函数可覆盖的部分：记录读取容错坏行）
     #[test]
-    fn 历史文件读取跳过坏行() {
+    fn history_file_read_skips_bad_lines() {
         let tmp = std::env::temp_dir().join("dsh-tts-history");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -4020,7 +4020,7 @@ for line in sys.stdin:
     /// 停止服务：杀掉驻留 worker 并置为未运行；幂等（无 worker 再停返回 false）。
     /// 期间若 worker 已死亡（如空闲自退），停止返回 false 但仍清理队列。
     #[test]
-    fn 停止服务_杀worker并置未运行() {
+    fn stop_service_kills_worker_and_marks_stopped() {
         let Some(python) = python_for_tests() else {
             eprintln!("skip: 测试机无可用 Python");
             return;
@@ -4048,7 +4048,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn rodio播放wav出声() {
+    fn rodio_plays_wav_audible() {
         let p = std::env::temp_dir().join("dsh-tts-beep.wav");
         write_beep_wav(&p);
         match play_wav(&p) {
@@ -4069,7 +4069,7 @@ for line in sys.stdin:
     /// 平台能力探测与前端 tts_supported 命令同源：Windows / macOS 恒为 true，
     /// 其余平台恒为 false（前端据此隐藏语音播报入口）
     #[test]
-    fn 语音播报能力探测_按平台() {
+    fn voice_capability_probe_per_platform() {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         assert!(voice_supported());
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -4081,14 +4081,14 @@ for line in sys.stdin:
     // -----------------------------------------------------------------------
 
     #[test]
-    fn 长文本分段_短文本单段与空文本() {
+    fn split_text_short_and_empty() {
         assert_eq!(split_text_chunks("你好世界", 120), vec!["你好世界"]);
         assert!(split_text_chunks("  \n ", 120).is_empty());
         assert!(split_text_chunks("", 120).is_empty());
     }
 
     #[test]
-    fn 长文本分段_按句贪心组段() {
+    fn split_text_greedy_by_sentence() {
         let text = "第一句。第二句！第三句？";
         // 全放得下 → 单段
         assert_eq!(split_text_chunks(text, 120), vec![text]);
@@ -4100,7 +4100,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 长文本分段_换行是句边界() {
+    fn split_text_newline_is_boundary() {
         // 换行与句末标点同为句边界；上限内的短句仍贪心并入同一段（段内不留换行）
         assert_eq!(
             split_text_chunks("第一行\n第二行", 120),
@@ -4114,7 +4114,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn 长文本分段_超长句次级标点优先与硬切() {
+    fn split_text_long_sentence_secondary_punct_then_hard_cut() {
         // 无句末标点、只有逗号：160 字超长，在窗口内最后一个逗号后切
         let text = "啊，".repeat(80);
         let chunks = split_text_chunks(&text, 120);
@@ -4131,7 +4131,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn wav拼接_保留样本并垫段间静音() {
+    fn concat_wav_keeps_samples_and_pads_gap_silence() {
         use hound::{SampleFormat, WavSpec, WavWriter};
         let tmp = std::env::temp_dir().join("dsh-tts-concat");
         let _ = std::fs::remove_dir_all(&tmp);
