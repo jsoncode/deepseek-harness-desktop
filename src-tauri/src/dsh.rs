@@ -784,7 +784,12 @@ fn apply_model_proxy_env(app: &AppHandle, state: &AppState, cmd: &mut Command) {
         }
         Err(e) => {
             state.model_proxy_injected.store(false, Ordering::SeqCst);
-            emit_log(app, WEB_LOG_EVENT, "error", &format!("模型代理启动失败: {e}"));
+            emit_log(
+                app,
+                WEB_LOG_EVENT,
+                "error",
+                &format!("模型代理启动失败: {e}"),
+            );
             return;
         }
     };
@@ -809,10 +814,7 @@ fn apply_model_proxy_env(app: &AppHandle, state: &AppState, cmd: &mut Command) {
     // 我们只写 http:// 上游，不会触发 Node 启动期对非法 scheme 的退出。
     cmd.env("NODE_USE_ENV_PROXY", "1");
     state.model_proxy_injected.store(true, Ordering::SeqCst);
-    let fallback = plan
-        .fallback
-        .clone()
-        .unwrap_or_else(|| "直连".to_string());
+    let fallback = plan.fallback.clone().unwrap_or_else(|| "直连".to_string());
     emit_log(
         app,
         WEB_LOG_EVENT,

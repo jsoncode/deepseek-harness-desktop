@@ -196,7 +196,12 @@ impl ModelProxyRuntime {
 
     /// 热更新规则与上游（不重启代理线程）。`upstream = None` 表示当前配置给不出
     /// 可用上游（改成直连 / SOCKS / 字段不完整），命中规则的流量随后落到兜底上游。
-    fn update(&self, rules: Vec<ModelProxyRule>, upstream: Option<String>, fallback: Option<String>) {
+    fn update(
+        &self,
+        rules: Vec<ModelProxyRule>,
+        upstream: Option<String>,
+        fallback: Option<String>,
+    ) {
         if let Ok(mut w) = self.rules.write() {
             *w = rules;
         }
@@ -262,8 +267,8 @@ pub fn load_config(app: &AppHandle) -> ModelProxyConfig {
 pub fn save_config(app: &AppHandle, config: &ModelProxyConfig) -> Result<ModelProxyConfig, String> {
     let path = config_path(app)?;
     let normalized = config.normalized();
-    let text =
-        serde_json::to_string_pretty(&normalized).map_err(|e| format!("序列化模型代理配置失败: {e}"))?;
+    let text = serde_json::to_string_pretty(&normalized)
+        .map_err(|e| format!("序列化模型代理配置失败: {e}"))?;
     fs::write(&path, text).map_err(|e| format!("保存模型代理配置失败: {e}"))?;
     Ok(normalized)
 }
@@ -386,13 +391,13 @@ pub fn no_proxy_env() -> String {
 /// 走到本代理；直接照抄会让开关变成哑的。对应的语义由 {@link fallback_from_env}
 /// 承接 —— 那时非命中流量按直连处理。
 fn merge_no_proxy(user: Option<&str>) -> String {
-    let mut entries: Vec<String> = vec![
-        "localhost".into(),
-        "127.0.0.1".into(),
-        "::1".into(),
-    ];
+    let mut entries: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     if let Some(user) = user {
-        for entry in user.split([',', ' ']).map(str::trim).filter(|e| !e.is_empty()) {
+        for entry in user
+            .split([',', ' '])
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
             if entry == "*" {
                 continue;
             }
@@ -407,10 +412,15 @@ fn merge_no_proxy(user: Option<&str>) -> String {
 /// 判断配置是否可用：`(上游 URL, 不可用原因)`
 fn upstream_of(config: &crate::proxy_config::ProxyConfig) -> (Option<String>, Option<String>) {
     match config.kind.as_str() {
-        "direct" => (None, Some("「安装代理」当前为直接连接，模型代理没有可用的代理地址".into())),
+        "direct" => (
+            None,
+            Some("「安装代理」当前为直接连接，模型代理没有可用的代理地址".into()),
+        ),
         "socks4" | "socks5" => (
             None,
-            Some("模型代理暂不支持 SOCKS 上游，请在「安装代理」里改用 http / https 代理地址".into()),
+            Some(
+                "模型代理暂不支持 SOCKS 上游，请在「安装代理」里改用 http / https 代理地址".into(),
+            ),
         ),
         "http" | "https" => {
             let host = config.host.trim();
@@ -467,17 +477,18 @@ pub fn ensure_running(
             runtime.stop();
         }
         if let Some(reason) = reason {
-            crate::dsh::emit_log(app, crate::dsh::WEB_LOG_EVENT, "system", &format!("模型代理未启用：{reason}"));
+            crate::dsh::emit_log(
+                app,
+                crate::dsh::WEB_LOG_EVENT,
+                "system",
+                &format!("模型代理未启用：{reason}"),
+            );
         }
         return Ok(None);
     };
     let rules = load_config(app).rules;
     if let Some(runtime) = guard.as_ref() {
-        runtime.update(
-            rules,
-            Some(plan.upstream.clone()),
-            plan.fallback.clone(),
-        );
+        runtime.update(rules, Some(plan.upstream.clone()), plan.fallback.clone());
         return Ok(Some((runtime.port(), plan)));
     }
     let runtime = start(rules, plan.clone())?;
@@ -588,7 +599,11 @@ impl Shared {
     fn matched(&self, host: &str) -> bool {
         self.rules
             .read()
-            .map(|rules| rules.iter().any(|r| r.enabled && rule_matches(&r.host, host)))
+            .map(|rules| {
+                rules
+                    .iter()
+                    .any(|r| r.enabled && rule_matches(&r.host, host))
+            })
             .unwrap_or(false)
     }
 
@@ -753,7 +768,14 @@ fn target_host_port(method: &str, target: &str) -> Option<(String, u16)> {
         .strip_prefix("http://")
         .or_else(|| target.strip_prefix("https://"))?;
     let authority = rest.split(['/', '?', '#']).next()?;
-    let (host, port) = split_host_port(authority, if target.starts_with("https://") { 443 } else { 80 })?;
+    let (host, port) = split_host_port(
+        authority,
+        if target.starts_with("https://") {
+            443
+        } else {
+            80
+        },
+    )?;
     Some((host, port))
 }
 
@@ -772,23 +794,19 @@ fn split_host_port(authority: &str, default_port: u16) -> Option<(String, u16)> 
         return Some((host.to_string(), port));
     }
     match authority.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.contains(':') => match port.parse::<u16>() {
-            Ok(port) => Some((host.to_string(), port)),
-            Err(_) => None,
-        },
+        Some((host, port)) if !host.is_empty() && !port.contains(':') => {
+            match port.parse::<u16>() {
+                Ok(port) => Some((host.to_string(), port)),
+                Err(_) => None,
+            }
+        }
         _ => Some((authority.to_string(), default_port)),
     }
 }
 
 /// 经上游代理建隧道：向上游发同样的 CONNECT / 请求行，透传响应。
 /// 返回已连上的上游连接；双向透传由调用方在记完日志后发起。
-fn open_via_proxy(
-    upstream: &str,
-    host: &str,
-    port: u16,
-    method: &str,
-    head: &str,
-) -> Opened {
+fn open_via_proxy(upstream: &str, host: &str, port: u16, method: &str, head: &str) -> Opened {
     let (proxy_host, proxy_port) = match upstream_host_port(upstream) {
         Ok(pair) => pair,
         Err(e) => return Opened::Failed(e),
@@ -800,9 +818,7 @@ fn open_via_proxy(
     let mut server = match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
         Ok(server) => server,
         Err(e) => {
-            return Opened::Failed(format!(
-                "连接上游代理 {proxy_host}:{proxy_port} 失败: {e}"
-            ))
+            return Opened::Failed(format!("连接上游代理 {proxy_host}:{proxy_port} 失败: {e}"))
         }
     };
     let request = if method == "CONNECT" {
@@ -1056,7 +1072,10 @@ fn dsh_home() -> Option<PathBuf> {
 fn url_host(url: &str) -> Option<String> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = normalize_host(authority);
     if host.is_empty() {
         None
@@ -1286,7 +1305,11 @@ mod tests {
     }
 
     #[test]
-    fn extracts_host_from_endpoints() {        assert_eq!(url_host("https://api.openai.com/v1"), Some("api.openai.com".into()));
+    fn extracts_host_from_endpoints() {
+        assert_eq!(
+            url_host("https://api.openai.com/v1"),
+            Some("api.openai.com".into())
+        );
         assert_eq!(
             url_host("https://generativelanguage.googleapis.com"),
             Some("generativelanguage.googleapis.com".into())
@@ -1310,7 +1333,10 @@ mod tests {
             proxy_from_env_text("ALL_PROXY=http://p:1"),
             Some("http://p:1".into())
         );
-        assert_eq!(proxy_from_env_text("HTTPS_PROXY=socks5://127.0.0.1:1080"), None);
+        assert_eq!(
+            proxy_from_env_text("HTTPS_PROXY=socks5://127.0.0.1:1080"),
+            None
+        );
         assert_eq!(proxy_from_env_text(""), None);
     }
 

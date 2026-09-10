@@ -63,6 +63,12 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # 格式守卫：仓库曾有 37 处 rustfmt 漂移（dsh.rs / model_proxy.rs / tts.rs），
+      # 用 --check 拦住新漂移，避免格式改动混进功能提交
+      - name: Rust format check (rustfmt)
+        working-directory: src-tauri
+        run: cargo fmt --check
+
       - name: Frontend build (tsc + vite)
         run: pnpm build
 
