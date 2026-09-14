@@ -257,9 +257,15 @@ jobs:
       # 没有模板配置项，只能在 build 之后改。脚本把改名后的绝对路径写进
       # $GITHUB_OUTPUT，下面 upload 直接用这份列表 —— 不再用 glob 匹配，避免改名与
       # glob 漂移导致漏传。
+      #
+      # 注意：三个平台的改名步骤必须用**不同的 step id**。同一个 job 内 step id
+      # 必须唯一，三个都写 `id: tag` 会让整个 workflow 文件被判为非法——不是这一
+      # 个 job 失败，而是 GitHub 直接拒绝解析、一个 job 都不创建（v1.0.3 / v1.0.4
+      # 就是这么丢的：标签在、Release 没有）。只有 Linux build 不受影响照常绿，
+      # 看起来像"只发 Linux"。
       - name: Tag platform into asset names (Windows)
         if: matrix.platform == 'windows-latest'
-        id: tag
+        id: tag-win
         shell: bash
         run: |
           node scripts/tag-release-assets.mjs \
@@ -273,7 +279,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: ${{ steps.tag.outputs.files }}
+          files: ${{ steps.tag-win.outputs.files }}
           # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
           # 宁可让发版红掉，也不要静默少传一个安装包。
           fail_on_unmatched_files: true
@@ -291,7 +297,7 @@ jobs:
       # 统一归一成 `_macos_arm64` / `_macos_x64`，同一台机器上两个包名不再打架。
       - name: Tag platform into asset names (macOS)
         if: matrix.platform == 'macos-latest'
-        id: tag
+        id: tag-mac
         shell: bash
         run: |
           node scripts/tag-release-assets.mjs \
@@ -306,14 +312,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: ${{ steps.tag.outputs.files }}
+          files: ${{ steps.tag-mac.outputs.files }}
           # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
           # 宁可让发版红掉，也不要静默少传一个安装包。
           fail_on_unmatched_files: true
 
       - name: Tag platform into asset names (Linux)
         if: matrix.platform == 'ubuntu-22.04'
-        id: tag
+        id: tag-linux
         shell: bash
         run: |
           node scripts/tag-release-assets.mjs \
@@ -329,7 +335,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: ${{ steps.tag.outputs.files }}
+          files: ${{ steps.tag-linux.outputs.files }}
           # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
           # 宁可让发版红掉，也不要静默少传一个安装包。
           fail_on_unmatched_files: true
