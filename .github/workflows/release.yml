@@ -340,6 +340,76 @@ jobs:
           # 宁可让发版红掉，也不要静默少传一个安装包。
           fail_on_unmatched_files: true
 
+      # AppImage 变薄：不要打包 WebKitGTK / GTK / GStreamer 这套栈，改用宿主自己的。
+      #
+      # 为什么必须这么做：linuxdeploy 会把 ldd 到的依赖（含按**构建机 Ubuntu 22.04** 编的
+      # libwebkit2gtk-4.1）一起打进包，但**不打 libEGL/Mesa**——于是那份 WebKit 运行时撞的是
+      # 宿主 Mesa。Mesa ≥ 26.1 会拒绝它调 eglGetPlatformDisplay() 的方式，直接
+      #   Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+      # 窗口建得起来、WebView 一帧不画（主窗口黑、设置窗口白，取决于各自窗口底色）。
+      # 失败点在 EGL display 创建，**早于** WebKit 读取任何渲染开关，所以任何环境变量都无效
+      # （WEBKIT_DISABLE_DMABUF_RENDERER / WEBKIT_DISABLE_COMPOSITING_MODE /
+      #  LIBGL_ALWAYS_SOFTWARE / EGL_PLATFORM=surfaceless 均实测无效）。
+      #
+      # 也不能反过来「把 Mesa/EGL 也打进去」：GPU 用户空间驱动必须匹配用户的**内核与显卡**，
+      # 把构建时的 Mesa 冻进包，等于在比它新的显卡上直接不可用，滚动发行版永远追不上。
+      #
+      # 所以方向是相反的——**打包更少**：让 AppImage 只带应用自己（和 .deb 内容一致），
+      # 图形栈全部走宿主，宿主那份天生配着宿主 Mesa 编译（这正是「源码构建能用」的原因）。
+      # 落到的效果与 .deb 的依赖契约一致：宿主需有 webkit2gtk-4.1 / gtk3 / libayatana-appindicator。
+      # 这一步纯自动化，用户不用做任何事。
+      #
+      # Tauri 的 AppImageConfig 只有 bundleMediaFramework / files，没有排除库的开关
+      # （linuxdeploy 虽有 --exclude-library，Tauri 不透传），因此只能在这里后处理：
+      # 解包 → 清掉包内所有 .so 与插件目录 → 用 appimagetool 重新打回 AppImage。
+      - name: Slim the AppImage (use host WebKitGTK/GTK/GStreamer)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          AI=$(ls src-tauri/target/release/bundle/appimage/*.AppImage)
+          echo "原始 AppImage: $AI ($(du -h "$AI" | cut -f1))"
+
+          sudo apt-get install -y squashfs-tools
+          curl -fsSL -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+
+          # 解包到临时目录：--appimage-extract 固定产出 ./squashfs-root
+          rm -rf squashfs-root
+          "$AI" --appimage-extract >/dev/null
+          # 清掉包内所有共享库与插件目录（应用二进制与资源保留）
+          rm -rf squashfs-root/usr/lib/*.so* \
+                 squashfs-root/usr/lib/gstreamer-1.0 \
+                 squashfs-root/usr/lib/webkit2gtk-4.1
+
+          # 变薄成功的硬断言：不该再有任何 .so，"薄"才是修复本身
+          if ls squashfs-root/usr/lib/*.so* >/dev/null 2>&1; then
+            echo "::error::AppImage 里仍有打包的共享库，变薄没生效（下面这些库仍会让宿主 Mesa 报 EGL 错）"
+            ls squashfs-root/usr/lib/ | head -40
+            exit 1
+          fi
+          test -x "squashfs-root/AppRun" || { echo "::error::AppRun 丢失"; exit 1; }
+          ls squashfs-root/*.desktop >/dev/null 2>&1 || { echo "::error::AppDir 根缺 .desktop"; exit 1; }
+
+          # APPIMAGE_EXTRACT_AND_RUN=1：runner 上 FUSE 不可靠（tauri 调 linuxdeploy 时同样这么做），
+          # 不设会直接 "fuse: device not found"
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 /tmp/appimagetool squashfs-root /tmp/slim.AppImage >/dev/null
+          test -s /tmp/slim.AppImage || { echo "::error::重新打包失败"; exit 1; }
+          chmod +x /tmp/slim.AppImage
+
+          # 重新打包后再验一次：runtime 与 squashfs 都得是好的
+          rm -rf /tmp/verify && mkdir -p /tmp/verify && cd /tmp/verify
+          /tmp/slim.AppImage --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun || { echo "::error::重打包后的 AppImage 解不出 AppRun"; exit 1; }
+          if ls squashfs-root/usr/lib/*.so* >/dev/null 2>&1; then
+            echo "::error::重打包后又出现共享库"; exit 1
+          fi
+          cd "$GITHUB_WORKSPACE"
+
+          mv /tmp/slim.AppImage "$AI"
+          echo "变薄完成: $AI ($(du -h "$AI" | cut -f1))"
+
       # 校验文件名里的兼容下限没说谎：实测二进制引用到的最高 GLIBC 符号版本。
       # 构建机固定在 ubuntu-22.04（glibc 2.35），正常情况下实测就是 2.35；一旦有人
       # 换了 runner 或引入需要更新 glibc 的依赖，这里会红——否则用户会照着一个

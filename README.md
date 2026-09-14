@@ -65,28 +65,72 @@
 > 兼容下限由发布流水线里的 `Verify glibc floor` 步骤**实测二进制引用的最高 GLIBC 符号版本**校验：
 > 一旦构建基线变动导致实际下限超过 `2.35`，流水线会直接失败，不会让文件名说谎。
 
-#### 黑屏 / 打不开？
+#### 黑屏 / 打不开？（AppImage + 新 Mesa，已知上游问题）
 
-Wayland 会话下（KDE / GNOME 的默认会话），WebKitGTK 的 DMA-BUF 渲染器在部分 GPU + Mesa 组合上
-画不出第一帧，表现就是**窗口起来了、标题栏也在，但内容整片全黑**。应用已在 Wayland 下默认关掉
-该渲染器（见 `src-tauri/src/lib.rs` 的 `apply_webkit_env_defaults`）。若仍然黑屏，请从**终端**启动排查
-—— 黑屏几乎不会是「应用逻辑问题」，stderr 会直接说明属于哪一类：
+**AppImage 版在 Mesa ≥ 26.1 的系统上会黑屏**（CachyOS / Arch / Fedora 等滚动发行版），
+终端报：
+
+```
+Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+```
+
+**根因**：AppImage 里打包了按 Ubuntu 构建的 `libwebkit2gtk-4.1.so.0`，但**没有打包自己的
+`libEGL`** —— 于是这份 WebKit 是跑在**你系统的 Mesa** 上的。Mesa ≥ 26.1 会拒绝它调用
+`eglGetPlatformDisplay()` 的方式，直接 `EGL_BAD_PARAMETER`。窗口本身建得起来（所以主窗口是
+黑的、设置窗口是白的，取决于窗口背景色），但 WebView 一帧都画不出来。
+
+失败点在 **EGL display 创建**，**早于** WebKit 读取任何渲染路径开关。因此：
+
+> ⚠️ **所有环境变量对这个黑屏都无效** —— `WEBKIT_DISABLE_DMABUF_RENDERER`、
+> `WEBKIT_DISABLE_COMPOSITING_MODE`、`LIBGL_ALWAYS_SOFTWARE=1`、`EGL_PLATFORM=surfaceless`
+> 全都试过，行为完全一致（这正是失败时机在它们之前决定的）。别再在这条路上花时间。
+
+同一台机器上**从源码构建是正常的**，因为发行版自带的 WebKit 是配着它自己的 Mesa 编译的。
+
+**已修复（打包侧）**：自 **v1.0.7** 起，AppImage 不再打包 WebKitGTK / GTK / GStreamer
+（发布流水线里加了 `Slim the AppImage` 步骤），改用**宿主自己那套** —— 宿主那份天生配着
+宿主的 Mesa 编译。**用户不需要做任何事**，也不会有任何手动步骤。代价是宿主需自备
+`webkit2gtk-4.1` 与 `libayatana-appindicator`（和 `.deb` / `.rpm` 的依赖契约一致）。
+
+<details>
+<summary>仍在 v1.0.6 及更早版本上的临时办法（供验证用）</summary>
+
+⚠️ 下面所有操作都只发生在 **AppImage 自己解包出来的副本**（`~/下载/squashfs-root`）里，
+**不会动你系统上的任何文件**；不想要了 `rm -rf squashfs-root` 即可，重跑 AppImage 也不受影响。
+
+只删 WebKit 不够：系统的 WebKit 会去配包里那份 Ubuntu 的 GStreamer，接着报
+`undefined symbol: gst_debug_log_id`（两套 GStreamer 混用）。要**整条栈一起换**：
 
 ```bash
-# 先分清「WebKit 没画」与「前端卡在启动画面」：后者能看到转圈 +「正在启动服务…」
-WEBKIT_DISABLE_DMABUF_RENDERER=1 ./dhd_x.y.z_linux_glibc2.35_x86_64.AppImage 2>&1 | tee dhd.log
-# 装完 .deb / .rpm 的：WEBKIT_DISABLE_DMABUF_RENDERER=1 deepseek-harness-desktop 2>&1 | tee dhd.log
+sudo pacman -S webkit2gtk-4.1 libayatana-appindicator     # 前提
+./dhd_1.0.6_linux_glibc2.35_x86_64.AppImage --appimage-extract
+for f in squashfs-root/usr/lib/*.so*; do
+  b=$(basename "$f")
+  [ -e "/usr/lib/$b" ] && rm -f "$f"
+done
+rm -rf squashfs-root/usr/lib/gstreamer-1.0 squashfs-root/usr/lib/webkit2gtk-4.1
+./squashfs-root/AppRun
 ```
+
+另一条确认可行的路：从源码构建（`pnpm install && pnpm tauri:build`）。
+
+</details>
+
+
+
+> 上游 tauri 的「真正可移植 AppImage」修复仍在开放状态（[tauri#12491](https://github.com/tauri-apps/tauri/pull/12491) 未合并），
+> 所以**升级 tauri 拿不到这个修复**，必须自己处理打包。
+
+<details>
+<summary>其他黑屏类别（与本问题无关时再看）</summary>
 
 | 现象 / 日志关键词 | 含义 | 处理 |
 | --- | --- | --- |
-| 加上这个变量就能显示了 | DMA-BUF 渲染器 / 合成问题 | 已默认规避；想换回 GPU 合成可用 `WEBKIT_DISABLE_DMABUF_RENDERER=0` |
-| 窗口黑，但**看得到转圈和「正在启动服务…」** | WebKit 正常，是前端 bundle 或 dsh 服务没起来 | 属应用层问题，把 `dhd.log` 发出来 |
-| `Failed to create GBM buffer` / `libEGL` / `MESA` | GPU 驱动栈 | 升级 Mesa，或用上面的变量走共享内存路径 |
+| 窗口黑，但**看得到转圈和「正在启动服务…」** | WebKit 正常，是前端 bundle 或 dsh 服务没起来 | 属应用层问题，请附日志反馈 |
+| `Failed to get GBM device` | DMA-BUF 渲染器 | 试 `WEBKIT_DISABLE_DMABUF_RENDERER=1` |
 | `bwrap` / sandbox 相关 | WebKit 沙箱起不来 | 安装 bubblewrap（Arch：`sudo pacman -S bubblewrap`） |
 
-> 最后手段——**仅用于确认沙箱是不是元凶，不要长期这么跑**：
-> `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`。它关掉的是 Web 进程沙箱，属安全降级。
+</details>
 
 > **Linux 安装说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，
 > 用 `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 装即可，依赖会一起拉齐；
