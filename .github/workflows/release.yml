@@ -16,6 +16,19 @@
 #   Linux:   .deb + .rpm + .AppImage（在 ubuntu-22.04 上构建：glibc 向下兼容，
 #            22.04 产物可在 22.04 及更新的发行版上运行；24.04 构建会抬高门槛）
 #
+# 产物命名：`dhd_{version}_{platform}_{arch}[-setup].{ext}`，由 scripts/tag-release-assets.mjs
+# 在 build 之后改名（tauri 产物名写死在打包器里、没有模板可配）。产品名统一缩成 `dhd`：
+# 短、且不含空格 —— 带空格时 GitHub 会把空格替换成 `.`，下载页上的名字和本地产物名对不上，
+# 命令行里也得到处加引号。脚本里的 --name 是这个前缀的唯一来源（默认 dhd）。
+#   dhd_1.0.2_windows_x64-setup.exe
+#   dhd_1.0.2_macos_arm64.dmg / dhd_1.0.2_macos_arm64.pkg
+#   dhd_1.0.2_macos_x64.dmg   / dhd_1.0.2_macos_x64.pkg
+#   dhd_1.0.2_linux_amd64.deb
+#   dhd_1.0.2_linux_x86_64.rpm
+#   dhd_1.0.2_linux_amd64.AppImage
+# 注意：**只改产物文件名**。tauri.conf.json 的 productName 不动，安装后的应用名、.app、
+# 窗口标题与卸载项仍然叫 DeepSeek Harness Desktop。
+#
 # Usage:
 #   git tag v0.1.0
 #   git push origin v0.1.0
@@ -84,6 +97,7 @@ jobs:
     needs: quality
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -132,10 +146,13 @@ jobs:
           DeepSeek Harness 本地服务桌面启动器：一键安装/启动 dsh web，并在内嵌预览页中打开本地服务。
 
           ### 下载
-          - **Windows**：\`.exe\`（NSIS 安装包）
-          - **macOS Apple Silicon**：\`aarch64\` \`.dmg\` + \`.pkg\`
-          - **macOS Intel**：\`x86_64\` \`.dmg\` + \`.pkg\`
-          - **Linux x86_64**：\`.deb\`（Debian/Ubuntu）、\`.rpm\`（Fedora/openSUSE）、\`.AppImage\`（免安装）
+          文件名统一为 \`dhd_{版本}_{平台}_{架构}.{后缀}\`（dhd = DeepSeek Harness Desktop，装完还是这个名字），按平台对号入座：
+
+          - **Windows**：\`dhd_${TAG#v}_windows_x64-setup.exe\`（NSIS 安装包）
+          - **macOS Apple Silicon**：\`dhd_${TAG#v}_macos_arm64.dmg\` + \`dhd_${TAG#v}_macos_arm64.pkg\`
+          - **macOS Intel**：\`dhd_${TAG#v}_macos_x64.dmg\` + \`dhd_${TAG#v}_macos_x64.pkg\`
+          - **Linux x86_64**：\`dhd_${TAG#v}_linux_amd64.deb\`（Debian/Ubuntu）、\`dhd_${TAG#v}_linux_x86_64.rpm\`
+            （Fedora/openSUSE）、\`dhd_${TAG#v}_linux_amd64.AppImage\`（免安装）
 
           > macOS 未签名时，首次打开需在「系统设置 → 隐私与安全性」中允许，或右键选择「打开」。
           > Windows 若提示 SmartScreen，请选择「更多信息 → 仍要运行」。
@@ -166,18 +183,22 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
+            asset_platform: windows
             args: '--bundles nsis'
           - platform: macos-latest
             rust_target: aarch64-apple-darwin
             arch: arm64
+            asset_platform: macos
             args: '--target aarch64-apple-darwin --bundles app,dmg'
           - platform: macos-latest
             rust_target: x86_64-apple-darwin
             arch: x64
+            asset_platform: macos
             args: '--target x86_64-apple-darwin --bundles app,dmg'
           # Linux：固定 22.04 基线（见文件头 Outputs 说明）。AppImage 依赖
           # linuxdeploy/AppImage runtime 的在线下载，GitHub 托管 runner 可直接取到。
           - platform: ubuntu-22.04
+            asset_platform: linux
             args: '--bundles deb,rpm,appimage'
 
     runs-on: ${{ matrix.platform }}
@@ -231,40 +252,84 @@ jobs:
       - name: Build bundles
         run: pnpm tauri build ${{ matrix.args }}
 
+      # 产物改名：把 tauri 的产物名换成发布名 `dhd_{版本}_{平台}_{架构}`（如
+      # dhd_1.0.2_windows_x64-setup.exe）。tauri-bundler 的名字写死在打包器里、
+      # 没有模板配置项，只能在 build 之后改。脚本把改名后的绝对路径写进
+      # $GITHUB_OUTPUT，下面 upload 直接用这份列表 —— 不再用 glob 匹配，避免改名与
+      # glob 漂移导致漏传。
+      - name: Tag platform into asset names (Windows)
+        if: matrix.platform == 'windows-latest'
+        id: tag
+        shell: bash
+        run: |
+          node scripts/tag-release-assets.mjs \
+            --platform '${{ matrix.asset_platform }}' \
+            --version '${{ needs.create-release.outputs.version }}' \
+            --github-output files \
+            src-tauri/target/release/bundle/nsis
+
       - name: Upload NSIS installer (Windows)
         if: matrix.platform == 'windows-latest'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
+          files: ${{ steps.tag.outputs.files }}
+          # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
+          # 宁可让发版红掉，也不要静默少传一个安装包。
+          fail_on_unmatched_files: true
 
       - name: Build .pkg installer (macOS)
         if: matrix.platform == 'macos-latest'
         shell: bash
         run: |
-          VERSION="${{ needs.create-release.outputs.tag }}"
-          VERSION="${VERSION#v}"
+          VERSION="${{ needs.create-release.outputs.version }}"
           APP="src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/DeepSeek Harness Desktop.app"
           pkgbuild --component "$APP" --install-location /Applications \
             "DeepSeek Harness Desktop_${VERSION}_${{ matrix.arch }}.pkg"
-          echo "PKG_FILE=DeepSeek Harness Desktop_${VERSION}_${{ matrix.arch }}.pkg" >> "$GITHUB_ENV"
+
+      # dmg（tauri 产出 aarch64/x86_64）与 pkg（pkgbuild 产出 arm64/x64）在这里
+      # 统一归一成 `_macos_arm64` / `_macos_x64`，同一台机器上两个包名不再打架。
+      - name: Tag platform into asset names (macOS)
+        if: matrix.platform == 'macos-latest'
+        id: tag
+        shell: bash
+        run: |
+          node scripts/tag-release-assets.mjs \
+            --platform '${{ matrix.asset_platform }}' \
+            --version '${{ needs.create-release.outputs.version }}' \
+            --github-output files \
+            "src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg" \
+            "DeepSeek Harness Desktop_${{ needs.create-release.outputs.version }}_${{ matrix.arch }}.pkg"
 
       - name: Upload DMG + PKG (macOS)
         if: matrix.platform == 'macos-latest'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: |
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
-            ${{ env.PKG_FILE }}
+          files: ${{ steps.tag.outputs.files }}
+          # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
+          # 宁可让发版红掉，也不要静默少传一个安装包。
+          fail_on_unmatched_files: true
+
+      - name: Tag platform into asset names (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        id: tag
+        shell: bash
+        run: |
+          node scripts/tag-release-assets.mjs \
+            --platform '${{ matrix.asset_platform }}' \
+            --version '${{ needs.create-release.outputs.version }}' \
+            --github-output files \
+            src-tauri/target/release/bundle/deb \
+            src-tauri/target/release/bundle/rpm \
+            src-tauri/target/release/bundle/appimage
 
       - name: Upload Linux bundles (deb / rpm / AppImage)
         if: matrix.platform == 'ubuntu-22.04'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
-          files: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          files: ${{ steps.tag.outputs.files }}
+          # 列表由上面的改名步骤产出、且已校验文件存在；真出现未匹配就说明资产漏了，
+          # 宁可让发版红掉，也不要静默少传一个安装包。
+          fail_on_unmatched_files: true

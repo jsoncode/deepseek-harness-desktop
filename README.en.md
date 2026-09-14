@@ -26,6 +26,30 @@ For new users: grab the installer for your platform and double-click to install 
 
 > All installers are published on [GitHub Releases](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) — pick the latest release and download the package for your platform.
 
+> **Asset naming**: `dhd_{version}_{platform}_{arch}.{ext}` — `dhd` is short for DeepSeek Harness
+> Desktop, stamped in by the release pipeline after bundling (Tauri hard-codes bundle names, there
+> is no template hook). The short form keeps names compact and **space-free**: GitHub rewrites
+> spaces in uploaded asset names to `.`, which makes the download page disagree with the local
+> bundle name and forces quoting everywhere on the command line. The right download is obvious at
+> a glance:
+>
+> ```
+> dhd_1.0.2_windows_x64-setup.exe
+> dhd_1.0.2_macos_arm64.dmg   / dhd_1.0.2_macos_arm64.pkg
+> dhd_1.0.2_macos_x64.dmg     / dhd_1.0.2_macos_x64.pkg
+> dhd_1.0.2_linux_amd64.deb
+> dhd_1.0.2_linux_x86_64.rpm
+> dhd_1.0.2_linux_amd64.AppImage
+> ```
+>
+> > **Only the filenames changed**: the installed app, the macOS `.app`, the window title and the
+> > uninstall entry are still **DeepSeek Harness Desktop**. `dhd` appears only on the installer you
+> > download.
+>
+> macOS `.dmg` and `.pkg` both use `arm64` / `x64` (Tauri names the dmg `aarch64` / `x86_64`,
+> so the release step normalises them). Linux keeps each ecosystem's own arch token:
+> `amd64` for `.deb` / `.AppImage` and `x86_64` for `.rpm`.
+
 > **Linux notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
 > (AppIndicator) dependencies, so `sudo apt install ./xxx.deb` (or
 > `sudo dnf install ./xxx.rpm`) pulls everything in. The AppImage does **not** bundle
@@ -33,8 +57,8 @@ For new users: grab the installer for your platform and double-click to install 
 > from the distribution (Ubuntu 22.04+ / Debian 12+ ship both by default):
 
 ```bash
-chmod +x "DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
-./"DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
+chmod +x dhd_x.y.z_linux_amd64.AppImage
+./dhd_x.y.z_linux_amd64.AppImage
 ```
 
 > 💡 **Lightweight**: sizes above are measured on v0.1.2 (Windows 2.02 MB, macOS 2.91–3.01 MB) and vary slightly per release — every installer is only 2–3 MB, so downloads and installs take seconds.
@@ -150,7 +174,7 @@ pnpm release minor         # bump minor and release
 pnpm release:tag-only      # tag and push the current version only
 ```
 
-The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage on the `ubuntu-22.04` baseline) and append artifacts to the same release.
+The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage on the `ubuntu-22.04` baseline) → rename every bundle to `dhd_{version}_{platform}_{arch}` via `scripts/tag-release-assets.mjs` and append it to that same release. Tauri hard-codes bundle filenames with no template hook, so the rename has to happen after the build and before the upload; the script writes the renamed paths to `$GITHUB_OUTPUT` and the upload steps consume that list instead of a glob, so a naming/glob drift can never silently drop an asset.
 
 A second workflow, **Linux build** (`.github/workflows/linux-build.yml`), runs
 `cargo fmt --check` + `cargo test` + bundling whenever `src-tauri/**`, `src/**` and
@@ -184,7 +208,7 @@ src-tauri/          Rust backend
   src/dsh.rs        Tool resolution, process management, log pump, URL probing
   src/preview.rs    Preview hosting (child webview on Win/macOS; standalone window on Linux)
   capabilities/     Permission declarations
-scripts/            setup-nsis (offline NSIS) / sync-version / release-tag / verify-*
+scripts/            setup-nsis (offline NSIS) / sync-version / release-tag / tag-release-assets (release renaming) / verify-*
 libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll)
 ```
 

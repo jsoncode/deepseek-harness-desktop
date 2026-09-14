@@ -26,14 +26,35 @@
 
 > 所有安装包统一发布在 [GitHub Releases](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest)，选择最新版本、下载对应平台的安装包即可。
 
+> **产物命名**：`dhd_{版本}_{平台}_{架构}.{后缀}` —— `dhd` 是 DeepSeek Harness Desktop 的缩写，
+> 由发版流水线在打包后统一改名（tauri 把产物名写死在打包器里、没有模板可配）。用缩写是为了短、
+> 且**不含空格**：名字里带空格时 GitHub 会把空格换成 `.`，下载页上的名字和本地打包产物对不上，
+> 命令行里也得到处加引号。看一眼文件名就知道该下哪个包：
+>
+> ```
+> dhd_1.0.2_windows_x64-setup.exe
+> dhd_1.0.2_macos_arm64.dmg   / dhd_1.0.2_macos_arm64.pkg
+> dhd_1.0.2_macos_x64.dmg     / dhd_1.0.2_macos_x64.pkg
+> dhd_1.0.2_linux_amd64.deb
+> dhd_1.0.2_linux_x86_64.rpm
+> dhd_1.0.2_linux_amd64.AppImage
+> ```
+>
+> > **只改了文件名**：安装后的应用、macOS 的 `.app`、窗口标题与卸载项仍然是
+> > **DeepSeek Harness Desktop**，`dhd` 只出现在下载到的安装包名字上。
+>
+> macOS 的 `.dmg` 与 `.pkg` 统一用 `arm64` / `x64`（tauri 的 dmg 原生产物名是 `aarch64` / `x86_64`，
+> 两者不一致，已在发版时归一）；Linux 的 `.deb` / `.AppImage` 用 `amd64`、`.rpm` 用 `x86_64`——
+> 各自沿用包管理器的既定架构词汇。
+
 > **Linux 说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，用
 > `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 安装即可；AppImage **不打包系统库**，
 > 需要发行版已提供 `libwebkit2gtk-4.1-0` 与 `libayatana-appindicator3-1`（Ubuntu 22.04+ /
 > Debian 12+ 仓库默认就有）：
 
 ```bash
-chmod +x "DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
-./"DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
+chmod +x dhd_x.y.z_linux_amd64.AppImage
+./dhd_x.y.z_linux_amd64.AppImage
 ```
 
 > 💡 **轻量**：以上为 v0.1.2 实测大小（Windows 2.02 MB、macOS 2.91~3.01 MB），各版本略有差异——全平台安装包都只有 2~3 MB，秒级下载、秒级安装。
@@ -150,7 +171,7 @@ pnpm release minor         # bump minor 并发布
 pnpm release:tag-only      # 仅给当前版本打标签推送（不 bump）
 ```
 
-流水线（`.github/workflows/release.yml`）：质量门禁（tsc + vite 构建 + Rust 测试）→ 创建**已发布**的正式 Release → 矩阵构建（Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage，基线 `ubuntu-22.04`）并把安装包追加到同一 Release。
+流水线（`.github/workflows/release.yml`）：质量门禁（tsc + vite 构建 + Rust 测试）→ 创建**已发布**的正式 Release → 矩阵构建（Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage，基线 `ubuntu-22.04`）→ 用 `scripts/tag-release-assets.mjs` 把产物统一改名为 `dhd_{版本}_{平台}_{架构}` 后追加到同一 Release。tauri 的产物名写死在打包器里、没有模板可配，所以改名只能放在 build 之后、上传之前；改名后的路径由脚本写进 `$GITHUB_OUTPUT`，上传步骤直接消费这份列表而不是 glob，避免改名与 glob 漂移导致漏传。
 
 另有一条 **Linux 构建验证**流水线（`.github/workflows/linux-build.yml`）：只要改动
 `src-tauri/**`、`src/**` 等路径就自动跑 `cargo fmt --check` + `cargo test` + 打包，
@@ -185,7 +206,7 @@ src-tauri/          Rust 后端
   src/preview.rs    预览承载（Win/macOS 子 webview；Linux 独立预览窗口）
   src/session_events.rs  服务事件订阅（含 Cookie 换取）
   capabilities/     权限声明
-scripts/            setup-nsis（离线 NSIS）/ sync-version / release-tag / verify-*
+scripts/            setup-nsis（离线 NSIS）/ sync-version / release-tag / tag-release-assets（发版改名）/ verify-*
 libs/               离线 NSIS 工具链（nsis-3.11.zip + nsis_tauri_utils.dll）
 ```
 
