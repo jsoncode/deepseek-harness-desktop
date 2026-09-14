@@ -410,29 +410,29 @@ fn merge_no_proxy(user: Option<&str>) -> String {
 }
 
 /// 判断配置是否可用：`(上游 URL, 不可用原因)`
+///
+/// 上游取自设置页「安装代理」：是否启用只看那边的开关，代理类型由地址的协议前缀决定。
 fn upstream_of(config: &crate::proxy_config::ProxyConfig) -> (Option<String>, Option<String>) {
-    match config.kind.as_str() {
-        "direct" => (
-            None,
-            Some("「安装代理」当前为直接连接，模型代理没有可用的代理地址".into()),
-        ),
-        "socks4" | "socks5" => (
-            None,
-            Some(
-                "模型代理暂不支持 SOCKS 上游，请在「安装代理」里改用 http / https 代理地址".into(),
-            ),
-        ),
-        "http" | "https" => {
-            let host = config.host.trim();
-            match config.port {
-                Some(port) if port > 0 && !host.is_empty() => {
-                    (Some(format!("http://{host}:{port}")), None)
-                }
-                _ => (None, Some("「安装代理」缺少服务器地址或端口".into())),
-            }
+    let endpoint = match config.endpoint() {
+        Ok(Some(endpoint)) => endpoint,
+        Ok(None) => {
+            return (
+                None,
+                Some("「安装代理」的代理开关未开启，模型代理没有可用的代理地址".into()),
+            )
         }
-        other => (None, Some(format!("未知的代理类型：{other}"))),
+        Err(err) => return (None, Some(format!("「安装代理」的代理地址不可用：{err}"))),
+    };
+    if !endpoint.is_http_like() {
+        return (
+            None,
+            Some(format!(
+                "模型代理暂不支持 {} 上游，请在「安装代理」里改用 http / https 代理地址",
+                endpoint.scheme.to_uppercase()
+            )),
+        );
     }
+    (Some(endpoint.url()), None)
 }
 
 /// 计算当前应有的路由方案：`Ok(None)` = 不必启用（返回原因）

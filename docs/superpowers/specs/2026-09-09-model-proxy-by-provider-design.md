@@ -35,7 +35,7 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
 
 | 目标域名 | 去向 |
 |---|---|
-| 命中「启用代理」的规则 | 「安装代理」里配置的代理 |
+| 命中「启用代理」的规则 | 开关开启时走「安装代理」里配置的代理地址，否则按「其余域名」处理 |
 | 其余域名 | 壳进程启动时捕获的原有代理环境变量；没有则直连 |
 | loopback（`localhost` / `127.0.0.0/8` / `::1` / `0.0.0.0`） | 永远直连 |
 
@@ -58,9 +58,10 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
    （「立即重启」/「稍后」），确认后只发 `request_service_restart` 请求，
    实际重启由主窗口的 `ServiceRestartHandler` 执行（复用底部导航条的同一套状态机）；
    卡片内同时保留一行常驻提示与「重启服务」按钮。
-   **改「安装代理」地址不需要重启**：代理线程就地换上游（`reload_upstream`）。
-2. **上游**：取自「安装代理」配置（`proxy.json`）。`http` / `https` 按明文 CONNECT 使用；
-   `socks4` / `socks5` 不支持，设置页显示原因且不启用；`direct` 时同样给出原因。
+   **改「安装代理」的开关或地址不需要重启**：代理线程就地换上游（`reload_upstream`）。
+2. **上游**：取自「安装代理」配置（`proxy.json`）——**是否启用只看那里的开关**，代理类型
+   由地址的协议前缀决定。`http` / `https` 按明文 CONNECT 使用；`socks4` / `socks5`
+   不支持，设置页显示原因且不启用；开关关闭时同样给出原因。
 3. **非命中流量**：壳进程启动时捕获 `https_proxy` → `HTTPS_PROXY` → `http_proxy` →
    `HTTP_PROXY` → `all_proxy` → `ALL_PROXY` 中第一个 `http(s)://` 值作为兜底上游；
    进程环境里都没有时再读 `$DSH_HOME/.env`（宿主启动器同样的兜底顺序），
@@ -86,10 +87,10 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
 | `src-tauri/src/model_proxy.rs` | 规则配置（`model_proxy.json`）读写与规范化；loopback 路由代理（CONNECT + 绝对 URI 转发、双向透传、握手透传）；按域名判定去向；请求日志；提供方发现；4 个 Tauri 命令 |
 | `src-tauri/src/dsh.rs` | `AppState` 增加 `model_proxy` / `model_proxy_injected`；`apply_model_proxy_env` 在 `spawn` 前注入环境变量；`stop_dsh_web` / `stop_dsh_web_sync` 回收代理 |
 | `src-tauri/src/lib.rs` | 注册 `get_model_proxy_status` / `set_model_proxy_config` / `clear_model_proxy_log` / `discover_model_proxy_hosts` / `request_service_restart` |
-| `src-tauri/src/proxy_config.rs` | 保存「安装代理」后就地热更新运行中的路由代理上游（不必重启） |
+| `src-tauri/src/proxy_config.rs` | 「安装代理」配置：开关 + 代理地址（协议前缀即代理类型，地址解析成 scheme/host/port），旧 `{kind, host, port}` 格式反序列化时自动迁移；保存后就地热更新运行中的路由代理上游（不必重启） |
 | `src/lib/modelProviders.ts` | pi-ai 提供方端点目录（候选行） |
 | `src/lib/tauri.ts` | `ModelProxyRule` / `ModelProxyStatus` / `DiscoveredHost` 类型与 API，`restartRequest` 事件 |
-| `src/components/settings/ProxySettings.tsx` | 「模型代理（按提供方）」卡片：规则表（开关 / 删除 / 最近请求）、添加提供方（下拉**选中即添加**，自定义域名走输入框 + 「添加」）、状态与上游提示、**需重启时的弹框提醒**、最近请求日志 |
+| `src/components/settings/ProxySettings.tsx` | 「安装代理」卡片：**启用代理开关** + 单个代理地址输入框（默认 `http://127.0.0.1:7890`，代理类型只在地址下方注释里提示）；「模型代理（按提供方）」卡片：规则表（开关 / 删除 / 最近请求）、添加提供方（下拉**选中即添加**，自定义域名走输入框 + 「添加」）、状态与上游提示、**需重启时的弹框提醒**、最近请求日志 |
 | `src/components/PluginManagerPanel.tsx` | 插件安装 / 更新 / 卸载成功后弹框提示「需要重启服务才能生效」（「立即重启」/「稍后」），失败仍走 message |
 | `src/components/ServiceRestartHandler.tsx` | 主窗口侧的跨窗口重启执行者：收到 `dsh://restart-request` 后走与底部导航条相同的 stop → 预置日志标题 → startFlow 流程 |
 
@@ -111,7 +112,7 @@ xxx + 启用代理），并能看到宿主实际发出的模型请求。
 |---|---|---|
 | 模型代理启用 / 停用（`restartRequired` 由 false 变 true） | 弹框「需要重启服务才能启用/停用模型代理」+ 立即重启 / 稍后 | 规则保存的返回值 |
 | 安装插件 / 更新插件 / 卸载插件成功（退出码 0） | 弹框「插件已安装/更新/卸载，需要重启服务才能生效」+ 立即重启 / 稍后 | 插件操作 running → false |
-| 只改「安装代理」地址 | 无弹框 | 运行中的路由代理已就地换上游 |
+| 只改「安装代理」的开关或地址 | 无弹框 | 运行中的路由代理已就地换上游 |
 | 单条提供方规则开关 | 无弹框 | 规则热更新 |
 
 设置窗口的弹框不自己重启服务，只调用 `request_service_restart` 发 `dsh://restart-request`

@@ -1,17 +1,5 @@
 import { ApiOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
-import {
-  Button,
-  Empty,
-  Input,
-  InputNumber,
-  Segmented,
-  Select,
-  Switch,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-} from "antd";
+import { Button, Empty, Input, Select, Switch, Table, Tag, Tooltip, Typography } from "antd";
 import AntApp from "antd/es/app";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -21,21 +9,15 @@ import {
   type ModelProxyRule,
   type ModelProxyStatus,
   type ProxyConfig,
-  type ProxyKind,
 } from "../../lib/tauri";
 import { MODEL_PROVIDERS, findModelProvider } from "../../lib/modelProviders";
 
 const { Text } = Typography;
 
-const KIND_OPTIONS: { label: string; value: ProxyKind }[] = [
-  { label: "直接连接", value: "direct" },
-  { label: "HTTP", value: "http" },
-  { label: "HTTPS", value: "https" },
-  { label: "SOCKS4", value: "socks4" },
-  { label: "SOCKS5", value: "socks5" },
-];
+/** 默认代理地址：本机代理软件最常见的 http 端口（与 Rust `DEFAULT_PROXY_URL` 一致） */
+const DEFAULT_PROXY_URL = "http://127.0.0.1:7890";
 
-const DEFAULT_CONFIG: ProxyConfig = { kind: "direct", host: "", port: null };
+const DEFAULT_CONFIG: ProxyConfig = { enabled: false, url: DEFAULT_PROXY_URL };
 
 /** 域名规范化（与 Rust `model_proxy::normalize_host` 同义，用于前端去重/校验） */
 function normalizeHost(raw: string): string {
@@ -53,7 +35,9 @@ function formatTime(ts: number): string {
 /**
  * 代理设置（设置页区块），两张卡片：
  *
- * 1. 「安装代理」：为「安装 node / pnpm / dsh、插件安装」配置临时代理，仅注入安装类子进程。
+ * 1. 「安装代理」：一个开关 + 一个代理地址，为「安装 node / pnpm / dsh、插件安装」配置
+ *    临时代理，仅注入安装类子进程。**是否走代理只看开关**（关掉即直连，与地址是否填写
+ *    无关）；代理类型不再单列，由地址的协议前缀决定。
  * 2. 「模型代理（按提供方）」：按提供方域名决定宿主模型请求走代理还是直连。宿主自身的
  *    出站代理是「每进程一个答案」的全局 dispatcher，没有按域名的入口，所以这里在壳内
  *    起一个 loopback 路由代理，启动 `dsh web` 时把 HTTP(S)_PROXY 指向它，由它逐条判定
@@ -64,7 +48,7 @@ export default function ProxySettings() {
   const { message, modal } = AntApp.useApp();
   const [config, setConfig] = useState<ProxyConfig>(DEFAULT_CONFIG);
   const [saving, setSaving] = useState(false);
-  const isDirect = config.kind === "direct";
+  const proxyOn = config.enabled;
 
   const [status, setStatus] = useState<ModelProxyStatus | null>(null);
   const [discovered, setDiscovered] = useState<DiscoveredHost[]>([]);
@@ -108,27 +92,21 @@ export default function ProxySettings() {
   }, [status?.running, refresh]);
 
   const saveInstallProxy = async () => {
-    if (!isDirect) {
-      if (!config.host.trim()) {
-        message.warning("请填写代理服务器地址（IP 或域名）");
-        return;
-      }
-      if (!config.port || config.port < 1 || config.port > 65535) {
-        message.warning("请填写 1-65535 之间的代理端口");
-        return;
-      }
+    // 只做「非空」这一层拦截，地址格式由 Rust 侧 `parse_endpoint` 校验并回传原因
+    if (proxyOn && !config.url.trim()) {
+      message.warning(`请填写代理地址，如 ${DEFAULT_PROXY_URL}`);
+      return;
     }
     setSaving(true);
     try {
-      await api.setProxyConfig({
-        kind: config.kind,
-        host: config.host.trim(),
-        port: isDirect ? null : config.port,
-      });
+      // 关掉开关时可以留空：回落到默认地址，与 Rust 侧的规范化保持一致
+      const url = config.url.trim() || DEFAULT_PROXY_URL;
+      await api.setProxyConfig({ enabled: config.enabled, url });
+      setConfig({ enabled: config.enabled, url });
       message.success(
-        isDirect
-          ? "已保存：安装将直接连接（不使用代理）"
-          : "已保存：后续安装 node/pnpm/dsh 与插件时将走该代理",
+        proxyOn
+          ? `已保存：后续安装 node/pnpm/dsh 与插件时将走 ${url}`
+          : "已保存：安装将直接连接（代理开关已关闭）",
       );
       // 模型代理的上游就取自这份配置，保存后立即刷新状态
       await refresh();
@@ -259,50 +237,33 @@ export default function ProxySettings() {
           <div className="settings-row">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <ApiOutlined style={{ color: "var(--text-2)" }} />
-              代理类型
+              启用代理
             </span>
-            <Segmented<ProxyKind>
-              options={KIND_OPTIONS}
-              value={config.kind}
-              onChange={(kind) => setConfig((c) => ({ ...c, kind }))}
+            <Switch
+              checked={config.enabled}
+              onChange={(enabled) => setConfig((c) => ({ ...c, enabled }))}
             />
           </div>
-          <p className="settings-desc">
-            选择非「直接连接」的类型后，请填写代理服务器地址与端口。
-          </p>
           <div className="settings-row">
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <ApiOutlined style={{ color: "var(--text-2)" }} />
-              服务器地址
+              代理地址
             </span>
             <Input
-              style={{ width: 240 }}
-              placeholder="IP 或域名，如 127.0.0.1"
-              disabled={isDirect}
-              value={config.host}
-              onChange={(e) => setConfig((c) => ({ ...c, host: e.target.value }))}
-            />
-          </div>
-          <div className="settings-row">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <ApiOutlined style={{ color: "var(--text-2)" }} />
-              代理端口
-            </span>
-            <InputNumber
-              style={{ width: 160 }}
-              placeholder="1-65535"
-              min={1}
-              max={65535}
-              precision={0}
-              disabled={isDirect}
-              value={config.port}
-              onChange={(v) => setConfig((c) => ({ ...c, port: v ?? null }))}
+              style={{ width: 300 }}
+              placeholder={DEFAULT_PROXY_URL}
+              disabled={!proxyOn}
+              value={config.url}
+              onChange={(e) => setConfig((c) => ({ ...c, url: e.target.value }))}
+              onPressEnter={() => void saveInstallProxy()}
             />
           </div>
           <p className="settings-desc">
             <Text type="secondary" style={{ fontSize: 12 }}>
-              提示：npm/pnpm 仅支持 http/https 代理；选择 SOCKS4/SOCKS5 时，不支持
-              socks 的安装工具可能无法加速或失败，此时建议改用代理软件提供的 http 端口。
+              格式为 <Text code>协议://主机:端口</Text>；协议即代理类型，支持 http（默认）/
+              https / socks4 / socks5，例如 <Text code>{DEFAULT_PROXY_URL}</Text>。
+              npm/pnpm 仅支持 http/https 代理，写 socks4/socks5 时，不支持 socks
+              的安装工具可能无法加速或失败，此时建议改用代理软件提供的 http 端口。
             </Text>
           </p>
           <Button type="primary" loading={saving} onClick={() => void saveInstallProxy()}>
@@ -320,7 +281,7 @@ export default function ProxySettings() {
           <p className="settings-desc">
             宿主的模型请求统一由它自己的全局网络策略发出，没有按域名的配置入口。
             这里在应用内起一个只监听 127.0.0.1 的路由代理，启动服务时把宿主指向它，
-            再由它逐条决定：命中下方规则的域名走上面的「安装代理」，
+            再由它逐条决定：命中下方规则的域名走上面的「安装代理」（需先在那儿打开代理开关），
             其余域名保持原样（沿用系统里已有的代理环境变量，没有则直连）。
             只做隧道转发，不解密 TLS，因此只能看到域名与去向。
           </p>

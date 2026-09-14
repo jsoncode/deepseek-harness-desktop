@@ -65,15 +65,14 @@ export interface CredentialsCheck {
 }
 
 /** 安装临时代理配置：与 Rust `proxy_config::ProxyConfig` 同形。
- *  kind = "direct" 时不注入任何代理；非 direct 时仅在安装类子进程
- *  （node/pnpm/dsh 安装、插件操作）环境变量里生效，不改系统/npm 配置 */
-export type ProxyKind = "direct" | "http" | "https" | "socks4" | "socks5";
+ *  是否启用只看 `enabled` 开关（关掉即直连，与地址是否填写无关）；开启后仅在安装类
+ *  子进程（node/pnpm/dsh 安装、插件操作）环境变量里生效，不改系统/npm 配置。
+ *  代理类型由 `url` 的协议前缀决定（http / https / socks4 / socks5）。 */
 export interface ProxyConfig {
-  kind: ProxyKind;
-  /** 代理服务器 IP / 域名（direct 时忽略） */
-  host: string;
-  /** 代理端口 1-65535（direct 时忽略） */
-  port: number | null;
+  /** 代理开关 */
+  enabled: boolean;
+  /** 代理地址，形如 http://127.0.0.1:7890 */
+  url: string;
 }
 
 /** 一条模型代理规则：按提供方域名决定是否走代理 */
