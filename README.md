@@ -28,7 +28,8 @@
 
 > **Linux 说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，用
 > `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 安装即可；AppImage **不打包系统库**，
-> 需要发行版已提供 `libwebkit2gtk-4.1-0`（Ubuntu 22.04+ / Debian 12+ 仓库默认就有）：
+> 需要发行版已提供 `libwebkit2gtk-4.1-0` 与 `libayatana-appindicator3-1`（Ubuntu 22.04+ /
+> Debian 12+ 仓库默认就有）：
 
 ```bash
 chmod +x "DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
@@ -89,9 +90,14 @@ sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
   libayatana-appindicator3-dev librsvg2-dev patchelf file wget rpm
 ```
 
-> `libappindicator3-dev` 与 `libayatana-appindicator3-dev` 二者装的都是托盘（AppIndicator）
-> 的 pkg-config 名，不同发行版上名字不同；两个都装最稳。`rpm` 提供 `rpmbuild`，
-> 只有需要打 `.rpm` 时才必须。
+> ⚠️ `libappindicator3-dev` 与 `libayatana-appindicator3-dev` 在 Ubuntu 22.04 上**互相冲突**，
+> 同时安装会让 apt 直接失败（`E: Unable to correct problems, you have held broken packages`），
+> **只装 ayatana 那一个**。
+>
+> 构建期真正链接的是 `libwebkit2gtk-4.1`（webkit2gtk-sys）与 `libgtk-3`（gtk-sys）；AppIndicator
+> 是**运行时**依赖——`libappindicator-sys` 用 `libloading` 在运行时 dlopen
+> `libayatana-appindicator3.so.1`（回退 `libappindicator3.so.1`），构建期不查 pkg-config。
+> `rpm` 提供 `rpmbuild`，只有需要打 `.rpm` 时才必须。
 
 ### 开发运行
 
@@ -188,7 +194,7 @@ libs/               离线 NSIS 工具链（nsis-3.11.zip + nsis_tauri_utils.dll
 - `dsh web` 默认监听 `127.0.0.1:3080`（正式版）；应用通过解析其 stdout 的 `http://...` 行 + TCP 探活确认服务就绪。
 - 新版宿主带进程 token 的浏览器认证（root 换 `SameSite=Strict` Cookie）在打包正式版里无法靠 DOM iframe 直接完成——壳顶层为 `tauri://localhost`，iframe 相对它是**跨站**，Strict Cookie 永不发回。因此预览一律以**顶层文档**加载宿主地址：Windows/macOS 用同窗口的原生子 webview（按内容区坐标悬浮在壳界面之上），**Linux 用独立预览窗口**——Tauri 在 Linux 把子 webview 交给窗口的 `GtkBox` 承载，wry 的坐标定位只在 `GtkFixed` 父容器里生效，无法悬浮，故改用独立窗口承载，认证与桥接语义完全相同（见 `src-tauri/src/preview.rs` 文件头）。非 Tauri 浏览器预览（开发模式顶层为 `http://localhost`）退回 iframe 直接内嵌，必要时把宿主 host 改写为 `localhost` 保持同站。
 - 调试构建完全隔离：app id `com.deepseek.harness.desktop.dev`、服务端口 6088、UI 端口 6089。
-- **Linux 已知差异**：① 预览在独立窗口（如上）；② 系统通知走 D-Bus（notify-rust），但**没有「打开对话」按钮**，点击通知无法直达会话（该能力依赖 Windows 的 toast 激活回调）；③ 语音播报不可用（rodio 的 Linux 后端要拉 ALSA，本期未纳入依赖，前端会自动隐藏入口）；④ Node.js 不能一键安装（装系统包需要 sudo），启动页会按发行版给出安装命令；⑤ 端口占用检查优先用 `lsof`，缺失时自动退回 `/proc` 反查（不依赖外部命令）。
+- **Linux 已知差异**：① 预览在独立窗口（如上）；② 系统通知走 D-Bus（notify-rust），但**没有「打开对话」按钮**，点击通知无法直达会话（该能力依赖 Windows 的 toast 激活回调）；③ 语音播报不可用（rodio 的 Linux 后端要拉 ALSA，本期未纳入依赖，前端会自动隐藏入口）；④ Node.js 不能一键安装（装系统包需要 sudo），启动页会按发行版给出安装命令；⑤ 端口占用检查优先用 `lsof`，缺失时自动退回 `/proc` 反查（不依赖外部命令）；⑥ 托盘需要系统的 `libayatana-appindicator3-1`（.deb/.rpm 已自动声明）——**真缺了也不会启动失败**：应用会跳过托盘照常运行，此时关闭主窗口即退出（`.AppImage` 用户请自行确认装了该库）。
 
 ## 📖 其他语言
 

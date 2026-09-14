@@ -11,11 +11,16 @@ mod settings;
 mod tts;
 
 use dsh::AppState;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, RunEvent, WindowEvent,
 };
+
+/// 托盘是否创建成功（Linux 缺 AppIndicator 动态库时可能失败，见 setup 内的说明）。
+/// 关闭主窗口时据此决定「隐藏到托盘继续跑」还是「随窗口退出」。
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -250,7 +255,31 @@ pub fn run() {
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
-            tray_builder.build(app)?;
+            // 托盘创建允许失败：Linux 上缺 libayatana-appindicator3.so.1 时，
+            // libappindicator-sys 的 `Lazy<Library>` 会**直接 panic**（它用 libloading
+            // 运行时 dlopen，链接期不报错），把整个应用拖死在启动阶段。这里捕获后
+            // 按「没有托盘」继续跑，并在关闭主窗口时改成真正退出（见 on_window_event）
+            // ——否则窗口会被隐藏进一个不存在的托盘里，用户只剩杀进程一条路。
+            // 该 panic 发生在 dlopen 阶段、尚未触碰 GTK，捕获后继续是安全的。
+            TRAY_READY.store(
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tray_builder.build(app)
+                })) {
+                    Ok(Ok(_)) => true,
+                    Ok(Err(e)) => {
+                        eprintln!("[tray] 创建托盘失败（应用继续运行，但没有托盘菜单）: {e}");
+                        false
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "[tray] 创建托盘时发生 panic（Linux 通常是没有 AppIndicator 动态库），\
+                             已跳过托盘：请安装 libayatana-appindicator3-1 后重启以恢复托盘"
+                        );
+                        false
+                    }
+                },
+                Ordering::SeqCst,
+            );
 
             // 收养上次会话遗留的孤儿服务：如安装新版本时安装器强杀了旧应用，
             // dsh web 进程树未被清理、仍占用服务端口，新实例若不接管会导致
@@ -276,8 +305,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // 主窗口关闭 → 隐藏到托盘，服务继续运行（托盘"退出"才真正退出）；
-                // 其他窗口（语音合成工具等独立工具窗口）正常关闭
-                if window.label() == "main" {
+                // 其他窗口（语音合成工具等独立工具窗口）正常关闭。
+                // 托盘没建起来时（见 TRAY_READY）不拦截关闭：Tauri 会在最后一个窗口
+                // 关闭后退出应用，免得窗口消失进一个不存在的托盘。
+                if window.label() == "main" && TRAY_READY.load(Ordering::SeqCst) {
                     api.prevent_close();
                     let _ = window.hide();
                 }

@@ -29,8 +29,8 @@ For new users: grab the installer for your platform and double-click to install 
 > **Linux notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
 > (AppIndicator) dependencies, so `sudo apt install ./xxx.deb` (or
 > `sudo dnf install ./xxx.rpm`) pulls everything in. The AppImage does **not** bundle
-> system libraries and needs `libwebkit2gtk-4.1-0` from the distribution
-> (Ubuntu 22.04+ / Debian 12+ ship it by default):
+> system libraries and needs `libwebkit2gtk-4.1-0` **and** `libayatana-appindicator3-1`
+> from the distribution (Ubuntu 22.04+ / Debian 12+ ship both by default):
 
 ```bash
 chmod +x "DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
@@ -87,9 +87,15 @@ sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
   libayatana-appindicator3-dev librsvg2-dev patchelf file wget rpm
 ```
 
-> `libappindicator3-dev` and `libayatana-appindicator3-dev` both provide the tray
-> (AppIndicator) pkg-config name — the spelling differs per distribution, so install
-> both to be safe. `rpm` provides `rpmbuild` and is only needed for `.rpm` bundles.
+> ⚠️ On Ubuntu 22.04 `libappindicator3-dev` and `libayatana-appindicator3-dev` **conflict**
+> with each other — installing both makes apt fail with
+> `E: Unable to correct problems, you have held broken packages`. Install **only the ayatana one**.
+>
+> The real link-time dependencies are `libwebkit2gtk-4.1` (webkit2gtk-sys) and `libgtk-3`
+> (gtk-sys); AppIndicator is a **runtime** dependency — `libappindicator-sys` dlopens
+> `libayatana-appindicator3.so.1` (falling back to `libappindicator3.so.1`) via `libloading`,
+> so no pkg-config lookup happens at build time. `rpm` provides `rpmbuild` and is only
+> needed for `.rpm` bundles.
 
 ### Run in development
 
@@ -187,7 +193,7 @@ libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll
 - `dsh web` listens on `127.0.0.1:3080` by default (release); the launcher confirms readiness by parsing `http://...` lines from its stdout plus TCP probing.
 - The host's newer process-token browser auth (root request exchanges for a `SameSite=Strict` cookie) cannot be completed by a DOM iframe in a packaged build: the shell origin is `tauri://localhost`, so an iframe is **cross-site** and Strict cookies are never sent back. The preview therefore always loads the host URL as a **top-level document** — a same-window native child webview on Windows/macOS (positioned over the content area), and a **standalone preview window on Linux**, where Tauri hands child webviews to the window's `GtkBox` and wry only honours coordinates inside a `GtkFixed` parent. Both paths share the same auth and bridge semantics (`src-tauri/src/preview.rs`).
 - Debug builds are fully isolated: app id `com.deepseek.harness.desktop.dev`, service port 6088, UI port 6089.
-- **Linux differences**: ① preview runs in a standalone window (above); ② system notifications go through D-Bus (notify-rust) but have **no "Open conversation" button** — click-through only exists on Windows' toast activation callback; ③ voice playback is unavailable (rodio's Linux backend needs ALSA, not part of this release; the UI hides the entry point); ④ Node.js cannot be installed by the app (system packages need sudo) — the launch page prints the per-distribution install command; ⑤ port-occupancy checks prefer `lsof` and fall back to a `/proc` lookup when it is missing.
+- **Linux differences**: ① preview runs in a standalone window (above); ② system notifications go through D-Bus (notify-rust) but have **no "Open conversation" button** — click-through only exists on Windows' toast activation callback; ③ voice playback is unavailable (rodio's Linux backend needs ALSA, not part of this release; the UI hides the entry point); ④ Node.js cannot be installed by the app (system packages need sudo) — the launch page prints the per-distribution install command; ⑤ port-occupancy checks prefer `lsof` and fall back to a `/proc` lookup when it is missing; ⑥ the tray needs the system's `libayatana-appindicator3-1` (declared by the .deb/.rpm) — and if it really is missing the app **still starts**: it skips the tray, and closing the main window then quits the app (AppImage users should make sure that library is present).
 
 ## 📖 Readme in other languages
 

@@ -65,7 +65,20 @@ if !dependencies.is_empty() { writeln!(file, "Depends: {}", dependencies.join(",
 | rpm | `webkit2gtk4.1`、`gtk3`、`libayatana-appindicator-gtk3` |
 
 AppIndicator 是托盘（`tray-icon` feature）的运行时依赖，必须带上；两个大版本包名（ayatana /
-非 ayatana）在各发行版上不同，故 deb 用 ayatana 名、rpm 用 Fedora 名，构建机同时装两个 dev 包。
+非 ayatana）在各发行版上不同，故 deb 用 ayatana 名、rpm 用 Fedora 名。
+
+> **踩坑记录（CI 首个红灯）**：先前在 CI 里 `libappindicator3-dev` 与
+> `libayatana-appindicator3-dev` **两个都装**，Ubuntu 22.04 上直接失败：
+> `libappindicator3-dev : Depends: libappindicator3-1 (= 12.10.1+...)` 且
+> `libayatana-appindicator3-dev : Conflicts: libappindicator3-dev`
+> → `E: Unable to correct problems, you have held broken packages`。**两者互斥，只能装一个**
+> （取 tauri 官方前置文档的 ayatana）。顺带查明：构建期其实**不需要**任何 appindicator dev 包——
+> `libappindicator-sys` 用 `libloading` 在运行时 dlopen `libayatana-appindicator3.so.1`
+> （回退 `libappindicator3.so.1`，再回退无 `.1` 后缀名），没有 build.rs / pkg-config 步骤；
+> 真正链接期依赖只有 webkit2gtk 与 gtk3。因此**运行时**库里有没有它才致命：缺了会让
+> `Lazy<Library>` 在创建托盘时 panic，进而拖死启动。对应处理：① .deb/.rpm 显式声明运行时依赖；
+> ② 托盘创建套 `catch_unwind`，失败就按「没有托盘」继续跑，并让主窗口关闭即退出
+> （否则窗口会被藏进一个不存在的托盘里，用户只能杀进程）。
 
 **AppImage 不打包系统库**（这是 AppImage 的通用限制，不是本项目问题）：目标机仍需
 `libwebkit2gtk-4.1-0`，README 里已写明。

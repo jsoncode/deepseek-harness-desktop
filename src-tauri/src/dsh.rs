@@ -2974,9 +2974,11 @@ fn listener_pids(port: u16) -> Vec<u32> {
                 return pids;
             }
         }
+        // 两条支路都作为块的尾表达式给出返回值（不写 `return`）：块的类型即
+        // `Vec<u32>`，避免依赖发散表达式的类型推断。
         #[cfg(target_os = "linux")]
         {
-            return linux_listener_pids(port);
+            linux_listener_pids(port)
         }
         #[cfg(not(target_os = "linux"))]
         {

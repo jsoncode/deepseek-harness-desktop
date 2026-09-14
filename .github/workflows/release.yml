@@ -61,7 +61,7 @@ jobs:
       - name: Install Linux system deps (tauri)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libgtk-3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libgtk-3-dev
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -206,9 +206,11 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
-      # Linux 打包依赖：webkit2gtk-4.1 / gtk3 / appindicator（托盘）三件套。
-      # appindicator 两个 dev 包都装——libappindicator-sys 的 pkg-config 名在
-      # 不同发行版上分别是 appindicator3-0.1 与 ayatana-appindicator3-0.1。
+      # Linux 打包依赖：webkit2gtk-4.1 / gtk3 为链接期硬依赖；appindicator 只装
+      # **一个** dev 包——libappindicator3-dev 与 libayatana-appindicator3-dev 在
+      # Ubuntu 22.04 上互相 Conflicts，同时装会让 apt 直接失败（E: Unable to correct
+      # problems）。构建期其实不需要它（libappindicator-sys 走 libloading dlopen），
+      # 装上是为了对齐 tauri 官方前置文档。
       # rpm：tauri 的 rpm 打包器需要 rpmbuild（rpm 包提供）。
       - name: Install Linux system deps (bundle)
         if: matrix.platform == 'ubuntu-22.04'
@@ -216,7 +218,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libappindicator3-dev libayatana-appindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev patchelf file wget rpm
 
       - name: Sync version files
