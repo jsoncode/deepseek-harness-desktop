@@ -297,7 +297,7 @@ fn read_dsh_version(dsh: &DshExec) -> Option<String> {
 /// 本进程与后续子进程继承的还是启动时的旧 PATH——不刷新的话，刚装好的
 /// node/pnpm 在同一会话里永远探测不到。前端在每步安装后调用
 /// refresh_search_path 触发本合并。
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, unix))]
 fn merge_into_process_path(new_dirs: Vec<String>) {
     #[cfg(windows)]
     let sep = ';';
@@ -326,15 +326,19 @@ fn merge_into_process_path(new_dirs: Vec<String>) {
     std::env::set_var("PATH", merged.join(&sep_str));
 }
 
-/// macOS：读取登录 shell 的 PATH（结果进程内缓存）。
-/// GUI 应用从 Finder 启动时不经过 .zprofile/.zshrc，/opt/homebrew/bin 等
-/// 目录常缺席，导致明明装了 node/pnpm/dsh 却探测不到；登录 shell 会加载完整配置。
-#[cfg(target_os = "macos")]
+/// 类 Unix：读取登录 shell 的 PATH（结果进程内缓存）。
+/// GUI 应用从 Finder / .desktop 启动时不经过 .zprofile/.bashrc，/opt/homebrew/bin、
+/// ~/.local/share/pnpm 等目录常缺席，导致明明装了 node/pnpm/dsh 却探测不到；
+/// 登录 shell 会加载完整配置。
+#[cfg(unix)]
 fn login_shell_path() -> Option<String> {
     static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| default_login_shell().to_string());
             let mut cmd = Command::new(shell);
             cmd.args(["-l", "-c", "printf %s \"$PATH\""]);
             let out = run_with_timeout(cmd, Duration::from_secs(6))?;
@@ -347,8 +351,26 @@ fn login_shell_path() -> Option<String> {
         .clone()
 }
 
-/// macOS：把登录 shell 的 PATH 合并进当前进程 PATH（幂等，重复调用开销极低）。
-#[cfg(target_os = "macos")]
+/// 登录 shell 兜底（SHELL 未设置时）：macOS 用 zsh（系统默认），
+/// Linux 用 bash（几乎所有发行版都有），都没有再退到 POSIX sh。
+#[cfg(unix)]
+fn default_login_shell() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "/bin/zsh"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        }
+    }
+}
+
+/// 类 Unix：把登录 shell 的 PATH 合并进当前进程 PATH（幂等，重复调用开销极低）。
+#[cfg(unix)]
 fn merge_login_shell_path() {
     if let Some(p) = login_shell_path() {
         let dirs: Vec<String> = p
@@ -360,14 +382,82 @@ fn merge_login_shell_path() {
     }
 }
 
+/// Linux：桌面会话启动的进程 PATH 常缺「用户级安装目录」。
+///
+/// 登录 shell 那一步在 Linux 上未必够：Debian/Ubuntu 的 ~/.bashrc 对非交互 shell
+/// 直接 return，而 nvm 的初始化正写在 .bashrc 里；pnpm 的全局 bin 目录
+/// （~/.local/share/pnpm）也不在任何系统默认 PATH 中。这两处恰好是本应用最依赖的
+/// 两个工具（pnpm 装 dsh、nvm 装 node），缺了就会误判「未安装」。这里按固定位置兜底。
+#[cfg(target_os = "linux")]
+fn linux_extra_path_dirs() -> Vec<String> {
+    let mut out: Vec<String> = vec![
+        "/usr/local/bin".into(),
+        "/snap/bin".into(),
+        "/opt/node/bin".into(),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for rel in [".local/bin", "bin", ".npm-global/bin"] {
+            out.push(home.join(rel).to_string_lossy().to_string());
+        }
+        // nvm 的各版本 node bin：按版本号从新到旧排列，让新版本优先命中
+        if let Ok(entries) = std::fs::read_dir(home.join(".nvm").join("versions").join("node")) {
+            let mut versions: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            versions.sort_by_key(|p| {
+                // 先绑定成 String：`unwrap_or_default()` 的临时值活不过这个表达式，
+                // 直接接 trim/split 会被借用检查拒绝
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut parts = name
+                    .trim_start_matches('v')
+                    .split('.')
+                    .map(|s| s.parse::<u32>().unwrap_or(0));
+                (
+                    parts.next().unwrap_or(0),
+                    parts.next().unwrap_or(0),
+                    parts.next().unwrap_or(0),
+                )
+            });
+            versions.reverse();
+            for v in versions {
+                out.push(v.join("bin").to_string_lossy().to_string());
+            }
+        }
+    }
+    // pnpm 全局 bin 目录（PNPM_HOME / XDG 默认位置，见 pnpm_home_candidates）
+    for d in pnpm_global_bin_candidates() {
+        out.push(d.to_string_lossy().to_string());
+    }
+    // 只并入真实存在的目录：不存在的条目只会拖慢每次 PATH 查找
+    out.retain(|d| Path::new(d).is_dir());
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// 环境检测前的搜索路径兜底：GUI 进程的 PATH 是启动时刻的快照，工具/安装器
 /// 之后写入注册表或登录 shell 配置的新目录不会出现在其中——刚装好的
 /// node/pnpm、nvm 切换版本后的目录会因此探测不到，误判「未安装」。
-/// macOS 合并登录 shell PATH；Windows 合并注册表 Machine/User PATH
-/// （PowerShell 冷启动数秒，进程内只执行一次；失败静默，保留启动时的旧 PATH）。
+/// Windows 合并注册表 Machine/User PATH（PowerShell 冷启动数秒，进程内只执行一次）；
+/// macOS 合并登录 shell PATH；Linux 再补一层用户级固定目录（见 linux_extra_path_dirs）。
+/// 失败静默，保留启动时的旧 PATH。
 pub fn ensure_search_path() {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     merge_login_shell_path();
+    #[cfg(target_os = "linux")]
+    {
+        // 固定目录扫描要读目录（nvm 多版本时条目不少），进程内只做一次；
+        // refresh_search_path 的重复调用靠这里的 Once 短路。
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            merge_into_process_path(linux_extra_path_dirs());
+        });
+    }
     #[cfg(windows)]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
@@ -381,6 +471,56 @@ pub fn ensure_search_path() {
 #[cfg(windows)]
 fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).map(PathBuf::from)
+}
+
+// ---------------------------------------------------------------------------
+// 平台能力自述（前端首屏探测一次）
+// ---------------------------------------------------------------------------
+
+/// 平台能力：预览承载方式、通知样式开关是否可见。
+///
+/// 与 `tts_supported` 一样由 Rust 侧给出能力事实，前端不嗅探 UA——打包版三家
+/// WebView（WebView2 / WKWebView / WebKitGTK）的 UA 格式互不相同。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformInfo {
+    /// "windows" | "macos" | "linux" | "other"（编译期决定，非运行时嗅探）
+    pub os: &'static str,
+    /// 预览承载方式："embedded"（同窗口子 webview，按内容区坐标悬浮）
+    /// / "window"（独立预览窗口；Linux 走这条，原因见 preview.rs 平台说明）
+    pub preview_mode: &'static str,
+    /// 系统通知是否支持「打开对话」按钮：仅 Windows 的 winrt 通道带激活回调
+    pub notify_clickable: bool,
+}
+
+#[tauri::command]
+pub fn platform_info() -> PlatformInfo {
+    PlatformInfo {
+        os: os_name(),
+        preview_mode: preview_mode(),
+        notify_clickable: cfg!(windows),
+    }
+}
+
+const fn os_name() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+/// 与 preview.rs `preview_show` 的分派条件保持一致（内嵌子 webview / 独立窗口）
+const fn preview_mode() -> &'static str {
+    if cfg!(any(windows, target_os = "macos")) {
+        "embedded"
+    } else {
+        "window"
+    }
 }
 
 /// 定位 npm 可执行文件：
@@ -2018,8 +2158,39 @@ fn install_tool_node(app: AppHandle) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = app;
-        Err("当前平台暂不支持自动安装 Node.js，请手动安装：https://nodejs.org/".into())
+        // Linux 装系统包需要 sudo，GUI 里代跑会弹出提权对话框且各发行版命令互不通用：
+        // 这里不猜用户的环境，直接给出「按发行版可选命令 + 更强的 NodeSource/nvm 方案」。
+        Err(format!(
+            "当前平台暂不支持一键安装 Node.js（装系统包需要管理员权限，请在终端执行）。\
+             请安装 Node.js 22 LTS 后回到本页点「重新检测」：{}",
+            linux_node_install_hint()
+        ))
     }
+}
+
+/// Linux 下的 Node.js 安装建议（按当前机器实际存在的包管理器裁剪文案）。
+///
+/// 优先推荐 NodeSource / nvm：发行版仓库自带的 nodejs 常低于 dsh 要求的版本，
+/// 直接推荐 `apt install nodejs` 反而会把人带到「装了但版本不够」的死胡同。
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn linux_node_install_hint() -> String {
+    let mut tips = vec![
+        "Debian/Ubuntu 建议用 NodeSource 源：curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs".to_string(),
+    ];
+    if !run_where("dnf").is_empty() {
+        tips.push(
+            "Fedora/RHEL：sudo dnf install -y nodejs npm（版本偏旧时改用 NodeSource rpm 源）"
+                .into(),
+        );
+    }
+    if !run_where("pacman").is_empty() {
+        tips.push("Arch：sudo pacman -S --needed nodejs npm".into());
+    }
+    if !run_where("zypper").is_empty() {
+        tips.push("openSUSE：sudo zypper install -y nodejs npm".into());
+    }
+    tips.push("或使用 nvm：https://github.com/nvm-sh/nvm#installing-and-updating".into());
+    tips.join("；")
 }
 
 fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
@@ -2081,6 +2252,10 @@ fn refresh_search_path_blocking() -> Result<(), String> {
     // PATH 变化意味着工具解析结果可能变化：让环境快照失效
     invalidate_env_snapshot();
     ensure_search_path();
+    // Linux：用户刚用 nvm/NodeSource 装完 node 时，新目录不在首次扫描的快照里，
+    // 前端「重新检测」走到这里必须重扫一次（merge 自身去重，重复并入无副作用）。
+    #[cfg(target_os = "linux")]
+    merge_into_process_path(linux_extra_path_dirs());
     #[cfg(windows)]
     refresh_windows_path()?;
     Ok(())
@@ -2610,15 +2785,73 @@ pub fn kill_tree(pid: u32) {
         )
         .status();
     }
-    #[cfg(not(windows))]
+    // Linux：先杀后代再杀自己。`kill -9 <pid>` 只结束这一个进程，而 dsh CLI 会派生
+    // node 子进程——父进程死后子进程仍在监听服务端口，表现为「点了停止但服务还活着」。
+    #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        for child in linux_descendants(pid) {
+            kill_pid(child);
+        }
+        kill_pid(pid);
     }
+    // 其它类 Unix（macOS 等）：语义与改动前一致，仅结束该进程；端口兜底
+    // （listener_pids → kill_listener）负责回收仍占着端口的子进程。
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        kill_pid(pid);
+    }
+}
+
+/// 结束单个进程（类 Unix）
+#[cfg(not(windows))]
+fn kill_pid(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Linux：按 /proc 的父子关系收集 pid 的全部后代，深→浅排序（先杀子，父进程被杀时
+/// 才没有可被 init 收养的存活子进程）。读不到 /proc 时返回空表，调用方仍会杀自己。
+#[cfg(target_os = "linux")]
+fn linux_descendants(root: u32) -> Vec<u32> {
+    use std::collections::HashMap;
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            let Some(ppid) = linux_ppid(pid) else {
+                continue;
+            };
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut out: Vec<u32> = Vec::new();
+    let mut queue: Vec<u32> = vec![root];
+    while let Some(pid) = queue.pop() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            out.push(child);
+            queue.push(child);
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// Linux：读 `/proc/<pid>/stat` 的父进程 pid。
+/// 第 2 个字段 comm 可能含空格与括号，因此按**最后一个** `)` 切分，其后依次为
+/// state / ppid。已退出或无权读取时返回 None。
+#[cfg(target_os = "linux")]
+fn linux_ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// 同步停止（仅应用退出钩子使用）：进程即将结束，阻塞无碍。
@@ -2726,18 +2959,88 @@ fn listener_pids(port: u16) -> Vec<u32> {
     }
     #[cfg(not(windows))]
     {
-        let Some(output) = hide_window(Command::new("lsof").args(["-ti", &format!("tcp:{port}")]))
-            .output()
-            .ok()
-        else {
-            return Vec::new();
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|l| l.trim().parse::<u32>().ok())
-            .filter(|pid| *pid != 0)
-            .collect()
+        // 首选 lsof（macOS 自带；多数桌面发行版也预装）；输出为空或 lsof 缺失
+        // （精简发行版 / 容器里常见）时退回 /proc 反查——否则「端口是否空闲」永远
+        // 判为「空闲」，重复启动的 dsh web 会绑定失败并原地重试，界面卡在「启动中」。
+        if let Ok(output) =
+            hide_window(Command::new("lsof").args(["-ti", &format!("tcp:{port}")])).output()
+        {
+            let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .filter(|pid| *pid != 0)
+                .collect();
+            if !pids.is_empty() {
+                return pids;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return linux_listener_pids(port);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Vec::new()
+        }
     }
+}
+
+/// Linux：不依赖 lsof 的监听者枚举。
+///
+/// `/proc/net/tcp{,6}` 的 LISTEN 行（st == 0A）给出 local_address 与 socket inode，
+/// 再遍历 `/proc/<pid>/fd/*` 的 `socket:[inode]` 链接反查持有者 pid。只读 /proc，
+/// 无外部命令依赖；其它用户的进程读不到 fd 目录，跳过即可（本应用的服务进程属当前用户）。
+#[cfg(target_os = "linux")]
+fn linux_listener_pids(port: u16) -> Vec<u32> {
+    use std::collections::HashSet;
+    let needle = format!(":{port:04X}");
+    let mut inodes: HashSet<String> = HashSet::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            // local_address(1) … st(3) … inode(9)
+            if cols.len() < 10 || cols[3] != "0A" || !cols[1].ends_with(&needle) {
+                continue;
+            }
+            inodes.insert(cols[9].to_string());
+        }
+    }
+    if inodes.is_empty() {
+        return Vec::new();
+    }
+    let mut pids: Vec<u32> = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let Some(target) = target.to_str() else {
+                continue;
+            };
+            let inode = target
+                .strip_prefix("socket:[")
+                .map(|rest| rest.trim_end_matches(']'));
+            if inode.is_some_and(|i| inodes.contains(i)) {
+                pids.push(pid);
+                break;
+            }
+        }
+    }
+    pids
 }
 
 /// 杀掉监听指定端口的进程（仅用于我们自己子进程输出过的端口与本应用专属端口兜底）

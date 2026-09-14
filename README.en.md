@@ -4,7 +4,7 @@
 
 [![Tauri](https://img.shields.io/badge/Tauri%202-24c8db?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React%2019-61dafb?logo=react&logoColor=white)](https://react.dev)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-8892b0)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-8892b0)]()
 [![Release](https://img.shields.io/github/v/release/jsoncode/deepseek-harness-desktop)](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest)
 
 ![DeepSeek Harness Desktop — dark preview](docs/assets/dark.png)
@@ -22,8 +22,20 @@ For new users: grab the installer for your platform and double-click to install 
 | Windows 10/11 (64-bit) | [Download .exe (NSIS installer)](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.0 MB |
 | macOS Apple Silicon | [Download .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [Download .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.9 MB |
 | macOS Intel (64-bit) | [Download .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [Download .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3.0 MB |
+| Linux x86_64 | [Download .deb](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.rpm](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.AppImage](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3 MB |
 
 > All installers are published on [GitHub Releases](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) — pick the latest release and download the package for your platform.
+
+> **Linux notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
+> (AppIndicator) dependencies, so `sudo apt install ./xxx.deb` (or
+> `sudo dnf install ./xxx.rpm`) pulls everything in. The AppImage does **not** bundle
+> system libraries and needs `libwebkit2gtk-4.1-0` from the distribution
+> (Ubuntu 22.04+ / Debian 12+ ship it by default):
+
+```bash
+chmod +x "DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
+./"DeepSeek Harness Desktop_x.y.z_amd64.AppImage"
+```
 
 > 💡 **Lightweight**: sizes above are measured on v0.1.2 (Windows 2.02 MB, macOS 2.91–3.01 MB) and vary slightly per release — every installer is only 2–3 MB, so downloads and installs take seconds.
 
@@ -44,12 +56,12 @@ For new users: grab the installer for your platform and double-click to install 
 - **pnpm compatible** — works with the pnpm 10 global layout (shims in `PNPM_HOME`). Even if `pnpm setup` was never run, it injects the bin dir into the session PATH and persists it to the user PATH, so the service starts immediately and stays installed across launches. **pnpm 11 is not supported** (dsh is incompatible with its global virtual store layout; the launch page shows a hint).
 - **Smart service detection** — probes the default port and only trusts URLs printed by its own child process, so it never hijacks an external instance.
 - **Streaming terminal** — macOS-style terminal with live install/start logs, stop/restart, and crash notifications.
-- **Embedded preview** — iframe view of the local DSH web UI with health polling, reload, copy URL, and open-in-browser.
+- **Embedded preview** — on Windows / macOS the local DSH web UI is loaded as a native child webview floating over the content area (health polling + titlebar reload); **on Linux it opens in a standalone preview window** (WebKitGTK child webviews cannot be positioned over the shell UI — see Notes).
 - **System tray** — close-to-tray, tray menu (Open / Open in Browser / Quit), single-instance window restore.
 - **Custom titlebar** — drag, double-click to maximize, and native **Windows 11 Snap Layouts** (magnetic snap preview on the maximize button).
 - **Themes** — dark / light, auto-follows the OS with a manual 3-state override.
 - **Dev / release isolation** — debug builds use a separate app id and port (6088) so they never interfere with the release instance (3080).
-- **Auto releases** — GitHub Actions builds and publishes Windows NSIS + macOS installers from a version tag.
+- **Auto releases** — GitHub Actions builds and publishes Windows NSIS, macOS and Linux (deb / rpm / AppImage) installers from a version tag.
 
 ## 🔗 Related Links
 
@@ -66,7 +78,18 @@ For new users: grab the installer for your platform and double-click to install 
 
 - [Node.js](https://nodejs.org/) ≥ 22.19 and [pnpm](https://pnpm.io/)
 - [Rust](https://www.rust-lang.org/) toolchain (stable) for Tauri
-- Windows 10/11 or macOS (Linux builds are not preconfigured)
+- Windows 10/11, macOS, or Linux (x86_64; Tauri v2's WebKitGTK 4.1 baseline is Ubuntu 22.04 / Debian 12 and newer)
+
+**Linux build dependencies** (Ubuntu / Debian baseline; adapt package names on other distributions):
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libayatana-appindicator3-dev librsvg2-dev patchelf file wget rpm
+```
+
+> `libappindicator3-dev` and `libayatana-appindicator3-dev` both provide the tray
+> (AppIndicator) pkg-config name — the spelling differs per distribution, so install
+> both to be safe. `rpm` provides `rpmbuild` and is only needed for `.rpm` bundles.
 
 ### Run in development
 
@@ -87,11 +110,21 @@ pnpm tauri:build:win           # Windows NSIS installer (.exe)
 pnpm tauri:build:mac           # macOS DMG
 pnpm tauri:build:mac:app       # macOS .app
 pnpm tauri:build:mac:universal # macOS universal DMG (universal-apple-darwin)
+pnpm tauri:build:linux         # Linux trio (.deb + .rpm + .AppImage)
+pnpm tauri:build:deb           # .deb only
+pnpm tauri:build:appimage      # .AppImage only
 ```
+
+> Linux bundles land in `src-tauri/target/release/bundle/{deb,rpm,appimage}/`.
+> **Always build on the oldest distribution you intend to support** (Ubuntu 22.04 is the
+> recommended baseline): glibc is only forward-compatible, so an artifact built on
+> Ubuntu 24.04 fails on 22.04 with `GLIBC_x.xx not found`. That is why CI pins
+> `ubuntu-22.04`.
 
 > Windows packaging uses an offline NSIS toolchain: `scripts/setup-nsis.mjs` deploys
 > `nsis-3.11.zip` + `nsis_tauri_utils.dll` from `libs/` (SHA1-verified) to
-> `%LOCALAPPDATA%\tauri\NSIS`, so the build never needs network access.
+> `%LOCALAPPDATA%\tauri\NSIS`, so the build never needs network access (the script
+> exits immediately on non-Windows platforms).
 
 ## 🚢 Release (GitHub Actions)
 
@@ -111,7 +144,14 @@ pnpm release minor         # bump minor and release
 pnpm release:tag-only      # tag and push the current version only
 ```
 
-The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64) and append artifacts to the same release.
+The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage on the `ubuntu-22.04` baseline) and append artifacts to the same release.
+
+A second workflow, **Linux build** (`.github/workflows/linux-build.yml`), runs
+`cargo fmt --check` + `cargo test` + bundling whenever `src-tauri/**`, `src/**` and
+friends change, and uploads the bundles as Actions artifacts only (never to a release).
+It exists because **Linux-only code (`cfg(target_os = "linux")` branches, the standalone
+preview window, `/proc` port lookup, the notify-rust channel) is only ever compiled on
+Linux** — Windows/macOS development cannot catch its compile errors.
 
 ## 🖥 Usage
 
@@ -119,7 +159,7 @@ The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build +
 | --- | --- |
 | `/` Launch | Centered logo + environment pre-check card (Node.js / pnpm / dsh CLI versions) + primary button. Shows **Open App** when a service is already running, otherwise **Launch App** (starts only on manual click — never auto-starts on page entry). |
 | `/terminal` Terminal | Streaming logs of the global install (`pnpm add -g @deepseek-ai/dsh@latest`) and `dsh web` startup; entering the page never auto-starts the service, it only shows logs. |
-| `/preview` Preview | iframe of the local service with refresh / copy URL / open in browser; the titlebar indicator turns red when the service disconnects. |
+| `/preview` Preview | The local service loaded as a native child webview (Windows / macOS) with titlebar reload. **On Linux** the host UI opens in a standalone preview window and this page shows an explanation plus *Reopen preview window* / *Open in browser* buttons. The titlebar indicator turns red when the service disconnects. |
 
 System tray (right-click): **Open** restores the window, **Open in Browser** opens the service URL in your default browser, **Quit** stops the service and exits.
 
@@ -136,6 +176,7 @@ src/                Frontend (React + Zustand + React Router)
   lib/tauri.ts      Tauri invoke/event bridge
 src-tauri/          Rust backend
   src/dsh.rs        Tool resolution, process management, log pump, URL probing
+  src/preview.rs    Preview hosting (child webview on Win/macOS; standalone window on Linux)
   capabilities/     Permission declarations
 scripts/            setup-nsis (offline NSIS) / sync-version / release-tag / verify-*
 libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll)
@@ -144,8 +185,9 @@ libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll
 ## 📄 Notes
 
 - `dsh web` listens on `127.0.0.1:3080` by default (release); the launcher confirms readiness by parsing `http://...` lines from its stdout plus TCP probing.
-- The preview embeds the local service via iframe; the app CSP allows `frame-src http://127.0.0.1:* http://localhost:*`.
+- The host's newer process-token browser auth (root request exchanges for a `SameSite=Strict` cookie) cannot be completed by a DOM iframe in a packaged build: the shell origin is `tauri://localhost`, so an iframe is **cross-site** and Strict cookies are never sent back. The preview therefore always loads the host URL as a **top-level document** — a same-window native child webview on Windows/macOS (positioned over the content area), and a **standalone preview window on Linux**, where Tauri hands child webviews to the window's `GtkBox` and wry only honours coordinates inside a `GtkFixed` parent. Both paths share the same auth and bridge semantics (`src-tauri/src/preview.rs`).
 - Debug builds are fully isolated: app id `com.deepseek.harness.desktop.dev`, service port 6088, UI port 6089.
+- **Linux differences**: ① preview runs in a standalone window (above); ② system notifications go through D-Bus (notify-rust) but have **no "Open conversation" button** — click-through only exists on Windows' toast activation callback; ③ voice playback is unavailable (rodio's Linux backend needs ALSA, not part of this release; the UI hides the entry point); ④ Node.js cannot be installed by the app (system packages need sudo) — the launch page prints the per-distribution install command; ⑤ port-occupancy checks prefer `lsof` and fall back to a `/proc` lookup when it is missing.
 
 ## 📖 Readme in other languages
 

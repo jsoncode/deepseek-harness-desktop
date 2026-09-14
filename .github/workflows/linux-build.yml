@@ -1,0 +1,88 @@
+# Linux 构建验证（**不发布**）：随代码变更编译 / 测试 / 打包 Linux 产物，产物只留在
+# Actions artifact 里，不碰 GitHub Release。
+#
+# 为什么单独一条：release.yml 只在打 tag 时跑，而 Linux 专用代码（cfg(target_os =
+# "linux") 分支、独立预览窗口、/proc 端口反查、notify-rust 通道）**只有在这条链路上
+# 才会被编译到**——Windows/macOS 本地开发完全看不到它们的编译错误。push 即跑，等于给
+# 「Linux 版还能不能编」上了一道守卫。
+#
+# 打 tag 发版走 release.yml（同基线 ubuntu-22.04，产物进 Release）。
+
+name: Linux build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/linux-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # 构建依赖与 release.yml 保持一致（appindicator 两个 dev 包都装，见那边的注释）
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libappindicator3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf file wget rpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust format check (rustfmt)
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      # Linux 上真正会编译到 cfg(target_os = "linux") 的代码路径
+      - name: Rust unit tests (Linux)
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Frontend build (tsc + vite)
+        run: pnpm build
+
+      - name: Build bundles (deb / rpm / AppImage)
+        run: pnpm tauri build --bundles deb,rpm,appimage
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundles
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.AppImage

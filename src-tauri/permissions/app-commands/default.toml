@@ -14,6 +14,7 @@ identifier = "allow-app-commands"
 description = "允许本地窗口调用应用自有命令（dsh/tts/credentials/logs/preview 窗口管理）"
 commands.allow = [
   "app_status",
+  "platform_info",
   "check_tool",
   "probe_service",
   "install_dsh",
@@ -70,7 +71,6 @@ commands.allow = [
   "log_sessions",
   "log_content",
   "log_clear",
-  "preview_native_supported",
   "preview_show",
   "preview_resize",
   "preview_hide",

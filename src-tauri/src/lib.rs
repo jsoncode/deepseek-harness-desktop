@@ -36,6 +36,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             dsh::app_status,
+            dsh::platform_info,
             dsh::check_tool,
             dsh::probe_service,
             dsh::install_dsh,
@@ -92,7 +93,6 @@ pub fn run() {
             logs::log_sessions,
             logs::log_content,
             logs::log_clear,
-            preview::preview_native_supported,
             preview::preview_show,
             preview::preview_resize,
             preview::preview_hide,

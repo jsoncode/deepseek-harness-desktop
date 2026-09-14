@@ -1,5 +1,6 @@
 import { BellOutlined, ExperimentOutlined, SoundOutlined } from "@ant-design/icons";
 import { Alert, App as AntApp, Button, Segmented, Switch, Typography } from "antd";
+import { useEffect, useState } from "react";
 import { useNotifyStore } from "../../store/useNotifyStore";
 import { api } from "../../lib/tauri";
 
@@ -26,6 +27,23 @@ export default function NotifySettings() {
   // 平台能力（Rust tts_supported 探测）：Linux 无音频播放链路，整块入口屏蔽
   const voiceSupported = useNotifyStore((s) => s.voiceSupported);
   const on = mode === "on";
+
+  // 平台能力（Rust platform_info 探测）：「带按钮」依赖 Windows toast 的激活回调，
+  // 其它平台（Linux 走 notify-rust / macOS 无系统通知）没有等价能力 → 隐藏该行。
+  // 探测中按 false 处理：宁可晚一行出现，也不要先亮出一个点了没反应的开关。
+  const [notifyClickable, setNotifyClickable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api
+      .platformInfo()
+      .then((info) => {
+        if (alive) setNotifyClickable(info.notifyClickable);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const commitVoice = (patch: Partial<typeof voice>) => setVoice(patch);
 
@@ -56,19 +74,23 @@ export default function NotifySettings() {
             <Switch checked={on} onChange={() => toggle()} />
           </div>
 
-          <div className="settings-row">
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <BellOutlined style={{ color: "var(--text-2)" }} />
-              带按钮
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                通知上带「打开对话」按钮，点击直达对应会话
-              </Text>
-            </span>
-            <Switch
-              checked={style === "clickable"}
-              onChange={(v) => setStyle(v ? "clickable" : "plain")}
-            />
-          </div>
+          {/* 「带按钮」只有 Windows 的 winrt 通道支持（点击直达会话）。
+              其它平台隐藏该行：留着开关却点了没效果，比没有更糟。 */}
+          {notifyClickable ? (
+            <div className="settings-row">
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <BellOutlined style={{ color: "var(--text-2)" }} />
+                带按钮
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  通知上带「打开对话」按钮，点击直达对应会话
+                </Text>
+              </span>
+              <Switch
+                checked={style === "clickable"}
+                onChange={(v) => setStyle(v ? "clickable" : "plain")}
+              />
+            </div>
+          ) : null}
 
           <p className="settings-desc settings-desc-tail">
             全屏游戏或放映时自动静音弹窗，退出全屏后恢复。

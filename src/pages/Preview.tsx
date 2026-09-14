@@ -1,6 +1,7 @@
+import { Button, Space } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { api, EVENTS, onEvent, tauri } from "../lib/tauri";
+import { api, EVENTS, onEvent, tauri, type PlatformInfo } from "../lib/tauri";
 import { sameSiteEmbedUrl } from "../lib/urlMask";
 import { useAppStore } from "../store/useAppStore";
 import { useUiStore } from "../store/useUiStore";
@@ -28,14 +29,18 @@ function extractPluginName(items: string[]): string | null {
 }
 
 /**
- * 预览承载方式：
- * - 原生（Windows/macOS，preview.rs）：宿主页由与桌面壳同窗口的【原生子
+ * 预览承载方式（由 Rust `platform_info` 给出，前端不做 UA 嗅探）：
+ * - 原生内嵌（Windows/macOS，preview.rs）：宿主页由与桌面壳同窗口的【原生子
  *   webview】作为其顶层文档直接加载——子 webview 的顶层即宿主地址本身，
  *   SameSite=Strict 认证链与系统浏览器一致，第三方请求不再被本地代理拦截。
  *   顶栏/底栏仍是壳 DOM 照常显示；子 webview 只覆盖内容区（preview-frame），
  *   位置/尺寸由本页实时同步。原生子 webview 之上的 DOM 层无法显示，宿主的
  *   主题切换/插件失败/会话回执经 invoke→事件桥（preview.rs 注入的三个
  *   initialization_script）上报，待打开会话经 previewOpenSession 下发。
+ * - 独立预览窗口（Linux）：tauri-runtime-wry 在 Linux 上把子 webview pack 进窗口的
+ *   GtkBox，wry 的 set_bounds 只在 GtkFixed 父容器里生效，无法按内容区坐标悬浮。
+ *   因此 Linux 由 Rust 侧开一个独立窗口加载宿主页（顶层文档 ⇒ 认证链路同上），
+ *   本页只显示一张说明卡片；顶栏刷新会重新导航那个窗口。
  * - iframe（仅浏览器预览模式，非 Tauri）：开发模式下 sameSiteEmbedUrl 把宿主
  *   改写为 localhost 保持同站，浏览器自走 root 换 Cookie 认证；外链/弹层由
  *   真实浏览器原生处理，无需任何桥接脚本。
@@ -51,21 +56,23 @@ export default function Preview() {
   const clearPendingOpenSession = useUiStore((s) => s.clearPendingOpenSession);
   const frameRef = useRef<HTMLDivElement>(null);
 
-  // ---- 原生子 webview 能力探测（null = 探测中）----
-  const [native, setNative] = useState<boolean | null>(null);
+  // ---- 预览承载探测（null = 探测中）----
+  const [mode, setMode] = useState<PlatformInfo["previewMode"] | null>(null);
   useEffect(() => {
     if (!tauri) {
-      setNative(false);
+      setMode(null);
       return;
     }
     let alive = true;
     api
-      .previewNativeSupported()
-      .then((v) => {
-        if (alive) setNative(v);
+      .platformInfo()
+      .then((info) => {
+        if (alive) setMode(info.previewMode);
       })
       .catch(() => {
-        if (alive) setNative(false);
+        // 探测失败按独立窗口处理：Linux 是当前唯一非内嵌平台，且该路径不会
+        // 在壳 DOM 里留白（内嵌探测失败会渲染空内容区，风险更大）。
+        if (alive) setMode("window");
       });
     return () => {
       alive = false;
@@ -81,7 +88,9 @@ export default function Preview() {
   }, [initialized, init]);
 
   // 原生预览激活态：有地址且在原生支持环境
-  const nativeActive = native === true && Boolean(url);
+  const nativeActive = mode === "embedded" && Boolean(url);
+  // 独立窗口预览激活态（Linux）：由 Rust 侧开窗，本页只留说明卡片
+  const windowActive = mode === "window" && Boolean(url);
 
   // ---- 原生：进入/地址变化时创建或更新子 webview；离开时隐藏（保留登录态）----
   useEffect(() => {
@@ -96,22 +105,38 @@ export default function Preview() {
     };
   }, [nativeActive, url]);
 
-  // ---- 原生：标题栏「刷新」（reloadKey）→ 重导航到同一地址重新走认证 ----
+  // ---- 独立窗口（Linux）：进入预览 / 地址变化时开窗或重导航；离开时关闭窗口 ----
+  // 坐标不参与：窗口自带原生边框与尺寸，Rust 侧忽略 x/y/width/height。
+  useEffect(() => {
+    if (!windowActive || !url) return;
+    void api.previewShow(url, 0, 0, 0, 0).catch(() => undefined);
+    return () => {
+      void api.previewHide().catch(() => undefined);
+    };
+  }, [windowActive, url]);
+
+  // ---- 标题栏「刷新」（reloadKey）→ 重导航到同一地址重新走认证 ----
+  // 两种承载共用：内嵌走坐标同步的 previewShow，独立窗口只报 URL（坐标被忽略）。
   const prevReloadRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!nativeActive || !url) {
+    const active = nativeActive || windowActive;
+    if (!active || !url) {
       prevReloadRef.current = null;
       return;
     }
     const prev = prevReloadRef.current;
     prevReloadRef.current = reloadKey;
     if (prev === null || prev === reloadKey) return; // 首次创建由 attach effect 完成
+    if (windowActive) {
+      void api.previewShow(url, 0, 0, 0, 0).catch(() => undefined);
+      return;
+    }
     const el = frameRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return;
     void api.previewShow(url, r.x, r.y, r.width, r.height).catch(() => undefined);
-  }, [reloadKey, nativeActive, url]);
+  }, [reloadKey, nativeActive, windowActive, url]);
 
   // ---- 原生：内容区布局/窗口尺寸变化时同步子 webview 边界 ----
   useEffect(() => {
@@ -132,9 +157,11 @@ export default function Preview() {
     };
   }, [nativeActive]);
 
-  // ---- 原生：接收子 webview 桥接上报（invoke → preview_bridge_report → emit）----
+  // ---- 接收预览承载的桥接上报（invoke → preview_bridge_report → emit）----
+  // 内嵌子 webview 与独立预览窗口注入的是同一套桥接脚本、webview label 同名
+  // （capabilities/preview.json 认 label），因此事件处理对两者一致。
   useEffect(() => {
-    if (!nativeActive) return;
+    if (!nativeActive && !windowActive) return;
     const offs = [
       onEvent<{ items?: string[] }>(EVENTS.previewPluginFailed, (p) => {
         const items = (p.items ?? []).filter((x): x is string => typeof x === "string");
@@ -150,20 +177,20 @@ export default function Preview() {
     return () => {
       for (const off of offs) void off;
     };
-  }, [nativeActive, reportPluginLoadError, clearPendingOpenSession]);
+  }, [nativeActive, windowActive, reportPluginLoadError, clearPendingOpenSession]);
 
-  // 系统通知点击待打开的会话：原生路径 previewOpenSession 让子 webview 执行
-  // __dshDesktopOpenSession（SESSION_OPEN_BRIDGE 定位会话行并模拟点击），回执经
-  // previewSessionAcked 事件清空待打开状态；超过有效期视为陈旧丢弃。
+  // 系统通知点击待打开的会话：预览承载执行 __dshDesktopOpenSession
+  // （SESSION_OPEN_BRIDGE 定位会话行并模拟点击），回执经 previewSessionAcked 事件
+  // 清空待打开状态；超过有效期视为陈旧丢弃。
   useEffect(() => {
     if (!pendingOpenSession) return;
     if (Date.now() - pendingOpenSession.sentAt > PENDING_OPEN_TTL_MS) {
       clearPendingOpenSession();
       return;
     }
-    if (!nativeActive) return; // 浏览器预览无桥，不做下发
+    if (!nativeActive && !windowActive) return; // 浏览器预览无桥，不做下发
     void api.previewOpenSession(pendingOpenSession.sessionId).catch(() => undefined);
-  }, [pendingOpenSession, nativeActive, clearPendingOpenSession]);
+  }, [pendingOpenSession, nativeActive, windowActive, clearPendingOpenSession]);
 
   // 无 URL（未检测到服务）时不再展示空态页，直接回服务状态页处理启动/重试
   useEffect(() => {
@@ -199,6 +226,43 @@ export default function Preview() {
             allow="clipboard-read; clipboard-write; fullscreen"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"
           />
+        ) : null}
+        {/* 独立窗口承载（Linux）：宿主界面在另一个窗口里，这里只放说明与入口。
+            窗口是 Rust 侧开的（见 effect），关掉后可从「重新打开」再拉起。 */}
+        {windowActive ? (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 24,
+            }}
+          >
+            <div style={{ maxWidth: 460, textAlign: "center" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+                预览已在独立窗口中打开
+              </div>
+              <p style={{ fontSize: 12.5, lineHeight: 1.8, color: "var(--text-3)", margin: "0 0 14px" }}>
+                当前平台（Linux）用独立窗口承载宿主界面：WebKitGTK 的子 webview
+                无法按内容区坐标悬浮在壳界面之上。关掉那个窗口后，可从这里重新打开。
+              </p>
+              <Space>
+                <Button
+                  type="primary"
+                  onClick={() =>
+                    void api.previewShow(url, 0, 0, 0, 0).catch(() => undefined)
+                  }
+                >
+                  重新打开预览窗口
+                </Button>
+                <Button onClick={() => void api.openInBrowser(url).catch(() => undefined)}>
+                  在浏览器中打开
+                </Button>
+              </Space>
+            </div>
+          </div>
         ) : null}
       </div>
     </div>

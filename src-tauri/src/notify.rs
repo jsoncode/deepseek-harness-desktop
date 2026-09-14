@@ -97,7 +97,8 @@ pub trait NotifyChannel: Sync {
     fn deliver(&self, app: &AppHandle, msg: &NotifyMessage);
 }
 
-/// Windows 系统 toast。非 Windows 平台本期不弹系统通知（只走 `dispatch` 的 emit）。
+/// 系统 toast：Windows 走 winrt（两种样式可切换），Linux 走 notify-rust/D-Bus，
+/// macOS 本期不弹系统通知（只走 `dispatch` 的 emit）。
 pub struct ToastChannel;
 
 impl NotifyChannel for ToastChannel {
@@ -122,10 +123,40 @@ impl NotifyChannel for ToastChannel {
                 ToastStyle::Clickable => clickable_toast(app, msg, self.name()),
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            linux_toast(app, msg, self.name());
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = (app, msg);
         }
+    }
+}
+
+/// Linux 系统通知：notify-rust → D-Bus（org.freedesktop.Notifications），由 GNOME /
+/// KDE 等桌面通知中心呈现。
+///
+/// 与 Windows 的差异（前端按 `platform_info.notifyClickable` 隐藏「带按钮」开关）：
+/// - **没有激活回调**：notify-rust 的 XDG 后端不注册点击监听，因此点通知只能由桌面
+///   环境自己聚焦窗口，无法直达具体会话（Windows 走 winrt 的 on_activated 才有）；
+/// - **不设 urgency=Critical**：libnotify 的紧急度在各实现里行为差异很大（部分会拒绝
+///   或强制常驻），对齐 Windows「常驻不自动消失」的语义在 Linux 上没有可靠对应，
+///   因此交给桌面环境的默认超时策略；
+/// - **不做旧驻留清理**：清历史是 WinRT 的 ToastNotificationHistory 接口，D-Bus
+///   通知规范里没有等价能力。
+#[cfg(target_os = "linux")]
+fn linux_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
+    use notify_rust::Notification;
+    let mut n = Notification::new();
+    n.appname(APP_ID).summary(&msg.summary).body(&msg.body);
+    if let Some(p) = logo_path(app) {
+        // XDG 走 image-path 提示而非 image_path 的 Windows 语义（同一路径两种含义）
+        n.image_path(&p.to_string_lossy());
+    }
+    // D-Bus 不可用（无桌面会话 / 通知服务未启动）时只记日志：通知失败不该影响主流程
+    if let Err(e) = n.show() {
+        eprintln!("[notify] {name} 通道投递失败: {e}");
     }
 }
 

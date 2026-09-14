@@ -73,3 +73,11 @@ windows = { version = "0.61", features = ["UI_Notifications", "Win32_UI_WindowsA
 # 权限请求被静默拒绝。补挂 PermissionRequested 处理器需要 webview2-com 的事件
 # 类型；版本与 wry 内部一致（0.38），不引入重复编译单元。
 webview2-com = "0.38"
+
+# 系统推送（Linux）：notify-rust 经 D-Bus 投递到桌面通知中心（见 notify.rs
+# linux_toast）。这里**必须**用默认特性（z = zbus 后端）——Windows 那份刻意关掉
+# 默认特性是为了避开 zbus/dbus，而 Linux 侧恰恰要靠 zbus 说话。zbus 5 本就在
+# 依赖图里（tauri-plugin-single-instance 的 DBus 单实例），不新增编译单元。
+# 版本上界与 Windows 一致：4.18 起要求 rustc 1.89，超出本 crate 的 MSRV 1.77.2。
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = { version = ">=4.17, <4.18" }

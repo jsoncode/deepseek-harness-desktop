@@ -75,6 +75,17 @@ export interface ProxyConfig {
   url: string;
 }
 
+/** 平台能力自述：与 Rust `dsh::PlatformInfo` 同形（前端不嗅探 UA，一律问 Rust）。
+ *  打包版三家 WebView 的 UA 格式互不相同，能力判断只能由编译目标给出。 */
+export interface PlatformInfo {
+  /** "windows" | "macos" | "linux" | "other" */
+  os: string;
+  /** 预览承载方式："embedded" = 同窗口子 webview 悬浮；"window" = 独立预览窗口（Linux） */
+  previewMode: "embedded" | "window";
+  /** 系统通知是否支持「打开对话」按钮（仅 Windows 的 winrt 通道带激活回调） */
+  notifyClickable: boolean;
+}
+
 /** 一条模型代理规则：按提供方域名决定是否走代理 */
 export interface ModelProxyRule {
   /** 提供方域名，如 api.openai.com；写 example.com 同时匹配其子域名 */
@@ -357,6 +368,8 @@ function requireTauri<T>(fn: () => Promise<T>): Promise<T> {
 
 export const api = {
   appStatus: () => requireTauri(() => invoke<StatusPayload>("app_status")),
+  /** 平台能力（预览承载方式、通知按钮支持）：前端首屏探测一次 */
+  platformInfo: () => requireTauri(() => invoke<PlatformInfo>("platform_info")),
   /** 单项环境检测：tool = "node" | "pnpm" | "dsh"（启动页逐项 loading，每项独立返回） */
   checkTool: (tool: "node" | "pnpm" | "dsh") =>
     requireTauri(() => invoke<ToolCheck>("check_tool", { tool })),
@@ -547,19 +560,17 @@ export const api = {
     requireTauri(() => invoke<SessionLogEntry[]>("log_content", { id })),
   /** 清空全部日志会话 */
   logClear: () => requireTauri(() => invoke<void>("log_clear")),
-  // ---- preview 原生子 webview（直接加载宿主服务，替代 iframe + 反向代理方案）----
-  /** 当前平台是否支持原生子 webview 内嵌（Windows/macOS；不支持则走 iframe 回退） */
-  previewNativeSupported: () =>
-    requireTauri(() => invoke<boolean>("preview_native_supported")),
-  /** 在逻辑坐标 (x, y) 处显示（必要时创建）preview 子 webview 并加载宿主 URL */
+  // ---- preview 预览承载（直接加载宿主服务，替代 iframe + 反向代理方案）----
+  /** 在内容区显示（必要时创建）预览承载并加载宿主 URL。
+   *  内嵌平台按逻辑坐标 (x, y) 悬浮；Linux 忽略坐标，改为打开独立预览窗口。 */
   previewShow: (url: string, x: number, y: number, width: number, height: number) =>
     requireTauri(() => invoke<void>("preview_show", { url, x, y, width, height })),
-  /** 宿主面板尺寸/位置变化时同步子 webview 边界（逻辑坐标） */
+  /** 宿主面板尺寸/位置变化时同步子 webview 边界（逻辑坐标；独立窗口模式为空操作） */
   previewResize: (x: number, y: number, width: number, height: number) =>
     requireTauri(() => invoke<void>("preview_resize", { x, y, width, height })),
-  /** 离开预览页/应用最小化时隐藏子 webview（不销毁，保留登录态与页面状态） */
+  /** 离开预览页/应用最小化时收起预览承载（内嵌=隐藏保留状态，独立窗口=关闭） */
   previewHide: () => requireTauri(() => invoke<void>("preview_hide")),
-  /** 让子 webview 执行 __dshDesktopOpenSession 打开指定会话对话框（通知直达） */
+  /** 让预览承载执行 __dshDesktopOpenSession 打开指定会话对话框（通知直达） */
   previewOpenSession: (sessionId: string) =>
     requireTauri(() => invoke<void>("preview_open_session", { sessionId })),
 };

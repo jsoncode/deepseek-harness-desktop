@@ -23,29 +23,45 @@
 //! JS，调用注入脚本暴露的 window.__dshDesktopOpenSession——子 webview 顶层文档
 //! 与宿主同源，脚本内可直接读 React fiber 定位会话行并模拟点击。
 //!
-//! # 平台
+//! # 平台：内嵌子 webview 与「独立预览窗口」两种承载
 //!
-//! 子 webview 用 Tauri unstable 多 webview API（`Window::add_child` +
-//! `tauri::webview::WebviewBuilder`，需 Cargo 的 tauri "unstable" feature）。
-//! Windows 与 macOS 启用；Web 权限申请弹窗仅 Windows 需要（macOS 上 wry 的
-//! WKUIDelegate 自动放行媒体采集，见 permissions.rs）。
+//! Windows / macOS：子 webview 用 Tauri unstable 多 webview API（`Window::add_child`
+//! + `tauri::webview::WebviewBuilder`，需 Cargo 的 tauri "unstable" feature），
+//! 按内容区坐标**悬浮**在壳 DOM 之上。Web 权限申请弹窗仅 Windows 需要（macOS 上
+//! wry 的 WKUIDelegate 自动放行媒体采集，见 permissions.rs）。
+//!
+//! Linux：Tauri 的 `Window::add_child` 在这条链路上不可用。tauri-runtime-wry 在
+//! Linux 把子 webview 交给 `window.default_vbox()`（`gtk::Box`）承载
+//! （tauri-runtime-wry/src/lib.rs `WebviewKind::WindowChild`），而 wry 的
+//! `set_bounds` 只在父容器是 `GtkFixed` 时才生效
+//! （wry/src/webkitgtk/mod.rs：`is_in_fixed_parent` 才走 `fixed.move_()`，GtkBox
+//! 只做 `pack_start`）——即「按坐标悬浮」在 Linux 上无从实现，子 webview 只能与
+//! 壳页面纵向平分窗口。因此 Linux 改由**独立窗口**承载宿主页（`window_imp`）：
+//! 顶层文档加载 ⇒ SameSite=Strict 认证链路与内嵌子 webview 完全一致，桥接脚本
+//! 与 `preview_bridge_report` 上报路径也照旧（capability 认的是 webview label）。
+//! 代价是宿主界面不在壳窗口内，交付形态见 frontend `Preview.tsx` 的占位卡片。
 
+// 内嵌子 webview 的共享状态只有 Windows/macOS 用到；Linux 走独立预览窗口
+// （window_imp 按窗口 label 取句柄），不加 cfg 会在 Linux 构建里留下未使用告警。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 type PreviewWebview = tauri::webview::Webview<tauri::Wry>;
 
+/// 预览 webview 的 label：内嵌子 webview（Windows/macOS）与独立预览窗口（Linux）
+/// 同名，capabilities/preview.json 的 `webviews: ["preview"]` 对两者同时成立。
+/// 两种承载互斥（同一平台只会用一种），因此同名不会冲突。
+const PREVIEW_LABEL: &str = "preview";
+
 /// 当前预览子 webview（None = 未创建）
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 static PREVIEW: Mutex<Option<PreviewWebview>> = Mutex::new(None);
 
-/// 是否支持原生子 webview 预览
-#[tauri::command]
-pub fn preview_native_supported() -> bool {
-    cfg!(any(target_os = "windows", target_os = "macos"))
-}
-
 /// 在内容区显示/更新宿主页（幂等：已存在则导航 + 重定位，不存在则创建）。
-/// 前端在 url/进入预览/刷新时调用。
+/// 前端在 url/进入预览/刷新时调用。Linux 走独立预览窗口：x/y/width/height 忽略
+/// （窗口自带原生边框与尺寸，坐标悬浮无意义）。
 #[tauri::command]
 pub async fn preview_show(
     app: AppHandle,
@@ -61,12 +77,15 @@ pub async fn preview_show(
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = (app, url, x, y, width, height);
-        Ok(())
+        // 独立预览窗口自带尺寸与位置：坐标参数只有内嵌承载用得上，这里显式忽略
+        let _ = (x, y, width, height);
+        window_imp::show(&app, &url)
     }
 }
 
-/// 内容区位置/尺寸变化时（窗口缩放、最大化/还原等）同步子 webview 边界
+/// 内容区位置/尺寸变化时（窗口缩放、最大化/还原等）同步子 webview 边界。
+/// Linux 的独立预览窗口不受壳窗口布局影响，此处为空操作（保留命令与调用点，
+/// 前后端流程无需平台分支）。
 #[tauri::command]
 pub async fn preview_resize(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -80,16 +99,18 @@ pub async fn preview_resize(x: f64, y: f64, width: f64, height: f64) -> Result<(
     }
 }
 
-/// 离开预览页 / 停止服务时销毁子 webview
+/// 离开预览页 / 停止服务时销毁预览承载（Windows/macOS 销毁子 webview，
+/// Linux 关闭独立预览窗口）。
 #[tauri::command]
-pub async fn preview_hide() -> Result<(), String> {
+pub async fn preview_hide(app: AppHandle) -> Result<(), String> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
+        let _ = &app;
         imp::hide()
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        Ok(())
+        window_imp::hide(&app)
     }
 }
 
@@ -118,21 +139,29 @@ pub fn preview_bridge_report(
     Ok(())
 }
 
-/// 通知点击「打开对话」：向预览子 webview 下发会话打开指令（eval 调用注入脚本
+/// 通知点击「打开对话」：向预览承载下发会话打开指令（eval 调用注入脚本
 /// 暴露的 window.__dshDesktopOpenSession，sessionId 经 JSON 转义防注入）。
-/// 本命令是**同步**命令（跑在主线程）：取句柄后立即放锁，绝不持锁调用 webview，
-/// 否则与持锁阻塞等主线程的 preview_show 互相等待即硬死锁（见 show 内注释）。
+/// 内嵌路径是**同步**命令（跑在主线程）：取句柄后立即放锁，绝不持锁调用 webview，
+/// 否则与持锁阻塞等主线程的 preview_show 互相等待即硬死锁（见 show 内注释）；
+/// Linux 的独立预览窗口按窗口 label 取句柄，无共享锁。
 #[tauri::command]
-pub fn preview_open_session(session_id: String) -> Result<(), String> {
-    let wv = PREVIEW.lock().unwrap().clone();
-    let Some(wv) = wv else {
-        return Err("预览子 webview 未创建".into());
-    };
+pub fn preview_open_session(app: AppHandle, session_id: String) -> Result<(), String> {
     let arg = serde_json::to_string(&session_id).unwrap_or_else(|_| "\"\"".into());
-    wv.eval(&format!(
-        "window.__dshDesktopOpenSession && window.__dshDesktopOpenSession({arg})"
-    ))
-    .map_err(|e| format!("下发会话打开指令失败: {e}"))
+    let script = format!("window.__dshDesktopOpenSession && window.__dshDesktopOpenSession({arg})");
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        let _ = &app;
+        let wv = PREVIEW.lock().unwrap().clone();
+        let Some(wv) = wv else {
+            return Err("预览子 webview 未创建".into());
+        };
+        wv.eval(&script)
+            .map_err(|e| format!("下发会话打开指令失败: {e}"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        window_imp::open_session(&app, &script)
+    }
 }
 
 /// 注入到预览子 webview 的插件加载失败监听脚本：
@@ -363,20 +392,21 @@ mod imp {
             return Ok(());
         }
         let window = app.get_window("main").ok_or("未找到主窗口")?;
-        let builder = tauri::webview::WebviewBuilder::new("preview", WebviewUrl::External(parsed))
-            .on_navigation(|url| {
-                if is_loopback_http(&url) {
-                    return true;
-                }
-                let _ = crate::dsh::open_url(url.as_str());
-                false
-            })
-            .on_new_window(|url, _features| {
-                let _ = crate::dsh::open_url(url.as_str());
-                tauri::webview::NewWindowResponse::Deny
-            })
-            .initialization_script(PLUGIN_FAILURE_BRIDGE)
-            .initialization_script(SESSION_OPEN_BRIDGE);
+        let builder =
+            tauri::webview::WebviewBuilder::new(PREVIEW_LABEL, WebviewUrl::External(parsed))
+                .on_navigation(|url| {
+                    if is_loopback_http(&url) {
+                        return true;
+                    }
+                    let _ = crate::dsh::open_url(url.as_str());
+                    false
+                })
+                .on_new_window(|url, _features| {
+                    let _ = crate::dsh::open_url(url.as_str());
+                    tauri::webview::NewWindowResponse::Deny
+                })
+                .initialization_script(PLUGIN_FAILURE_BRIDGE)
+                .initialization_script(SESSION_OPEN_BRIDGE);
         // add_child 内部会切回主线程执行，必须在非主线程调用（async 命令满足），
         // 且调用方会【阻塞等待】主线程完成。因此这段期间绝不能持有 PREVIEW 锁：
         // 主线程上的同步命令 preview_open_session 也要取这把锁，一旦并发就是
@@ -432,5 +462,88 @@ mod imp {
             let _ = wv.close();
         }
         Ok(())
+    }
+}
+
+/// Linux（及其它非 Windows/macOS 桌面平台）：预览改由**独立窗口**承载。
+///
+/// 为什么不复用同窗口子 webview：见文件头「平台」一节——Linux 上子 webview 被
+/// pack 进窗口的 `GtkBox`，wry 的坐标定位只在 `GtkFixed` 父容器里生效，无法按
+/// 内容区坐标悬浮。独立窗口以宿主地址为顶层文档加载，认证与桥接语义不变。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+mod window_imp {
+    use super::*;
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    /// 站内导航放行：宿主只服务 loopback（与内嵌路径同一策略）。
+    fn is_loopback_http(url: &tauri::Url) -> bool {
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return false;
+        }
+        matches!(
+            url.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("[::1]") | Some("::1")
+        )
+    }
+
+    /// 预览窗口标题：产品名 + 后缀（窗口管理器任务栏里与主窗口区分开）
+    fn window_title(app: &AppHandle) -> String {
+        let name = app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| app.package_info().name.clone());
+        format!("{name} — 预览")
+    }
+
+    /// 显示/更新宿主页：已存在则导航并置前，否则新建窗口。
+    pub fn show(app: &AppHandle, url: &str) -> Result<(), String> {
+        let parsed = tauri::Url::parse(url).map_err(|e| format!("无效的服务地址: {e}"))?;
+        if let Some(win) = app.get_webview_window(PREVIEW_LABEL) {
+            let _ = win.navigate(parsed);
+            let _ = win.show();
+            let _ = win.unminimize();
+            let _ = win.set_focus();
+            return Ok(());
+        }
+        let win = WebviewWindowBuilder::new(app, PREVIEW_LABEL, WebviewUrl::External(parsed))
+            .title(window_title(app))
+            .inner_size(1180.0, 820.0)
+            .min_inner_size(720.0, 480.0)
+            .center()
+            .on_navigation(|url| {
+                if is_loopback_http(&url) {
+                    return true;
+                }
+                let _ = crate::dsh::open_url(url.as_str());
+                false
+            })
+            .on_new_window(|url, _features| {
+                let _ = crate::dsh::open_url(url.as_str());
+                tauri::webview::NewWindowResponse::Deny
+            })
+            .initialization_script(PLUGIN_FAILURE_BRIDGE)
+            .initialization_script(SESSION_OPEN_BRIDGE)
+            .build()
+            .map_err(|e| format!("创建预览窗口失败: {e}"))?;
+        let _ = win.set_focus();
+        Ok(())
+    }
+
+    /// 关闭预览窗口（用户下次进入预览页会重新创建；登录态由宿主自身 Cookie 保持）
+    pub fn hide(app: &AppHandle) -> Result<(), String> {
+        if let Some(win) = app.get_webview_window(PREVIEW_LABEL) {
+            win.close().map_err(|e| format!("关闭预览窗口失败: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// 在预览窗口内执行注入脚本（会话直达桥）
+    pub fn open_session(app: &AppHandle, script: &str) -> Result<(), String> {
+        let Some(win) = app.get_webview_window(PREVIEW_LABEL) else {
+            return Err("预览窗口未创建".into());
+        };
+        win.eval(script)
+            .map_err(|e| format!("下发会话打开指令失败: {e}"))
     }
 }
