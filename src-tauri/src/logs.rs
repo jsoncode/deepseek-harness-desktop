@@ -242,19 +242,20 @@ pub fn log_start_session(app: AppHandle, title: String) -> Result<StartSessionRe
     Ok(StartSessionResult { id, pending })
 }
 
-/// 开始插件操作日志会话（Rust 侧直接写入，前端无需调用）：
-/// 与服务会话相互独立——服务会话进行中发起插件操作时互不干扰
-pub fn start_plugin_session(app: &AppHandle, title: &str) -> Result<(), String> {
+/// 开始操作日志会话（Rust 侧直接写入，前端无需调用）：
+/// 与服务会话相互独立——服务会话进行中发起插件操作/dsh CLI 更新时互不干扰。
+/// kind：会话类型（"plugin" 插件操作 / "env" dsh CLI 等环境操作），日志管理按此筛选。
+pub fn start_op_session(app: &AppHandle, title: &str, kind: &str) -> Result<(), String> {
     let dir = logs_dir(app)?;
-    let id = create_session(&dir, title, "plugin")?;
+    let id = create_session(&dir, title, kind)?;
     if let Some(state) = app.try_state::<AppState>() {
         *state.active_plugin_log.lock().unwrap() = Some(ActiveLog { id });
     }
     Ok(())
 }
 
-/// 追加一条日志到当前活动插件会话（无活动插件会话时静默忽略）
-pub fn append_active_plugin_log(app: &AppHandle, stream: &str, text: &str) {
+/// 追加一条日志到当前活动操作会话（无活动会话时静默忽略）
+pub fn append_active_op_log(app: &AppHandle, stream: &str, text: &str) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -273,8 +274,8 @@ pub fn append_active_plugin_log(app: &AppHandle, stream: &str, text: &str) {
     let _ = append_to_session(app, &id, &entry);
 }
 
-/// 结束当前活动插件会话：落状态（success/error）并补写结束时间（无活动会话时静默忽略）
-pub fn finish_active_plugin_session(app: &AppHandle, status: &str) {
+/// 结束当前活动操作会话：落状态（success/error）并补写结束时间（无活动会话时静默忽略）
+pub fn finish_active_op_session(app: &AppHandle, status: &str) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -351,10 +352,10 @@ pub fn log_sessions(app: AppHandle) -> Result<Vec<LogSessionMeta>, String> {
             started_at: h.started_at,
             ended_at: h.ended_at,
             status: h.status,
-            kind: if h.kind == "plugin" {
-                "plugin".into()
-            } else {
-                "service".into()
+            kind: match h.kind.as_str() {
+                "plugin" => "plugin".into(),
+                "env" => "env".into(),
+                _ => "service".into(),
             },
             lines: it.count(),
         });

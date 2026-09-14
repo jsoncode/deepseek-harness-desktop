@@ -3,15 +3,18 @@ import { App as AntApp, Input, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useRef, useState } from "react";
 import AppModal from "./AppModal";
+import PluginDetailBody, { Avatar, type DetailRow } from "./PluginDetailBody";
 import SlidingSeg from "./SlidingSeg";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore, type PluginOpKind } from "../store/useAppStore";
+import { useUiStore } from "../store/useUiStore";
 import {
   AUTHOR_LOGIN,
   AUTHOR_QUERY,
   fetchMarketPage,
   formatCount,
   formatDate,
+  isSelfPackage,
   pageSizeOf,
   type MarketPage,
   type MarketSort,
@@ -40,24 +43,6 @@ const SOURCE_DEFAULT_SORT: Record<MarketSource, MarketSort> = {
   author: "date",
 };
 
-/** 首字母渐变圆标头像（远程头像加载失败时的回退） */
-function Avatar({ url, name }: { url: string | null; name: string }) {
-  const [failed, setFailed] = useState(false);
-  if (!url || failed) {
-    return <span className="mk-avatar mk-avatar-fallback">{(name[0] ?? "?").toUpperCase()}</span>;
-  }
-  return (
-    <img
-      className="mk-avatar"
-      src={url}
-      alt={name}
-      loading="lazy"
-      onError={() => setFailed(true)}
-      draggable={false}
-    />
-  );
-}
-
 /** 小写化并去掉 -/_/. 与空白分隔符：dsh_jenkins / DshJenkins / dsh-jenkins 归一化后同形 */
 function normalizeFuzzy(s: string): string {
   return s.toLowerCase().replace(/[-_.\s]/g, "");
@@ -77,22 +62,12 @@ function nameMatches(name: string, rawQuery: string): boolean {
   return normalizeFuzzy(name).includes(nq);
 }
 
-/** 表格行数据（市场行与已安装行统一） */
-interface MkRow {
+/**
+ * 表格行数据（市场行与已安装行统一）。
+ * 详情弹框所需字段即 DetailRow，这里在其上补充表格专属字段（key / spec 等已在 DetailRow 中）。
+ */
+interface MkRow extends DetailRow {
   key: string;
-  name: string;
-  spec: string;
-  author: string;
-  avatarUrl: string | null;
-  description: string | null;
-  weekly: number | null;
-  monthly: number | null;
-  stars: number | null;
-  /** 最新可用版本；本地链接包为 null */
-  latest: string | null;
-  releasedAt: string | null;
-  installedHere: boolean;
-  current: string | null;
 }
 
 /**
@@ -248,9 +223,6 @@ export default function PluginManagerPanel() {
   if (!tauri) {
     return (
       <>
-        <div className="settings-nav">
-          <span className="settings-nav-title">插件管理</span>
-        </div>
         <div className="settings-body">
           <div className="mk-empty">浏览器预览模式：插件管理需在桌面应用内操作</div>
         </div>
@@ -297,6 +269,23 @@ export default function PluginManagerPanel() {
       message.warning("请输入插件名称");
       return;
     }
+    // 手输本应用自身名称时不走插件安装：引到「关于本应用」更新 dsh CLI
+    if (isSelfPackage(trimmed)) {
+      message.info("这是本应用自身，已为你跳转到「关于本应用」更新 dsh CLI");
+      setAddOpen(false);
+      setName("");
+      useUiStore.getState().requestSettingsIntent("about", "dsh-update");
+      try {
+        localStorage.setItem(
+          SETTINGS_INTENT_KEY,
+          JSON.stringify({ section: "about", action: "dsh-update", ts: Date.now() }),
+        );
+      } catch {
+        /* ignore */
+      }
+      void api.openSettings("about", "dsh-update").catch(() => undefined);
+      return;
+    }
     // 仅关闭手动安装输入弹框；插件管理面板保持打开，操作在后台执行
     setAddOpen(false);
     setName("");
@@ -320,10 +309,49 @@ export default function PluginManagerPanel() {
     });
   };
 
+  // 跨窗口跳转：设置窗口可能已存在（Rust 只是聚焦 + 改 hash，本窗口的前端状态
+  // 不会自己变），因此除本地 store 外再用 localStorage 广播一次，由设置窗口的
+  // storage 监听接收；设置页未打开时直接走 openSettings 深链。
+  const SETTINGS_INTENT_KEY = "dsh:settings-intent";
+
+  /**
+   * 本应用自身的安装/更新引流：不在这里执行 dsh plugin add，
+   * 改为切到「关于本应用」并打开 dsh CLI 更新弹框。
+   */
+  const goUpdateDshCli = (row: MkRow) => {
+    message.info(`「${row.name}」是本应用自身，已为你跳转到「关于本应用」更新 dsh CLI`);
+    setDetailRow(null);
+    useUiStore.getState().requestSettingsIntent("about", "dsh-update");
+    try {
+      localStorage.setItem(
+        SETTINGS_INTENT_KEY,
+        JSON.stringify({ section: "about", action: "dsh-update", ts: Date.now() }),
+      );
+    } catch {
+      /* localStorage 不可用：同窗口内的 store 流转已足够 */
+    }
+    // 设置页由本窗口承载时无需重开（会因 hash 未变而不切分区）；
+    // 未打开时才真正创建窗口并深链到 about + action（前端据 action 打开更新弹框）
+    void api.openSettings("about", "dsh-update").catch(() => undefined);
+  };
+
   /** 行内操作按钮组（固定列渲染） */
   const renderActions = (_: unknown, r: MkRow) => (
     <div className="mk-actions">
-      {!r.installedHere ? (
+      {/* 本应用自身：无论安装与否都只给「去更新 dsh CLI」一个出口 */}
+      {r.self ? (
+        <button
+          className="pm-btn pm-btn-sm primary"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            goUpdateDshCli(r);
+          }}
+        >
+          去更新 dsh CLI
+        </button>
+      ) : null}
+      {!r.self && !r.installedHere ? (
         <button
           className="pm-btn pm-btn-sm primary"
           type="button"
@@ -342,7 +370,7 @@ export default function PluginManagerPanel() {
       {r.installedHere && tabMode === "all" ? (
         <span className="pm-btn pm-btn-sm mk-installed-tag">已安装</span>
       ) : null}
-      {r.installedHere && tabMode === "installed" && isOutdated(r.name) ? (
+      {r.installedHere && tabMode === "installed" && !r.self && isOutdated(r.name) ? (
         <button
           className="pm-btn pm-btn-sm"
           type="button"
@@ -356,7 +384,7 @@ export default function PluginManagerPanel() {
           更新
         </button>
       ) : null}
-      {r.installedHere && tabMode === "installed" ? (
+      {r.installedHere && tabMode === "installed" && !r.self ? (
         <button
           className="pm-btn pm-btn-sm danger"
           type="button"
@@ -394,6 +422,8 @@ export default function PluginManagerPanel() {
             <span className="mk-name" title={r.name}>
               {r.name}
             </span>
+            {/* 本应用自身标记：告知识别结果，操作列随之改为「去更新 dsh CLI」 */}
+            {r.self ? <span className="pm-detail-badge self">本应用</span> : null}
             {r.author && r.author !== "—" ? (
               <span className="mk-author" title={r.author}>
                 @{r.author}
@@ -471,6 +501,10 @@ export default function PluginManagerPanel() {
     releasedAt: it.releasedAt,
     installedHere: installedSet.has(it.name),
     current: pluginVers[it.name]?.current ?? null,
+    // 名称或安装规格任一命中自身即标记（GitHub 仓库名 / npm 包名 / @deepseek-ai/dsh）
+    self: isSelfPackage(it.name) || isSelfPackage(it.spec),
+    repoUrl: it.repoUrl,
+    issuesUrl: it.issuesUrl,
   }));
 
   // 已安装 tab：本地名称模糊过滤（使用本 tab 独立的关键词）
@@ -489,6 +523,12 @@ export default function PluginManagerPanel() {
     releasedAt: null,
     installedHere: true,
     current: pluginVers[p]?.current ?? null,
+    // 已安装列表里也可能出现自身（历史误装/被当作依赖装入）：同样不在此卸载，
+    // 引导到「关于本应用」用 dsh CLI 更新（卸载→重装）来处理
+    self: isSelfPackage(p),
+    // 本机已安装列表来自 CLI 输出，不含仓库元数据；详情弹框据此隐藏 README 区块
+    repoUrl: null,
+    issuesUrl: null,
   }));
 
   const rows = tabMode === "all" ? allRows : installedRows;
@@ -618,7 +658,9 @@ export default function PluginManagerPanel() {
                   : isAuthor
                     ? "作者暂无 dsh 系列插件"
                     : submittedQuery.trim()
-                      ? "没有匹配的插件，可更换关键词重试"
+                      ? isSelfPackage(submittedQuery.trim())
+                        ? "这是本应用自身的名称，请到「关于本应用」更新 dsh CLI"
+                        : "没有匹配的插件，可更换关键词重试"
                       : "无匹配插件",
           }}
         />
@@ -657,9 +699,6 @@ export default function PluginManagerPanel() {
 
   return (
     <>
-      <div className="settings-nav">
-        <span className="settings-nav-title">插件管理</span>
-      </div>
       <div className="settings-body flush">
         {/* 复用 plugin-manager-modal 命名空间：其下的 .mk-* 样式（工具栏/表格/终端）原样生效 */}
         <div className="pm-panel plugin-manager-modal">
@@ -734,17 +773,27 @@ export default function PluginManagerPanel() {
         </div>
       </div>
 
-      {/* 插件详情弹框：点击插件行打开 */}
+      {/* 插件详情弹框：点击插件行打开。宽度给足 README 的表格/代码块排版 */}
       <AppModal
         open={detailRow !== null}
         className="pm-detail-modal"
         title={detailRow ? detailRow.name : "插件详情"}
-        width={560}
+        width={680}
         onCancel={() => setDetailRow(null)}
         footer={
           detailRow ? (
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              {!detailRow.installedHere ? (
+              {/* 本应用自身：唯一出口是去「关于本应用」更新 dsh CLI */}
+              {detailRow.self ? (
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  onClick={() => goUpdateDshCli(detailRow)}
+                >
+                  去更新 dsh CLI
+                </button>
+              ) : null}
+              {!detailRow.self && !detailRow.installedHere ? (
                 <button
                   className="pm-btn primary"
                   type="button"
@@ -759,7 +808,7 @@ export default function PluginManagerPanel() {
                   {isNpm ? "一键安装" : "源码安装"}
                 </button>
               ) : null}
-              {detailRow.installedHere && isOutdated(detailRow.name) ? (
+              {!detailRow.self && detailRow.installedHere && isOutdated(detailRow.name) ? (
                 <button
                   className="pm-btn"
                   type="button"
@@ -774,7 +823,7 @@ export default function PluginManagerPanel() {
                   更新
                 </button>
               ) : null}
-              {detailRow.installedHere ? (
+              {!detailRow.self && detailRow.installedHere ? (
                 <button
                   className="pm-btn danger"
                   type="button"
@@ -799,84 +848,14 @@ export default function PluginManagerPanel() {
         }
       >
         {detailRow ? (
-          <div className="pm-detail-body">
-            <div className="pm-detail-head">
-              <Avatar url={detailRow.avatarUrl} name={detailRow.author} />
-              <div className="pm-detail-title">
-                <div className="pm-detail-name">
-                  <span className="mk-name">{detailRow.name}</span>
-                  {/* 安装状态徽标 */}
-                  {detailRow.installedHere ? (
-                    <span className="pm-detail-badge installed">已安装</span>
-                  ) : (
-                    <span className="pm-detail-badge">未安装</span>
-                  )}
-                  {/* 更新可用提示 */}
-                  {detailRow.installedHere && isOutdated(detailRow.name) && pluginVers[detailRow.name]?.latest ? (
-                    <span className="pm-detail-badge update">
-                      可更新 → v{pluginVers[detailRow.name]?.latest}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="pm-detail-meta">
-                  {detailRow.author && detailRow.author !== "—" ? (
-                    <span className="mk-author">作者：@{detailRow.author}</span>
-                  ) : null}
-                  <span className="pm-detail-spec">{detailRow.spec}</span>
-                </div>
-                <div className="pm-detail-versions">
-                  {detailRow.installedHere && detailRow.current ? (
-                    <span className="pm-detail-version">
-                      本机版本 <b>v{detailRow.current}</b>
-                    </span>
-                  ) : null}
-                  {detailRow.latest ? (
-                    <span className="pm-detail-version">
-                      最新版本 <b>v{detailRow.latest}</b>
-                    </span>
-                  ) : null}
-                  {!detailRow.installedHere && !detailRow.latest ? (
-                    <span className="pm-detail-version muted">版本信息暂不可用</span>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-            <div className="pm-detail-stats">
-              {detailRow.weekly !== null ? (
-                <span className="pm-detail-stat">
-                  周下载 <b>{formatCount(detailRow.weekly)}</b>
-                </span>
-              ) : null}
-              {detailRow.monthly !== null ? (
-                <span className="pm-detail-stat">
-                  月下载 <b>{formatCount(detailRow.monthly)}</b>
-                </span>
-              ) : null}
-              {detailRow.stars !== null ? (
-                <span className="pm-detail-stat">
-                  Stars <b>★ {formatCount(detailRow.stars)}</b>
-                </span>
-              ) : null}
-              {detailRow.releasedAt ? (
-                <span className="pm-detail-stat">
-                  更新于 <b>{formatDate(detailRow.releasedAt)}</b>
-                </span>
-              ) : null}
-            </div>
-            <div className="pm-detail-desc">
-              {detailRow.description ? (
-                detailRow.description
-              ) : (
-                <span className="mk-desc-empty">暂无描述</span>
-              )}
-            </div>
-            {/* 免责声明 */}
-            <div className="pm-detail-disclaimer">
-              以上插件均来自开源社区、由第三方作者维护。本软件不参与插件开发，
-              也未对插件内容做安全审查或作出任何承诺——请自行评估风险，
-              确认信任来源后再决定是否安装。
-            </div>
-          </div>
+          <PluginDetailBody
+            row={detailRow}
+            outdatedTo={
+              detailRow.installedHere && isOutdated(detailRow.name)
+                ? pluginVers[detailRow.name]?.latest ?? null
+                : null
+            }
+          />
         ) : null}
       </AppModal>
 
@@ -899,7 +878,8 @@ export default function PluginManagerPanel() {
           onPressEnter={submitAdd}
         />
         <div className="plugin-add-hint">
-          将执行 dsh plugin --profile web add {'{'}规格{'}'}；支持包名、name@version 或 github:user/repo
+          将执行 dsh plugin --profile web add {'{'}规格{'}'}；支持包名、name@version 或 github:user/repo。
+          本应用自身（dsh / deepseek-harness）请在「关于本应用」更新 dsh CLI。
         </div>
       </AppModal>
     </>

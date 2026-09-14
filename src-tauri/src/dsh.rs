@@ -24,6 +24,9 @@ pub const WEB_EXIT_EVENT: &str = "dsh://web-exit";
 pub const URL_EVENT: &str = "dsh://url";
 pub const PLUGIN_OP_LOG_EVENT: &str = "dsh://plugin-op-log";
 pub const PLUGIN_OP_EXIT_EVENT: &str = "dsh://plugin-op-exit";
+/// dsh CLI 更新（卸载 → 重装）的流式输出 / 完成事件（设置窗口「关于本应用」发起）
+pub const DSH_UPDATE_LOG_EVENT: &str = "dsh://dsh-update-log";
+pub const DSH_UPDATE_EXIT_EVENT: &str = "dsh://dsh-update-exit";
 /// 请求主窗口执行「停止 → 重新启动服务」：设置窗口的弹框（模型代理 / 插件变更）
 /// 用它把重启交给主窗口，复用同一套状态机与日志会话处理（见 BottomBar）。
 pub const RESTART_REQUEST_EVENT: &str = "dsh://restart-request";
@@ -1324,7 +1327,7 @@ pub(crate) fn emit_log(app: &AppHandle, event: &str, stream: &str, line: &str) {
 /// （日志管理可事后查看，见 logs.rs）
 pub(crate) fn emit_plugin_log(app: &AppHandle, stream: &str, line: &str) {
     emit_log(app, PLUGIN_OP_LOG_EVENT, stream, line);
-    crate::logs::append_active_plugin_log(app, stream, line);
+    crate::logs::append_active_op_log(app, stream, line);
 }
 
 /// 泵送子进程 stdout/stderr 直到进程退出，返回退出码；不负责发出 exit 事件。
@@ -1350,8 +1353,8 @@ pub(crate) fn pump_streams_until_exit(
                 if log_event == WEB_LOG_EVENT {
                     try_detect_url(&app_out, &line);
                 }
-                if log_event == PLUGIN_OP_LOG_EVENT {
-                    crate::logs::append_active_plugin_log(&app_out, "stdout", &line);
+                if log_event == PLUGIN_OP_LOG_EVENT || log_event == DSH_UPDATE_LOG_EVENT {
+                    crate::logs::append_active_op_log(&app_out, "stdout", &line);
                 }
             }
         }
@@ -1364,8 +1367,8 @@ pub(crate) fn pump_streams_until_exit(
             for line in reader.lines().map_while(Result::ok) {
                 let line = line.trim_end_matches('\r').to_string();
                 emit_log(&app_err, log_event, "stderr", &line);
-                if log_event == PLUGIN_OP_LOG_EVENT {
-                    crate::logs::append_active_plugin_log(&app_err, "stderr", &line);
+                if log_event == PLUGIN_OP_LOG_EVENT || log_event == DSH_UPDATE_LOG_EVENT {
+                    crate::logs::append_active_op_log(&app_err, "stderr", &line);
                 }
             }
         }
@@ -2127,6 +2130,125 @@ fn install_dsh_blocking(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// dsh CLI 更新日志：发事件给前端的同时镜像写入更新日志会话文件（日志管理可事后查看）
+fn emit_dsh_update_log(app: &AppHandle, stream: &str, line: &str) {
+    emit_log(app, DSH_UPDATE_LOG_EVENT, stream, line);
+    crate::logs::append_active_op_log(app, stream, line);
+}
+
+/// 校验/规范化更新目标版本（前端下拉框传入：dist-tag 如 "latest"，或具体版本如
+/// "0.1.5-rc.1"）。默认 latest；仅放行 npm 版本/dist-tag 字符集且不得以 "-" 开头，
+/// 防止把用户可控字符串拼成 pnpm 的参数。
+fn sanitize_dsh_version(version: Option<&str>) -> Result<String, String> {
+    let raw = version.map(str::trim).unwrap_or("");
+    let v = if raw.is_empty() { "latest" } else { raw };
+    let ok = v.len() <= 64
+        && !v.starts_with('-')
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        return Err(format!("非法的 dsh 版本号：{v:?}"));
+    }
+    Ok(v.to_string())
+}
+
+/// dsh CLI 更新：pnpm remove -g → pnpm add -g @deepseek-ai/dsh@<version>（两步串行）。
+///
+/// 事件：`dsh://dsh-update-log` 流式输出；两步全部结束后发一次
+/// `dsh://dsh-update-exit`（退出码 = 第一个非零步骤的退出码，全成为 0）。
+/// 与 install_dsh 的 install-exit 事件链分开：那条链的退出处理会自动续接
+/// startService（启动安装链的语义），更新流程的重启时机由前端自行裁决。
+/// 卸载失败即中止（现有安装保持不变）；重装失败时 dsh 处于缺失态，
+/// 后续启动链会按「缺失自动安装」自愈。日志同时写入独立会话（kind "env"）。
+#[tauri::command]
+pub async fn update_dsh_cli(app: AppHandle, version: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || update_dsh_cli_blocking(app, version.as_deref()))
+        .await
+        .map_err(|e| format!("更新任务异常: {e}"))?
+}
+
+fn update_dsh_cli_blocking(app: AppHandle, version: Option<&str>) -> Result<(), String> {
+    let target = sanitize_dsh_version(version)?;
+    // 更新会改变 dsh 的解析结果/版本：先让环境快照失效（结束后真读即得新版本）
+    invalidate_env_snapshot();
+    let pnpm =
+        resolve_pnpm().ok_or("未找到 pnpm，请先安装 pnpm（https://pnpm.io/zh-CN/installation）")?;
+
+    // 独立日志会话（kind "env"，日志管理「环境日志」筛选）：与服务会话并行不冲突
+    if let Err(e) = crate::logs::start_op_session(&app, "更新 dsh CLI", "env") {
+        eprintln!("[dsh-update] 创建日志会话失败: {e}");
+    }
+    emit_dsh_update_log(&app, "system", "开始更新 dsh CLI…");
+
+    // ① 卸载现有安装（失败即中止：现有安装保持不变）
+    emit_dsh_update_log(&app, "system", "① 卸载现有 @deepseek-ai/dsh …");
+    let mut cmd = Command::new(&pnpm);
+    cmd.args(["remove", "-g", "@deepseek-ai/dsh"])
+        // 关闭“清除模块目录”确认提示（无 TTY 时直接报 ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY）
+        .arg("--config.confirm-modules-purge=false")
+        .args(npm_mirror_args());
+    apply_pnpm_env(&app, DSH_UPDATE_LOG_EVENT, &mut cmd);
+    crate::proxy_config::apply_proxy_env(&app, DSH_UPDATE_LOG_EVENT, &mut cmd);
+    emit_dsh_update_log(&app, "system", &format!("$ {}", display_cmd(&cmd)));
+    let child = hide_window(&mut cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
+    let code1 = pump_streams_until_exit(&app, child, DSH_UPDATE_LOG_EVENT);
+    if code1 != 0 {
+        emit_dsh_update_log(
+            &app,
+            "error",
+            &format!("卸载失败（退出码 {code1}），已中止更新，现有安装保持不变"),
+        );
+        crate::logs::finish_active_op_session(&app, "error");
+        let _ = app.emit(DSH_UPDATE_EXIT_EVENT, ExitPayload { code: code1 });
+        return Ok(());
+    }
+    emit_dsh_update_log(&app, "success", "卸载完成");
+
+    // ② 按所选版本重装
+    emit_dsh_update_log(
+        &app,
+        "system",
+        &format!("② 全局安装 @deepseek-ai/dsh@{target} …"),
+    );
+    let mut cmd = Command::new(&pnpm);
+    cmd.args(["add", "-g", &format!("@deepseek-ai/dsh@{target}")])
+        .arg("--config.confirm-modules-purge=false")
+        .args(npm_mirror_args());
+    apply_pnpm_env(&app, DSH_UPDATE_LOG_EVENT, &mut cmd);
+    crate::proxy_config::apply_proxy_env(&app, DSH_UPDATE_LOG_EVENT, &mut cmd);
+    emit_dsh_update_log(&app, "system", &format!("$ {}", display_cmd(&cmd)));
+    let child = hide_window(&mut cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 pnpm 失败: {e}"))?;
+    let code2 = pump_streams_until_exit(&app, child, DSH_UPDATE_LOG_EVENT);
+    if code2 == 0 {
+        emit_dsh_update_log(
+            &app,
+            "success",
+            &format!("已更新到 @deepseek-ai/dsh@{target}"),
+        );
+        // 再失效一次：add 可能装出与 remove 前不同的路径/版本
+        invalidate_env_snapshot();
+    } else {
+        emit_dsh_update_log(
+            &app,
+            "error",
+            &format!("重装失败（退出码 {code2}）：dsh 当前缺失，重试或启动应用时会自动重新安装"),
+        );
+    }
+    crate::logs::finish_active_op_session(&app, if code2 == 0 { "success" } else { "error" });
+    let _ = app.emit(DSH_UPDATE_EXIT_EVENT, ExitPayload { code: code2 });
+    Ok(())
+}
+
 /// 启动 dsh web（流式输出；子进程存活期间持有 pid）。
 ///
 /// 异步命令 + spawn_blocking：启动链要枚举进程（netstat/tasklist）、taskkill 并
@@ -2406,7 +2528,8 @@ pub fn run_plugin_op(
         "update" => "更新",
         _ => "卸载",
     };
-    if let Err(e) = crate::logs::start_plugin_session(&app, &format!("{op_verb}插件 {name}")) {
+    if let Err(e) = crate::logs::start_op_session(&app, &format!("{op_verb}插件 {name}"), "plugin")
+    {
         eprintln!("[plugin-op] 创建插件日志会话失败: {e}");
     }
 
@@ -2443,7 +2566,7 @@ pub fn run_plugin_op(
             std::thread::spawn(move || {
                 let code = pump_process(&app2, child, PLUGIN_OP_LOG_EVENT, PLUGIN_OP_EXIT_EVENT);
                 // 按退出码落插件日志会话状态并补写结束时间
-                crate::logs::finish_active_plugin_session(
+                crate::logs::finish_active_op_session(
                     &app2,
                     if code == 0 { "success" } else { "error" },
                 );
@@ -2456,7 +2579,7 @@ pub fn run_plugin_op(
         Err(e) => {
             *state.plugin_op.lock().unwrap() = None;
             emit_plugin_log(&app, "error", &format!("启动失败: {e}"));
-            crate::logs::finish_active_plugin_session(&app, "error");
+            crate::logs::finish_active_op_session(&app, "error");
             Err(format!("启动插件操作失败: {e}"))
         }
     }
@@ -2788,22 +2911,22 @@ fn read_profile_plugins() -> (bool, Vec<String>) {
 /// 从 profile package.json 卸载插件（命令包装）：写入插件日志会话后转交内部实现
 #[tauri::command]
 pub fn remove_plugin(app: AppHandle, name: String) -> Result<(), String> {
-    if let Err(e) = crate::logs::start_plugin_session(&app, &format!("卸载插件 {name}")) {
+    if let Err(e) = crate::logs::start_op_session(&app, &format!("卸载插件 {name}"), "plugin") {
         eprintln!("[plugin-op] 创建插件日志会话失败: {e}");
     }
     let r = remove_plugin_inner(name);
     match &r {
         Ok(_) => {
-            crate::logs::append_active_plugin_log(
+            crate::logs::append_active_op_log(
                 &app,
                 "system",
                 "已从 profile 移除插件，登记的依赖将在下次启动时清理",
             );
-            crate::logs::finish_active_plugin_session(&app, "success");
+            crate::logs::finish_active_op_session(&app, "success");
         }
         Err(e) => {
-            crate::logs::append_active_plugin_log(&app, "error", e);
-            crate::logs::finish_active_plugin_session(&app, "error");
+            crate::logs::append_active_op_log(&app, "error", e);
+            crate::logs::finish_active_op_session(&app, "error");
         }
     }
     r
@@ -3038,10 +3161,12 @@ pub async fn set_notify_enabled(
     Ok(())
 }
 
-/// 设置 toast 投递方式：0 = legacy（不可点击，原 notify-rust 样式）、
-/// 1 = clickable（可点击，带「打开对话」按钮，点击直达对应会话对话框）。
-/// 切到可点击时补一条自检通知：自检消息带会话位，按钮会真实显示出来，
-/// 让用户立刻看到新样式长什么样（点击自检按钮只会恢复窗口，桥找不到
+/// 设置 toast 投递方式：0 = 不带按钮（原 notify-rust 样式，仅展示）、
+/// 1 = 带按钮（toast 上挂「打开对话」按钮，点击直达对应会话对话框）。
+///
+/// **每次切换都补一条自检通知**（不限方向）：设置页上这是个 Switch，用户拨动它
+/// 就是为了「看看另一种长什么样」，只有真实弹出来才能对比。自检消息带会话位，
+/// 可带按钮的样式下按钮会真实渲染出来（点击自检按钮只会恢复窗口，桥找不到
 /// 「sample」会话会静默降级）。异步定义原因同 `set_notify_enabled`。
 #[tauri::command]
 pub async fn set_notify_style(
@@ -3052,7 +3177,7 @@ pub async fn set_notify_style(
     let prev = state
         .notify_style
         .swap(style, std::sync::atomic::Ordering::SeqCst);
-    if style == 1 && prev != 1 {
+    if prev != style {
         crate::notify::push_sample(&app);
     }
     Ok(())
@@ -3067,17 +3192,35 @@ pub async fn set_notify_style(
 // 仅放行 https 请求，避免被当作任意 URL 代理滥用。
 
 /// 以 GET 请求一个 https URL，返回响应体文本（JSON 字符串由前端解析）。
+///
+/// `accept`：可选的 Accept 请求头。GitHub 的 README 接口需要
+/// `Accept: application/vnd.github.raw` 才会返回原始 Markdown 正文
+/// （否则返回 base64 包装的 JSON）；其他调用方传 None 保持原有行为。
+/// 只接受包含 `application/` 或 `text/` 的取值，避免被当作任意头注入通道。
 #[tauri::command]
-pub async fn http_get_json(url: String) -> Result<String, String> {
+pub async fn http_get_json(url: String, accept: Option<String>) -> Result<String, String> {
     if !url.starts_with("https://") {
         return Err("仅支持 https 请求".into());
     }
+    let accept = match accept {
+        Some(a) if !a.is_empty() => {
+            if !a.starts_with("application/") && !a.starts_with("text/") {
+                return Err("非法的 Accept 头".into());
+            }
+            Some(a)
+        }
+        _ => None,
+    };
     let resp = tauri::async_runtime::spawn_blocking(move || {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(12))
             .user_agent("deepseek-harness-desktop")
             .build();
-        agent.get(&url).call()
+        let mut req = agent.get(&url);
+        if let Some(a) = accept.as_deref() {
+            req = req.set("Accept", a);
+        }
+        req.call()
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -3302,6 +3445,30 @@ mod tests {
         assert!(
             cached_tool_ok(&tool, "dsh").is_none(),
             "无指纹的旧缓存项不得命中"
+        );
+    }
+
+    /// 更新目标版本校验：放行正常版本号 / dist-tag，拦下会被拼成 pnpm 参数的输入
+    #[test]
+    fn sanitize_dsh_version_allows_versions_and_rejects_options() {
+        assert_eq!(sanitize_dsh_version(None).unwrap(), "latest");
+        assert_eq!(sanitize_dsh_version(Some("")).unwrap(), "latest");
+        assert_eq!(
+            sanitize_dsh_version(Some(" 0.1.5-rc.1 ")).unwrap(),
+            "0.1.5-rc.1"
+        );
+        assert_eq!(sanitize_dsh_version(Some("next")).unwrap(), "next");
+        assert!(
+            sanitize_dsh_version(Some("--force")).is_err(),
+            "以 - 开头的输入会被 pnpm 当作参数，必须拒绝"
+        );
+        assert!(
+            sanitize_dsh_version(Some("0.1.5 rc1")).is_err(),
+            "含空格必须拒绝"
+        );
+        assert!(
+            sanitize_dsh_version(Some("v1;rm")).is_err(),
+            "特殊字符必须拒绝"
         );
     }
 

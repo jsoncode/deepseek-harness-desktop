@@ -138,8 +138,8 @@ export interface LogSessionMeta {
   ended_at: number | null;
   /** "active" | "success" | "error" | "closed" */
   status: string;
-  /** "service"（服务启动/重启）| "plugin"（插件操作） */
-  kind: "service" | "plugin";
+  /** "service"（服务启动/重启）| "plugin"（插件操作）| "env"（dsh CLI 等环境操作） */
+  kind: "service" | "plugin" | "env";
   lines: number;
 }
 
@@ -157,13 +157,14 @@ export const EVENTS = {
   envInstallExit: "dsh://env-install-exit",
   pluginOpLog: "dsh://plugin-op-log",
   pluginOpExit: "dsh://plugin-op-exit",
+  /** dsh CLI 更新（卸载→重装）的流式输出 / 完成事件（设置窗口「关于本应用」，见 DshUpdateModal） */
+  dshUpdateLog: "dsh://dsh-update-log",
+  dshUpdateExit: "dsh://dsh-update-exit",
   webLog: "dsh://web-log",
   webExit: "dsh://web-exit",
   url: "dsh://url",
   /** 设置窗口请求主窗口重启服务（模型代理启用 / 插件变更后的弹框，见 ServiceRestartHandler） */
   restartRequest: "dsh://restart-request",
-  /** preview 子 webview 桥接上报：宿主主题切换（dark 布尔，见 preview.rs THEME_SYNC_BRIDGE） */
-  previewTheme: "dsh://preview-theme",
   /** preview 子 webview 桥接上报：插件加载失败（items = 失败插件名，见 PLUGIN_FAILURE_BRIDGE） */
   previewPluginFailed: "dsh://preview-plugin-failed",
   /** preview 子 webview 桥接上报：会话打开回执（重试看门狗用，见 SESSION_OPEN_BRIDGE） */
@@ -362,6 +363,11 @@ export const api = {
     requireTauri(() => invoke<ToolCheck>("check_tool", { tool })),
   probeService: (url: string) => requireTauri(() => invoke<boolean>("probe_service", { url })),
   installDsh: () => requireTauri(() => invoke<void>("install_dsh")),
+  /** 更新 dsh CLI：应用内执行 `pnpm remove -g` → `pnpm add -g @deepseek-ai/dsh@<version>`。
+   *  version 为 npm dist-tag（"latest"）或具体版本号；日志走 dsh://dsh-update-log，
+   *  完成码走 dsh://dsh-update-exit（两步串行，取第一个非零退出码） */
+  updateDshCli: (version: string) =>
+    requireTauri(() => invoke<void>("update_dsh_cli", { version })),
   /** 安装缺失的环境依赖：tool = "node" | "pnpm"（按平台自动选择 winget/brew/npm 指令） */
   installEnvTool: (tool: "node" | "pnpm") =>
     requireTauri(() => invoke<void>("install_env_tool", { tool })),
@@ -375,9 +381,15 @@ export const api = {
   openInBrowser: (url: string) => requireTauri(() => invoke<void>("open_in_browser", { url })),
   /** 打开设置独立窗口（已开则聚焦并切到目标分区）：主窗口所有设置入口统一走此命令。
    *  section 省略时仅聚焦（不重置用户所在分区）；
+   *  action 为分区内的可选动作（如 "dsh-update" 打开 dsh CLI 更新弹框）；
    *  失败时由调用方回退主窗口内 /settings 深链（壳层兼容渲染） */
-  openSettings: (section?: string) =>
-    requireTauri(() => invoke<void>("open_settings", { section: section ?? null })),
+  openSettings: (section?: string, action?: string) =>
+    requireTauri(() =>
+      invoke<void>("open_settings", {
+        section: section ?? null,
+        action: action ?? null,
+      }),
+    ),
   removePlugin: (name: string) => requireTauri(() => invoke<void>("remove_plugin", { name })),
   runPluginOp: (op: string, name: string) =>
     requireTauri(() => invoke<void>("run_plugin_op", { op, name })),
@@ -387,8 +399,9 @@ export const api = {
   /** 系统推送总开关：Rust 侧后台订阅线程按此决定是否投递通知 */
   setNotifyEnabled: (enabled: boolean) =>
     requireTauri(() => invoke<void>("set_notify_enabled", { enabled })),
-  /** 系统推送样式：1 = 可点击（带「打开对话」按钮，点击直达对应会话），
-   *  0 = 不可点击（原 notify-rust 样式，仅展示） */
+  /** 系统推送样式：1 = 带按钮（toast 上挂「打开对话」按钮，点击直达对应会话），
+   *  0 = 不带按钮（原 notify-rust 样式，仅展示）。每次切换 Rust 侧都会补一条
+   *  自检通知，便于用户直接对比两种样式的外观 */
   setNotifyStyle: (style: 0 | 1) =>
     requireTauri(() => invoke<void>("set_notify_style", { style })),
   /** 语音播报配置（enabled/播报内容/python/仓库目录/模型目录，见 tts.rs）；
@@ -488,8 +501,13 @@ export const api = {
   /** 删除一条历史记录（无其他记录引用同一文件时连 WAV 一起删除） */
   ttsHistoryDelete: (id: string) =>
     requireTauri(() => invoke<void>("tts_history_delete", { id })),
-  /** GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端 */
-  httpGetJson: (url: string) => requireTauri(() => invoke<string>("http_get_json", { url })),
+  /**
+   * GitHub / npm 市场请求代理：打包版 CSP 拦截前端直连外网，统一走后端。
+   * `accept` 用于需要特定内容协商的接口（如 GitHub README 的
+   * `application/vnd.github.raw`），普通 JSON 接口省略即可。
+   */
+  httpGetJson: (url: string, accept?: string) =>
+    requireTauri(() => invoke<string>("http_get_json", { url, accept: accept ?? null })),
   /** 启动 dsh 前的凭据配置文件格式兼容性检查（不兼容时返回打码内容与最新格式模板） */
   checkCredentialsCompat: () =>
     requireTauri(() => invoke<CredentialsCheck>("check_credentials_compat")),

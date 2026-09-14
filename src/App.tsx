@@ -70,7 +70,7 @@ export default function App() {
     el.dataset.theme = effective;
     el.style.colorScheme = effective;
     // 写入跨窗口生效主题键：storage 事件不回送写入方，设置/语音合成等窗口经此
-    // 跟随真实生效主题——含 host 模式（宿主主题只到达主窗口）
+    // 跟随主窗口的真实生效主题
     try {
       localStorage.setItem(EFFECTIVE_STORAGE_KEY, effective);
     } catch {

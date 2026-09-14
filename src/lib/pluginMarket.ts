@@ -13,7 +13,11 @@
  *   （用户可自带 topic:/in: 等语法，平台直接解析）；
  * - 作者推荐（author）：检索式固定为 AUTHOR_QUERY（dsh- user:jsoncode），
  *   不接受用户关键词，走的仍是 GitHub 仓库搜索接口与同一套分页/排序规则，
- *   因此 UI 上无需搜索框；
+ *   因此 UI 上无需搜索框；**安装规格优先 npm**：每个仓库先在 npm registry 直查
+ *   同名包（精确命中、无搜索限流），latest 版本声明 keywords:dsh-plugin 才采纳
+ *   （防同名无关包误装），此时安装走 npm 包（可随 npm 版本更新、装的是发布版），
+ *   找不到或校验不过再回退 github:{full_name}（拉仓库源码）。结果按仓库名缓存，
+ *   翻页/切换来源不重复请求；
  * - 排序：GitHub stars/date 走服务端 sort 参数；npm 接口无排序参数，
  *   周下载/发布日期在客户端对当前页排序（保持旧行为）。
  */
@@ -44,6 +48,10 @@ export interface MarketPlugin {
   stars: number | null;
   version: string | null;
   releasedAt: string | null; // ISO
+  /** 源码仓库地址（GitHub）：详情弹框据此显示 Issues 入口并拉取 README；未知为 null */
+  repoUrl: string | null;
+  /** 缺陷跟踪地址（npm 包可由 package.links.bugs 提供）：优先于 repoUrl 的 /issues */
+  issuesUrl: string | null;
 }
 
 export interface MarketPage {
@@ -116,6 +124,7 @@ async function fetchJson<T>(url: string, timeoutMs = 10000): Promise<T> {
 interface GhItem {
   name?: string;
   full_name?: string;
+  html_url?: string;
   description?: string | null;
   stargazers_count?: number;
   pushed_at?: string;
@@ -126,6 +135,8 @@ interface GhItem {
 type GhSearchResponse = { total_count?: number; items?: GhItem[] };
 
 function mapGhItem(it: GhItem): MarketPlugin {
+  const full = it.full_name ?? it.name ?? "";
+  const repoUrl = it.html_url ?? (full ? `https://github.com/${full}` : null);
   return {
     key: it.full_name ?? it.name ?? Math.random().toString(36).slice(2),
     name: it.name ?? it.full_name ?? "—",
@@ -139,6 +150,8 @@ function mapGhItem(it: GhItem): MarketPlugin {
     stars: it.stargazers_count ?? null,
     version: null,
     releasedAt: it.pushed_at ?? it.created_at ?? null,
+    repoUrl,
+    issuesUrl: repoUrl ? `${repoUrl}/issues` : null,
   };
 }
 
@@ -151,10 +164,53 @@ interface NpmObject {
     description?: string | null;
     publisher?: { username?: string };
     maintainers?: Array<{ username?: string }>;
+    /** npm 包元数据里的源码仓库 / 缺陷跟踪地址（npm search 接口直接返回，无需二次请求） */
+    links?: { repository?: string; bugs?: string; homepage?: string };
   };
 }
 
+/**
+ * npm `repository` 字段形态不一：可能是字符串、`{url}` 对象，
+ * 也可能是 `git+https://github.com/u/r.git`、`git://…` 等 git 协议写法。
+ * 统一归一化为可点击的 https 仓库地址；无法识别为非 GitHub 的返回 null
+ * （后续的 Issues 入口与 README 拉取都依赖 GitHub API）。
+ */
+export function normalizeRepoUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let s = raw.trim();
+  if (!s) return null;
+  // github 的简写形式 owner/repo
+  if (/^[\w.-]+\/[\w.-]+$/.test(s)) s = `https://github.com/${s}`;
+  s = s
+    .replace(/^git\+/, "")
+    .replace(/^git:\/\//, "https://")
+    .replace(/^ssh:\/\/git@/, "https://")
+    .replace(/^git@([^:]+):/, "https://$1/")
+    .replace(/\.git$/, "");
+  if (!/^https?:\/\//.test(s)) return null;
+  try {
+    const u = new URL(s);
+    if (!/(^|\.)github\.com$/i.test(u.hostname)) return null;
+    // 去掉树状路径与片段，只保留 owner/repo 两段
+    const seg = u.pathname.replace(/^\/+|\/+$/g, "").split("/").slice(0, 2).join("/");
+    return seg ? `https://github.com/${seg}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** npm `bugs` 字段同样可能是字符串或 `{url}` 对象 */
+function normalizeBugsUrl(raw: unknown): string | null {
+  if (!raw) return null;
+  if (typeof raw === "object") {
+    const u = (raw as { url?: string }).url;
+    return typeof u === "string" && u.startsWith("http") ? u : null;
+  }
+  return typeof raw === "string" && raw.startsWith("http") ? raw : null;
+}
+
 function mapNpmObject(o: NpmObject): MarketPlugin {
+  const repoUrl = normalizeRepoUrl(o.package?.links?.repository);
   return {
     key: o.package?.name ?? Math.random().toString(36).slice(2),
     name: o.package?.name ?? "—",
@@ -169,6 +225,9 @@ function mapNpmObject(o: NpmObject): MarketPlugin {
     stars: null,
     version: o.package?.version ?? null,
     releasedAt: o.package?.date ?? null,
+    repoUrl,
+    // npm 显式声明 bugs.url 高于推导出的 /issues（部分包用 issue tracker 而非 GitHub Issues）
+    issuesUrl: normalizeBugsUrl(o.package?.links?.bugs) ?? (repoUrl ? `${repoUrl}/issues` : null),
   };
 }
 
@@ -222,6 +281,7 @@ function githubSortParam(sort: MarketSort): string {
  * GitHub 仓库搜索一页。
  * @param q 检索式；raw=true 时原样发出（作者推荐的固定检索式），
  *          否则走 buildGithubQ 补齐「未输入关键词 → dsh-plugin 全集」的默认词。
+ *          raw（作者推荐）时逐仓解析 npm 同名包：命中则安装规格改用 npm 包名。
  */
 async function fetchGithubPage(
   q: string,
@@ -230,7 +290,97 @@ async function fetchGithubPage(
   raw = false,
 ): Promise<MarketPage> {
   const r = await fetchGithubSearch(raw ? q : buildGithubQ(q), githubSortParam(sort), page);
-  return { total: r.total_count ?? 0, items: (r.items ?? []).map(mapGhItem) };
+  const items = (r.items ?? []).map(mapGhItem);
+  if (!raw) return { total: r.total_count ?? 0, items };
+  // 作者推荐：逐仓解析 npm 同名包（并发直查 registry），命中改用 npm 规格。
+  // 单个解析失败不影响整页：该行回退 github: 规格。
+  const resolved = await Promise.allSettled(items.map((it) => resolveNpmForRepo(it.name)));
+  const enriched = items.map((it, i) => {
+    const hit = resolved[i].status === "fulfilled" ? resolved[i].value : null;
+    // 版本列改显 npm 最新版（安装来源即 npm）；releasedAt 保持 GitHub pushed_at——
+    // 本页排序是服务端按 pushed_at 排的，改掉会让日期列与排序脱节
+    return hit ? { ...it, spec: hit.name, version: hit.version } : it;
+  });
+  return { total: r.total_count ?? 0, items: enriched };
+}
+
+/** npm packument 摘要（直查单个包用） */
+interface NpmPackument {
+  "dist-tags"?: Record<string, string>;
+  versions?: Record<string, { keywords?: string[] } | undefined>;
+}
+
+interface ResolvedNpm {
+  /** npm 包名（= 仓库名），作为 dsh plugin add 的规格 */
+  name: string;
+  /** dist-tags.latest，供版本列展示 */
+  version: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// 本应用自身（DeepSeek Harness Desktop / dsh CLI）识别
+// ---------------------------------------------------------------------------
+
+/**
+ * 宿主自身的包名/仓库名（小写、已归一化分隔符后）：
+ * - deepseek-harness-desktop / deepseek-harness / harness-desktop / deepseek_harness…
+ * - dsh / @deepseek-ai/dsh（dsh CLI 的包名与 bin 名）
+ *
+ * 归一化（去掉 - _ . / 空白与 @ 作用域前缀）后比较，因此 NPM 搜索结果里的
+ * `@deepseek-ai/dsh`、GitHub 上的 `deepseek-harness-desktop`、手动输入
+ * `dsh` / `deepseek_harness` 都会命中。
+ */
+const SELF_PACKAGE_KEYS = new Set([
+  "deepseekharnessdesktop",
+  "deepseekharness",
+  "harnessdesktop",
+  "dsh",
+  "deepseekaidsh",
+]);
+
+/**
+ * 判断一个插件名/安装规格是否指向本应用自身（宿主 dsh CLI 或桌面壳仓库）。
+ * 用于把「安装本应用」从插件市场引流到「关于本应用」的 dsh CLI 更新弹框——
+ * 把它当普通插件装只会注入一份重复/过期的宿主，正确做法是更新 dsh CLI。
+ */
+export function isSelfPackage(nameOrSpec: string | null | undefined): boolean {
+  if (!nameOrSpec) return false;
+  // 去掉协议/来源前缀（github:、npm:、git+…）与仓库 owner（user/repo 里的 user），
+  // 再归一化比较：github:jsoncode/deepseek-harness-desktop 也要能命中。
+  let raw = nameOrSpec.trim().toLowerCase().replace(/^(github:|git\+|npm:)/, "");
+  if (raw.includes("/")) raw = raw.slice(raw.lastIndexOf("/") + 1);
+  const key = raw.replace(/^@/, "").replace(/[-_./\s@]/g, "");
+  return SELF_PACKAGE_KEYS.has(key);
+}
+
+/** npm 解析缓存（会话内，按仓库名）：翻页/切来源不重复请求 */
+const npmResolveCache = new Map<string, Promise<ResolvedNpm | null>>();
+
+/**
+ * 在 npm 上找与仓库同名的 dsh 插件包：registry 直查（精确命中、无搜索限流）。
+ * 采纳条件：存在 dist-tags.latest，且该版本声明 keywords 含 dsh-plugin——
+ * 防止同名无关包被误当插件安装。404（未发布）/网络失败/校验不过 → null（回退 github:）。
+ */
+function resolveNpmForRepo(name: string): Promise<ResolvedNpm | null> {
+  let p = npmResolveCache.get(name);
+  if (!p) {
+    p = doResolveNpm(name);
+    npmResolveCache.set(name, p);
+  }
+  return p;
+}
+
+async function doResolveNpm(name: string): Promise<ResolvedNpm | null> {
+  try {
+    const doc = await fetchJson<NpmPackument>(`https://registry.npmjs.org/${encodeURIComponent(name)}`);
+    const latest = doc["dist-tags"]?.latest;
+    if (!latest) return null;
+    const keywords = doc.versions?.[latest]?.keywords;
+    if (!Array.isArray(keywords) || !keywords.includes("dsh-plugin")) return null;
+    return { name, version: latest };
+  } catch {
+    return null;
+  }
 }
 
 function buildNpmUrl(text: string, size: number, from: number): string {
@@ -267,6 +417,85 @@ export function formatCount(n: number | null | undefined): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
   return String(n);
+}
+
+// ---------------------------------------------------------------------------
+// README 拉取（插件详情弹框）
+// ---------------------------------------------------------------------------
+
+/**
+ * README 拉取结果：
+ * - `ok`：拿到正文（markdown 原文）；
+ * - `empty`：仓库没有 README（GitHub 返回 404）；
+ * - `error`：网络失败 / 限流 / 其他异常。
+ * 用状态而非抛异常，是因为弹框需要区分「暂无 README」与「加载失败」两种提示。
+ */
+export type ReadmeResult =
+  | { state: "ok"; markdown: string }
+  | { state: "empty" }
+  | { state: "error"; message: string };
+
+/** README 正文体积上限：超长仓库（如 monorepo 全量说明）截断，避免弹框渲染卡顿 */
+const README_MAX_CHARS = 60000;
+
+/** 会话内 README 缓存（按仓库地址）：同一插件反复打开详情不重复请求 */
+const readmeCache = new Map<string, Promise<ReadmeResult>>();
+
+/**
+ * 拉取 GitHub 仓库 README 并返回 Markdown 原文。
+ *
+ * 走 `api.github.com/repos/{owner}/{repo}/readme` + `Accept: application/vnd.github.raw`：
+ * 该接口会自动定位默认分支下的 README（大小写/扩展名各异的 *.md / *.rst 均可命中），
+ * 响应体即正文本身——比拼接 raw.githubusercontent.com 少一次探测、也不用猜分支名
+ * （且 raw 域名在打包环境中常被网络策略拦截）。
+ *
+ * 结果按 repoUrl 缓存在会话内；失败不缓存，允许用户重试。
+ */
+export function fetchReadme(repoUrl: string): Promise<ReadmeResult> {
+  const cached = readmeCache.get(repoUrl);
+  if (cached) return cached;
+  const task = doFetchReadme(repoUrl);
+  readmeCache.set(repoUrl, task);
+  // 失败结果不留在缓存里，下次打开可重试
+  void task.then((r) => {
+    if (r.state === "error") readmeCache.delete(repoUrl);
+  });
+  return task;
+}
+
+async function doFetchReadme(repoUrl: string): Promise<ReadmeResult> {
+  const m = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)/i.exec(repoUrl);
+  if (!m) return { state: "error", message: "非 GitHub 仓库，暂不支持读取 README" };
+  const url = `https://api.github.com/repos/${m[1]}/${m[2]}/readme`;
+  try {
+    const text = tauri
+      ? await api.httpGetJson(url, "application/vnd.github.raw")
+      : await fetchText(url, "application/vnd.github.raw");
+    const body = text?.trim() ?? "";
+    if (!body) return { state: "empty" };
+    return {
+      state: "ok",
+      markdown: body.length > README_MAX_CHARS ? `${body.slice(0, README_MAX_CHARS)}\n\n…（内容过长，已截断）` : body,
+    };
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("404")) return { state: "empty" };
+    if (msg.includes("403")) return { state: "error", message: "GitHub 接口限流，请稍后再试" };
+    return { state: "error", message: "README 加载失败，请检查网络后重试" };
+  }
+}
+
+/** 浏览器预览模式：原生 fetch 取文本 */
+async function fetchText(url: string, accept: string): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: accept } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** ISO → YYYY-MM-DD */

@@ -7,3 +7,6 @@ src-tauri/gen
 .DS_Store
 .idea
 .vscode
+
+# 本地工作区（会话记忆 + 临时验证脚本），不随仓库分发
+.workbuddy-ai/

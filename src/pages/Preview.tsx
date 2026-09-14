@@ -3,7 +3,6 @@ import { useNavigate } from "react-router";
 import { api, EVENTS, onEvent, tauri } from "../lib/tauri";
 import { sameSiteEmbedUrl } from "../lib/urlMask";
 import { useAppStore } from "../store/useAppStore";
-import { useThemeStore } from "../store/useThemeStore";
 import { useUiStore } from "../store/useUiStore";
 
 /** 待打开会话的有效期：超过则视为陈旧丢弃（桥找不到目标或页面未恢复的兜底） */
@@ -47,7 +46,6 @@ export default function Preview() {
   const initialized = useAppStore((s) => s.initialized);
   const init = useAppStore((s) => s.init);
   const reportPluginLoadError = useAppStore((s) => s.reportPluginLoadError);
-  const setHostTheme = useThemeStore((s) => s.setHostTheme);
   const reloadKey = useUiStore((s) => s.reloadKey);
   const pendingOpenSession = useUiStore((s) => s.pendingOpenSession);
   const clearPendingOpenSession = useUiStore((s) => s.clearPendingOpenSession);
@@ -138,9 +136,6 @@ export default function Preview() {
   useEffect(() => {
     if (!nativeActive) return;
     const offs = [
-      onEvent<{ dark?: boolean }>(EVENTS.previewTheme, (p) => {
-        setHostTheme(p.dark ? "dark" : "light");
-      }),
       onEvent<{ items?: string[] }>(EVENTS.previewPluginFailed, (p) => {
         const items = (p.items ?? []).filter((x): x is string => typeof x === "string");
         if (items.length === 0) return;
@@ -155,7 +150,7 @@ export default function Preview() {
     return () => {
       for (const off of offs) void off;
     };
-  }, [nativeActive, setHostTheme, reportPluginLoadError, clearPendingOpenSession]);
+  }, [nativeActive, reportPluginLoadError, clearPendingOpenSession]);
 
   // 系统通知点击待打开的会话：原生路径 previewOpenSession 让子 webview 执行
   // __dshDesktopOpenSession（SESSION_OPEN_BRIDGE 定位会话行并模拟点击），回执经

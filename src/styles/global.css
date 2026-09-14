@@ -20,6 +20,13 @@
   --accent-2: #22d3ee;
   --accent-3: #a78bfa;
 
+  /* 设置页菜单选中态文字色。默认算法给的是 colorPrimary(#6366f1)，
+     压在 #07090d 上只有 4.46:1——低于 AA 正文线的 4.5，且明显暗于未选中项
+     （--text-1 有 17.6:1），于是「选中项反而比未选中更不显眼」。
+     这里取同色系提亮一档的 indigo，对比度约 10:1，既达标又保留品牌色。
+     （浅色主题下重定义为加深版本，见 html[data-theme="light"]） */
+  --nav-selected: #a5b4fc;
+
   --success: #34d399;
   --warn: #fbbf24;
   --danger: #f87171;
@@ -194,30 +201,7 @@ body {
    环境检测卡片（设置-关于本应用-系统环境）
    ========================================================================== */
 
-/* 环境检查卡片：逐项展示 Node.js / pnpm / dsh 状态 */
-.env-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: min(500px, 92%);
-  margin-bottom: 22px;
-  padding: 14px 18px;
-  border-radius: 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  animation: fadeUp 0.7s 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.env-card.bad {
-  border-color: rgba(248, 113, 113, 0.45);
-  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.12);
-}
-
-/* 服务运行中发现环境变化：不阻断，仅黄色提醒 */
-.env-card.warn {
-  border-color: rgba(250, 204, 21, 0.4);
-}
-
+/* 环境检查行：逐项展示 Node.js / pnpm / dsh 状态（平铺，无盒子） */
 .env-row {
   display: flex;
   align-items: baseline;
@@ -1634,6 +1618,11 @@ html[data-theme="light"] {
   --accent-2: #0891b2;
   --accent-3: #7c3aed;
 
+  /* 设置页菜单选中态文字色。不能直接用 --accent-1：那是给边框/图标用的，
+     作为正文压在同色底上只有约 4.2:1，勉强够大字号；这里取加深一档的紫，
+     在浅底上达到 AA 正文标准。 */
+  --nav-selected: #4f46e5;
+
   --success: #059669;
   --warn: #d97706;
   --danger: #dc2626;
@@ -1865,6 +1854,13 @@ html[data-theme="light"] .cred-fix-code {
   color: #eab308;
 }
 
+/* 本应用自身标记（dsh CLI / 桌面壳仓库）：不作为插件安装 */
+.pm-detail-badge.self {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.42);
+  color: var(--primary, #6366f1);
+}
+
 /* 版本信息行 */
 .pm-detail-versions {
   display: flex;
@@ -1964,6 +1960,345 @@ html[data-theme="light"] .pm-detail-desc {
   color: var(--text-3);
 }
 
+/* 自身包说明：替代免责声明，强调「这不是第三方插件，请去更新 dsh CLI」 */
+.pm-detail-self-note {
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px dashed rgba(99, 102, 241, 0.42);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
+/* 作者链接：@handle 可点开作者主页 */
+.pm-detail-author-link {
+  color: var(--primary, #6366f1);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.pm-detail-author-link:hover {
+  text-decoration: underline;
+}
+
+/* 仓库 / Issues 入口条：仅在有 GitHub 地址时出现 */
+.pm-detail-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.pm-detail-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-strong);
+  font-size: 11.5px;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.pm-detail-link:hover {
+  color: var(--primary, #6366f1);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+/* --------------------------------------------------------------------------
+   README 区块（详情弹框内按需展开）
+   -------------------------------------------------------------------------- */
+
+.pm-readme {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+html[data-theme="light"] .pm-readme {
+  background: rgba(15, 23, 42, 0.025);
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+/* 折叠头：整行可点，左侧三角指示展开态 */
+.pm-readme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 13px;
+  border: 0;
+  background: 0 0;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.pm-readme-toggle:hover {
+  background: var(--panel-strong);
+}
+
+.pm-readme-caret {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-3);
+  transition: transform 0.15s;
+}
+
+.pm-readme-caret.open {
+  transform: rotate(90deg);
+}
+
+/* 右侧灰色小字（加载中 / 字符数） */
+.pm-readme-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.pm-readme-panel {
+  border-top: 1px solid var(--border);
+  padding: 4px 14px 14px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+/* 空 / 加载 / 失败态 */
+.pm-readme-state {
+  padding: 14px 2px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.pm-readme-state.error {
+  color: #f87171;
+}
+
+/* ==========================================================================
+   Markdown 渲染（插件 README）
+   排版对齐 GitHub 阅读习惯，字号略小于正文以保证弹框内信息密度
+   ========================================================================== */
+
+.md-body {
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+/* 首个元素不带上边距，避免折叠面板内出现多余空白 */
+.md-body > *:first-child {
+  margin-top: 6px;
+}
+
+.md-h {
+  margin: 18px 0 8px;
+  color: var(--text-1);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.md-h1 {
+  font-size: 16px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.md-h2 {
+  font-size: 14.5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.md-h3 {
+  font-size: 13.5px;
+}
+
+.md-h4,
+.md-h5,
+.md-h6 {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.md-p {
+  margin: 8px 0;
+}
+
+.md-link {
+  color: var(--primary, #6366f1);
+  text-decoration: none;
+}
+
+.md-link:hover {
+  text-decoration: underline;
+}
+
+/* 行内代码 */
+.md-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-1);
+}
+
+/* 代码块：横向可滚动，避免长行撑破弹框 */
+.md-pre {
+  margin: 10px 0;
+  padding: 11px 13px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.md-pre code {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-1);
+  white-space: pre;
+}
+
+.md-list {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.md-list.ordered {
+  list-style: decimal;
+}
+
+.md-list:not(.ordered) {
+  list-style: disc;
+}
+
+.md-li {
+  margin: 3px 0;
+}
+
+/* 嵌套列表收紧间距 */
+.md-li-children {
+  margin-top: 2px;
+}
+
+.md-li-children .md-list {
+  margin: 2px 0;
+}
+
+/* 任务列表：去掉原生项目符号，用方框代替 */
+.md-li.task {
+  list-style: none;
+  margin-left: -18px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.md-check {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.md-check.on {
+  color: var(--success);
+}
+
+.md-li-text {
+  min-width: 0;
+}
+
+.md-quote {
+  margin: 10px 0;
+  padding: 2px 0 2px 13px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-3);
+}
+
+.md-quote .md-p {
+  margin: 5px 0;
+}
+
+.md-hr {
+  margin: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* 表格：外层容器横向滚动，表头略强 */
+.md-table-wrap {
+  margin: 10px 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.md-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.md-table th,
+.md-table td {
+  padding: 6px 11px;
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.md-table th:last-child,
+.md-table td:last-child {
+  border-right: 0;
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.md-table th {
+  background: var(--panel-strong);
+  color: var(--text-1);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 徽标图片：限制高度，避免 README 首屏被大图占满 */
+.md-img {
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+}
+
+/* 插件市场引流说明（关于本应用页）：从插件管理跳来更新 dsh CLI 时的上下文提示 */
+.about-update-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px dashed rgba(99, 102, 241, 0.42);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+
 /* ==========================================================================
    设置页（Settings）：左竖排 Menu 菜单区 + 右侧设置内容区
    内容区结构：固定顶部导航条（settings-nav）+ 可滚动内容（settings-body）
@@ -1976,60 +2311,83 @@ html[data-theme="light"] .pm-detail-desc {
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  gap: 14px;
-  padding: 14px 16px 16px;
+  /* 不留外边距：设置窗口内边到边铺满，由内容自身的内边距控制留白 */
+  gap: 0;
+  padding: 0;
 }
 
-/* 左侧菜单：竖排 Menu，独立玻璃面板 */
+/* 左侧菜单：竖排 Menu，裸列表（无卡片/玻璃面板）。
+   原先这里是一块玻璃面板，与右侧内容各自成框；叠上内容卡片后整页都是盒子，
+   因此把容器盒子去掉——只保留一个右分隔线区隔两栏。 */
 .settings-menu {
   flex-shrink: 0;
   width: 190px;
-  padding: 8px;
-  border-radius: 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  padding: 14px 10px;
+  border-right: 1px solid var(--border);
   overflow-y: auto;
 }
 
-/* antd Menu 与玻璃面板是同一个元素（ul 上同时挂着 .ant-menu 与 .settings-menu）：
-   antd 的默认底色、以及 inline 模式的内联右边框都要压掉，但面板自己的玻璃底色与
-   四边边框必须保住。历史写法只写 background: transparent，把 .settings-menu 的
-   面板底色一起清掉了（两条规则同元素，双类选择器优先级更高），左栏于是变成「裸
-   列表」——没有底色、右侧还留着 antd 的蓝色分隔线，与右侧 .settings-main 的玻璃
-   面板完全不对称。这里写回与 .settings-main 一致的底色与四边边框。
-   border 需 !important：antd 的 `.ant-menu-light.ant-menu-inline` 同样是双类
-   选择器，且其样式表注入在 global.css 之后，否则内联右边框会盖掉本面板边框。 */
+/* antd Menu 与菜单容器是同一个元素（ul 上同时挂着 .ant-menu 与 .settings-menu）：
+   antd 默认底色与 inline 模式的内联右边框都要压掉，只留上面那条右分隔线。
+   border 需 !important：antd 的 `.ant-menu-light.ant-menu-inline` 是双类选择器，
+   且其样式表注入在 global.css 之后；background 也一并透明，避免露出 antd 底色。
+   注意右分隔线写在 .settings-menu 上（border-right），这里不能写 border: none，
+   否则会把分隔线一起清掉——只覆盖 inline 模式的内联右边框。 */
 .settings-menu.ant-menu {
-  background: var(--panel);
-  border: 1px solid var(--border) !important;
+  background: transparent;
+  border-right: 1px solid var(--border) !important;
 }
 
-/* 右侧内容区：玻璃面板，导航条固定、内容区滚动 */
+/* 菜单项选中态配色（覆盖 antd 默认的 colorPrimary）。
+   默认算法把选中项文字设成 colorPrimary(#6366f1)：暗色下压在同色底上只有
+   4.46:1，比未选中项的 17.6:1 暗得多，看起来像是"被禁用"而不是"被选中"。
+   这里显式改用 --nav-selected（暗色提亮 / 浅色加深），并配一层极淡的同色底，
+   让选中状态靠"文字更亮 + 底色微亮"双重表达。
+   选择器需带上 .ant-menu 前缀（双类）以压过 antd 运行时注入的单类规则，
+   且 antd 的样式表注入在 global.css 之后，故颜色声明用 !important。 */
+.settings-menu.ant-menu .ant-menu-item-selected,
+.settings-menu.ant-menu .ant-menu-submenu-selected > .ant-menu-submenu-title {
+  color: var(--nav-selected) !important;
+  font-weight: 600;
+}
+
+/* 选中项底色：极淡的品牌色，仅用于强化区块感，不喧宾夺主 */
+.settings-menu.ant-menu .ant-menu-item-selected {
+  background: rgba(99, 102, 241, 0.14) !important;
+}
+
+/* 悬停态：未选中项悬停时不要盖过选中项，保持层次 */
+.settings-menu.ant-menu .ant-menu-item:not(.ant-menu-item-selected):hover,
+.settings-menu.ant-menu .ant-menu-submenu-title:hover {
+  color: var(--text-1) !important;
+}
+
+/* 右侧内容区：只做纵向布局与裁切（导航条固定、内容区滚动）。
+   min-height: 0 是 flex 滚动容器的必要约束：缺了它内部 overflow-y 不生效。
+   overflow: hidden 负责滚动边界。 */
 .settings-main {
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-radius: 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   overflow: hidden;
 }
 
-/* 内容区顶部固定导航条：展示区块标题与区块级操作（如「检查更新」） */
+/* 内容区顶部导航条（settings-nav / settings-nav-title / settings-nav-actions）：
+   设置页已不再使用——右侧标题栏整体去掉后，各设置区块直接以内容开场（插件管理、
+   日志管理等带操作的区块把工具栏放进内容区顶部，见 .log-toolbar）。
+   保留这三条规则是因为**独立工具窗口仍在用**（/tts-studio、/kokoro-studio、
+   /tts-studio/history，它们是「settings-nav + settings-body」两段式，外面没有
+   .settings-main 包裹，直接挂在 .app-content 下），删掉会让这些窗口的标题栏塌掉。 */
 .settings-nav {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 18px;
+  padding: 18px 24px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel-strong);
+  background: transparent;
 }
 
 .settings-nav-title {
@@ -2045,12 +2403,61 @@ html[data-theme="light"] .pm-detail-desc {
   gap: 8px;
 }
 
-/* 内容区：超出时滚动 */
+/* 日志管理卡片（.log-card）：工具栏 + 会话列表同处一张卡片。
+   工具栏在卡片顶部，用一条底部分隔线与下方列表分开——它现在是卡片内的头部
+   而不是浮在卡片外的操作条，所以间距靠 padding + 分隔线，不用 margin 往外推。 */
+.log-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 日志管理：进行中会话的自动刷新提示（在筛选组右侧，与操作按钮分列两端） */
+.log-live-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.32);
+  color: var(--accent-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.log-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  box-shadow: 0 0 6px rgba(34, 211, 238, 0.75);
+  animation: pulseDot 1.6s ease-in-out infinite;
+}
+
+/* 内容区：超出时滚动。左右内边距与导航条一致（24px），使卡片与标题左右对齐。
+   同 .settings-nav：基础值服务工具窗口，设置页内的覆写在下方 .settings-main 段。 */
 .settings-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px;
+  padding: 18px 24px 24px;
 }
 
 /* flush 容器：内容自管理滚动（插件管理面板），外层不再滚动 */
@@ -2060,7 +2467,17 @@ html[data-theme="light"] .pm-detail-desc {
   flex-direction: column;
 }
 
-/* 设置卡片 */
+/* --------------------------------------------------------------------------
+   设置页专属微调：只在 .settings-main 内部生效，不影响工具窗口。
+   设置页已去掉菜单卡片、内容外层卡片与外边距，并且**去掉了右侧标题栏**
+   （.settings-nav 不再出现在设置页里，仅工具窗口保留），整页贴边铺满。
+   因此这里把内容区留白收紧一档，让首张卡片从顶部适度起排，避免裸布局显松。
+   -------------------------------------------------------------------------- */
+.settings-main .settings-body {
+  padding: 16px 22px 22px;
+}
+
+/* 设置卡片：独立自足的玻璃盒子，完整四边框与圆角，自成一体的分组容器 */
 .settings-card {
   padding: 18px;
   border-radius: 12px;
@@ -2079,10 +2496,32 @@ html[data-theme="light"] .pm-detail-desc {
   margin-bottom: 6px;
 }
 
-/* 系统环境卡片内嵌环境检查列表：铺满卡片宽度，去掉启动页遗留的外边距 */
-.about-env-card {
-  width: 100%;
-  margin-bottom: 0;
+/* 「关于本应用」平铺分区标题：应用信息卡片内的轻量行（顶部分隔线 + 右侧操作按钮），
+   替代原先各自独立卡片/内嵌盒子的呈现 */
+.about-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* 分区标题下第一段内容的间距（如系统环境的环境行列表、版本更新的说明文字） */
+.about-section-body-gap {
+  margin-top: 10px;
+}
+
+/* 系统环境的环境行列表：只承担纵向排布与间距（无盒子/边框，随卡片平铺） */
+.about-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .settings-desc {
@@ -2090,6 +2529,12 @@ html[data-theme="light"] .pm-detail-desc {
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--text-3);
+}
+
+/* 收尾说明：放在若干设置行之后（而非之前）。上面的 14px 下边距在行前是
+   「与控件拉开距离」，落到行后就成了多余的空档，故改为小上边距、无下边距。 */
+.settings-desc-tail {
+  margin: 10px 0 0;
 }
 
 /* 设置行：左文案右控件 */
@@ -2101,6 +2546,261 @@ html[data-theme="light"] .pm-detail-desc {
   padding: 10px 0 4px;
   font-size: 13px;
   color: var(--text-2);
+}
+
+/* --------------------------------------------------------------------------
+   主题设置：带迷你预览的模式卡片
+   -------------------------------------------------------------------------- */
+
+/* 四列自适应：窗口窄时自动折行，卡片最小 150px 保证预览图不变形 */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+/* 模式卡片：整卡可点，选中态用 accent 边框 + 浅底强调 */
+.theme-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.theme-option:hover {
+  border-color: rgba(99, 102, 241, 0.5);
+  transform: translateY(-1px);
+}
+
+.theme-option.active {
+  border-color: var(--accent-1);
+  background: rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 1px var(--accent-1) inset;
+}
+
+/* 浅色主题下 accent 半透明底会偏灰，改用更实一点的靛蓝浅底保证选中态可辨 */
+html[data-theme="light"] .theme-option.active {
+  background: rgba(99, 102, 241, 0.14);
+}
+
+/* 选中角标：右上角对勾 */
+.theme-option-check {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 10px;
+  box-shadow: 0 4px 10px -3px rgba(99, 102, 241, 0.8);
+}
+
+/* 迷你界面预览：侧栏 + 内容块，两种明暗各自配色（不跟随当前主题，永远是示意） */
+.theme-preview {
+  display: flex;
+  gap: 5px;
+  height: 58px;
+  padding: 7px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.theme-preview.dark {
+  background: #0b0e15;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.theme-preview.light {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+.theme-preview-side {
+  flex-shrink: 0;
+  width: 22px;
+  border-radius: 4px;
+}
+
+.theme-preview.dark .theme-preview-side {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.theme-preview.light .theme-preview-side {
+  background: rgba(15, 23, 42, 0.09);
+}
+
+.theme-preview-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* 顶部横条：模拟导航条/标题 */
+.theme-preview-bar {
+  height: 8px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+
+.theme-preview-line {
+  height: 6px;
+  border-radius: 3px;
+}
+
+.theme-preview-line.short {
+  width: 62%;
+}
+
+.theme-preview.dark .theme-preview-line {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.theme-preview.light .theme-preview-line {
+  background: rgba(15, 23, 42, 0.11);
+}
+
+/* --------------------------------------------------------------------------
+   「跟随系统」的斜切对比预览
+   --------------------------------------------------------------------------
+   外框只负责裁切与描边，两个绝对定位色块各自铺满整块，再用 clip-path 沿对角线
+   切开——分界线是干净的斜线，而不是渐变的灰过渡（渐变会把黑白对比糊掉）。
+   切角固定用 px 保证不同卡宽下斜线角度一致、不随宽度拉伸变形。 */
+.theme-preview.split {
+  position: relative;
+  display: block;
+  padding: 0;
+  /* 斜切会切到边角，圆角需略收以免露出外层的直角底色 */
+  border-radius: 8px;
+}
+
+/* 两块底色：各自铺满整个预览框，靠 clip-path 决定可见部分 */
+.theme-preview-half {
+  position: absolute;
+  inset: 0;
+}
+
+/* 左半：暗色。左下角留出约 14px 的斜边偏移 */
+.theme-preview-half.dark {
+  background: #0b0e15;
+  clip-path: polygon(0 0, calc(100% - 14px) 0, calc(100% - 26px) 100%, 0 100%);
+}
+
+/* 右半：亮色。与左侧共用同一条斜边，保证拼合无缝 */
+.theme-preview-half.light {
+  background: #ffffff;
+  clip-path: polygon(calc(100% - 14px) 0, 100% 0, 100% 100%, calc(100% - 26px) 100%);
+}
+
+/* 横跨两块的迷你界面元素：左半在深底上显浅、右半在浅底上显深，
+   用 mix-blend-mode 让同一组色块在两侧自动呈现对比色，省去两套元素 */
+.theme-preview-ink {
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  top: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  /* 颜色随所处底色反转：difference 在深底上得到浅色、浅底上得到深色 */
+  mix-blend-mode: difference;
+}
+
+.theme-preview.split .theme-preview-bar {
+  height: 8px;
+  border-radius: 3px;
+  /* difference 模式下用接近白的颜色，反相后即高对比 */
+  background: #d8dbe6;
+}
+
+.theme-preview.split .theme-preview-line {
+  height: 6px;
+  border-radius: 3px;
+  background: #8f95a8;
+}
+
+.theme-preview.split .theme-preview-line.short {
+  width: 58%;
+}
+
+/* 选中态：白色斜切半区在浅色卡片上缺乏边界，补一层内描边强化轮廓 */
+.theme-option.active .theme-preview.split {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+
+/* 卡片底部文字标签 */
+.theme-option-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.theme-option.active .theme-option-label {
+  color: var(--text-1);
+}
+
+/* 四种模式的逐条说明：轻量行，无盒子，仅分隔线 */
+.theme-option-rows {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.theme-option-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.theme-option-row-icon {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.theme-option-row-name {
+  flex-shrink: 0;
+  width: 68px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.theme-option-row-desc {
+  min-width: 0;
+}
+
+/* 主题设置的「快捷切换」行：与上方模式卡片之间留一点距离 */
+.theme-quick-switch {
+  margin-top: 4px;
 }
 
 /* 模型代理「最近请求」：紧凑两列（时间 / 域名 / 去向 / 上游），随卡片宽度自适应 */
@@ -2261,22 +2961,13 @@ html[data-theme="light"] .about-app-logo {
   background: var(--panel);
 }
 
-/* 更新检查结果框 */
-.about-update-box {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-}
-
+/* 更新检查结果行（平铺，无盒子；紧随分区标题/说明文字） */
 .about-update-status {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
+  margin-top: 2px;
   font-size: 13px;
   color: var(--text-1);
 }
@@ -2320,6 +3011,98 @@ html[data-theme="light"] .about-app-logo {
 }
 
 /* --------------------------------------------------------------------------
+   dsh CLI 更新弹框（设置 → 关于本应用）：版本下拉 + 可复制命令 + 执行日志
+   -------------------------------------------------------------------------- */
+
+/* 环境行内联的「更新」入口（按钮与文本同排，间距紧凑） */
+.dsh-update-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dsh-update-btn {
+  flex-shrink: 0;
+}
+
+.dsh-update-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dsh-update-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-1);
+}
+
+.dsh-update-label {
+  flex-shrink: 0;
+  min-width: 62px;
+  color: var(--text-2);
+}
+
+/* 命令展示块：等宽字体 + 行内复制按钮 */
+.dsh-update-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsh-update-cmd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.dsh-update-cmd-text {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  word-break: break-all;
+  user-select: text;
+  cursor: text;
+}
+
+/* 执行日志终端（沿用 .term-window 体系，高度收敛在弹框内） */
+.dsh-update-term {
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-update-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dsh-update-foot .settings-desc {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.dsh-update-foot-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
    插件管理面板（设置页内嵌）：头部来源切换 + 主体 + 底部操作条
    表格/终端细节样式沿用 .plugin-manager-modal 命名空间下的 .mk-* 规则
    -------------------------------------------------------------------------- */
@@ -2330,6 +3113,13 @@ html[data-theme="light"] .about-app-logo {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* 插件面板自带表面：表格直接铺在页面背景上会与上方标题脱节，
+     补齐四边盒子与内边距后，面板自身就是这一区块的「卡片」，
+     圆角与 .settings-card 保持一致。 */
+  padding: 16px 18px;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 
 .pm-panel-head {
@@ -2476,12 +3266,15 @@ html[data-theme="light"] .about-app-logo {
 }
 
 /* 空态 / 错误态 */
+/* 空态：现在是 .log-card（列向 flex）的直接子元素，用 flex:1 撑满剩余高度，
+   min-height 兜底避免卡片被压得太扁。原先的 height:100% 在自动高度的父级里
+   解析不出实际值（属无效声明），故换成 flex。 */
 .log-empty {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
-  height: 100%;
+  flex: 1;
   min-height: 200px;
   color: var(--text-3);
   font-size: 13px;
@@ -2504,11 +3297,27 @@ html[data-theme="light"] .about-app-logo {
   border-radius: 0;
 }
 
-/* 详情弹框底部操作区 */
+/* 详情弹框标题：会话名 + 随会话自动更新的状态徽标 */
+.log-detail-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 详情弹框底部操作区：左侧实时行数/耗时，右侧按钮 */
 .log-detail-footer {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.log-detail-foot-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--text-3);
+  font-size: 12px;
 }
 

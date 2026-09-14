@@ -37,6 +37,17 @@ export interface PluginOpState {
   exitCode?: number;
 }
 
+/** dsh CLI 更新（卸载→重装）进行状态：设置窗口「关于本应用」的更新弹框消费 */
+export interface DshUpdateState {
+  running: boolean;
+  /** 两步全部结束后的一次性退出码（第一个非零步骤；null = 尚未结束） */
+  exitCode: number | null;
+  /** 本次更新的目标版本（dist-tag 或具体版本号） */
+  target: string;
+  /** 更新前服务是否在运行（结束时据此重启服务） */
+  wasRunning: boolean;
+}
+
 interface AppStore {
   phase: Phase;
   logs: LogEntry[];
@@ -55,6 +66,9 @@ interface AppStore {
   serviceAlive: boolean;
   pluginOp: PluginOpState | null;
   pluginOpLogs: LogEntry[];
+  /** dsh CLI 更新（设置窗口「关于本应用」）；null = 无进行/刚结束的更新 */
+  dshUpdate: DshUpdateState | null;
+  dshUpdateLogs: LogEntry[];
   /** 插件版本信息：current 来自后端本地读取，latest 来自前端并行直查 registry */
   pluginVers: Record<string, { current?: string | null; latest?: string | null }>;
   /** 从启动日志中识别到的插件加载失败（非空时前端弹框提示移除并重启） */
@@ -74,6 +88,13 @@ interface AppStore {
 
   init: () => Promise<void>;
   refreshStatus: () => Promise<void>;
+  /**
+   * 确保环境状态已初始化后返回 dsh CLI 是否已安装（含版本可读）。
+   * 供「关于本应用」的更新弹框判断可用性：设置窗口可能是经深链直开的，
+   * 此时 initialized 仍为 false、dshInstalled 停留在初始 false——不先 init
+   * 会让更新入口看起来永远不可用（与 startDshUpdate 内部的守卫同源）。
+   */
+  ensureDshInstalled: () => Promise<boolean>;
   /** 单项环境检测结果写回：把启动页对应检查行从「检测中」点亮为结果 */
   applyEnvToolCheck: (tool: EnvTool, result: ToolCheck) => void;
   /** 启动 dsh web 服务（starting → 事件驱动 running/error）。
@@ -104,6 +125,10 @@ interface AppStore {
   appendLog: (stream: StreamKind, text: string) => void;
   appendPluginOpLog: (stream: StreamKind, text: string) => void;
   startPluginOp: (kind: PluginOpKind, name: string) => Promise<void>;
+  /** dsh CLI 更新（卸载→重装）：服务在跑先停，完成后由 dsh-update-exit 监听器续接
+   *  刷新环境与（更新前在跑时）重启服务；日志进 dshUpdateLogs 供更新弹框实时展示 */
+  startDshUpdate: (version: string) => Promise<void>;
+  appendDshUpdateLog: (stream: StreamKind, text: string) => void;
   refreshPluginVersions: () => Promise<void>;
   setPhase: (phase: Phase) => void;
   /** 上报插件加载失败（由 Preview 页收到的子 webview 桥接事件调用） */
@@ -262,21 +287,51 @@ export const useAppStore = create<AppStore>((set, get) => {
     if (wired) return;
     wired = true;
 
-    // 独立设置窗口：只接插件操作事件（插件管理面板在本窗口发起操作，
-    // pluginOpExit handler 自带 op.running 守卫，与主窗口并发消费无竞态）。
-    // 启动链/服务日志事件不接：那些职责在主窗口，接了会把同一份日志再次
-    // invoke log_append 镜像进会话文件（重复落盘）
+    // ---- 双窗口共接（插件操作 / dsh CLI 更新）----
+    // 两类操作都由设置窗口发起（主窗口不会发起，但也可能收到事件），handler 自带
+    // op.running 守卫——未发起的窗口直接忽略，双窗口并发消费无竞态。
+    // 这些日志走各自的独立流（appendPluginOpLog / appendDshUpdateLog 只写本地态、
+    // 不 invoke log_append），会话文件由 Rust 侧 emit_plugin_log / emit_dsh_update_log
+    // 单点落盘，因此双窗口共接不会重复写盘。
+    // 注意 dsh CLI 更新必须在此共接：更新弹框在设置窗口，此前这两个监听器被放在
+    // 下面的主窗口专属路径里，设置窗口收不到 exit 事件——更新早已完成，弹框却
+    // 永远停在「正在执行，请稍候…」。
+    onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
+      const stream: StreamKind =
+        p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
+      get().appendPluginOpLog(stream, p.line);
+    });
+
+    onEvent<ExitPayload>(EVENTS.pluginOpExit, (p) => {
+      const op = get().pluginOp;
+      if (!op || !op.running) return;
+      set({ pluginOp: { ...op, running: false, exitCode: p.code } });
+    });
+
+    onEvent<LogLine>(EVENTS.dshUpdateLog, (p) => {
+      const stream: StreamKind =
+        p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
+      get().appendDshUpdateLog(stream, p.line);
+    });
+
+    onEvent<ExitPayload>(EVENTS.dshUpdateExit, (p) => {
+      const op = get().dshUpdate;
+      if (!op || !op.running) return;
+      set({ dshUpdate: { ...op, running: false, exitCode: p.code } });
+      if (p.code !== 0) return; // 失败详情已在日志流里（弹框展示），由用户重试
+      void (async () => {
+        // 更新改变了 dsh 版本：刷新环境状态（Rust 侧快照已在更新开始时失效，这里真读）
+        await get().refreshStatus();
+        if (op.wasRunning) {
+          get().appendDshUpdateLog("system", "正在重启 dsh web 服务…");
+          await api.requestServiceRestart().catch(() => undefined);
+        }
+      })();
+    });
+
+    // 独立设置窗口到此为止：启动链/服务日志事件不接——那些职责在主窗口，接了
+    // 会把同一份日志再次 invoke log_append 镜像进会话文件（重复落盘）
     if (!isMain) {
-      onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
-        const stream: StreamKind =
-          p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
-        get().appendPluginOpLog(stream, p.line);
-      });
-      onEvent<ExitPayload>(EVENTS.pluginOpExit, (p) => {
-        const op = get().pluginOp;
-        if (!op || !op.running) return;
-        set({ pluginOp: { ...op, running: false, exitCode: p.code } });
-      });
       return;
     }
 
@@ -308,18 +363,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       const r = envExitResolve;
       envExitResolve = null;
       r?.(p.code);
-    });
-
-    onEvent<LogLine>(EVENTS.pluginOpLog, (p) => {
-      const stream: StreamKind =
-        p.stream === "stderr" ? "stderr" : p.stream === "system" ? "system" : "stdout";
-      get().appendPluginOpLog(stream, p.line);
-    });
-
-    onEvent<ExitPayload>(EVENTS.pluginOpExit, (p) => {
-      const op = get().pluginOp;
-      if (!op || !op.running) return;
-      set({ pluginOp: { ...op, running: false, exitCode: p.code } });
     });
 
     onEvent<LogLine>(EVENTS.webLog, (p) => {
@@ -504,6 +547,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     profileReady: false,
     serviceAlive: true,
     pluginOp: null,
+    dshUpdate: null,
+    dshUpdateLogs: [],
     pluginOpLogs: [],
     pluginVers: {},
     pluginLoadError: null,
@@ -559,6 +604,44 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (e) {
         get().appendPluginOpLog("error", String(e instanceof Error ? e.message : e));
         set((s) => ({ pluginOp: s.pluginOp ? { ...s.pluginOp, running: false, exitCode: -1 } : null }));
+      }
+    },
+
+    appendDshUpdateLog: (stream, text) => {
+      set((s) => {
+        const entry: LogEntry = { id: ++logSeq, time: now(), stream, text };
+        const all = [...s.dshUpdateLogs, entry];
+        // 超限直接丢弃最旧（操作日志无需截断提示）
+        return { dshUpdateLogs: all.length <= MAX_PLUGIN_OP_LOGS ? all : all.slice(all.length - MAX_PLUGIN_OP_LOGS) };
+      });
+    },
+
+    startDshUpdate: async (version) => {
+      const st = get();
+      if (st.dshUpdate?.running) return;
+      // 环境状态未初始化（如设置窗口经深链直进更新）先检测：否则 dshInstalled
+      // 还是初始 false，守卫会静默返回，用户点了「立即更新」没有任何反应
+      if (!st.initialized) await st.init();
+      if (!get().dshInstalled) return; // 确认未安装：交给启动链的自动安装
+      const wasRunning = get().serviceRunning || get().childRunning;
+      set({ dshUpdate: { running: true, exitCode: null, target: version, wasRunning }, dshUpdateLogs: [] });
+      try {
+        // dsh 正在被服务进程占用（Windows 上文件锁会让 pnpm remove 失败）：先停服务。
+        // 主窗口的 web-exit 复核会把 phase 落回 stopped，无需在此管 phase。
+        if (wasRunning) {
+          get().appendDshUpdateLog("system", "正在停止 dsh web 服务…");
+          try {
+            await api.stopDshWeb();
+          } catch {
+            /* 停止失败不阻断：pnpm remove 对被占用文件会再报错，由日志呈现 */
+          }
+          get().appendDshUpdateLog("system", "已停止 dsh web 服务");
+        }
+        await api.updateDshCli(version);
+      } catch (e) {
+        // invoke 同步失败（如未找到 pnpm）：不会有 exit 事件，就地落终态
+        get().appendDshUpdateLog("error", String(e instanceof Error ? e.message : e));
+        set((s) => ({ dshUpdate: s.dshUpdate ? { ...s.dshUpdate, running: false, exitCode: -1 } : null }));
       }
     },
 
@@ -688,6 +771,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       } finally {
         statusRefreshInFlight = false;
       }
+    },
+
+    ensureDshInstalled: async () => {
+      if (!get().initialized) await get().init();
+      return get().dshInstalled;
     },
 
     promptCredentialsFix: async (fallbackReason: string) => {

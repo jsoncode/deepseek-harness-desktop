@@ -1,16 +1,23 @@
-import { GithubOutlined, SyncOutlined } from "@ant-design/icons";
+import { GithubOutlined, InfoCircleOutlined, SyncOutlined, UserOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import logo from "../../assets/logo.svg";
-import { meetsNodeRequirement, pnpmMajorOf } from "../../lib/envReq";
+import { meetsNodeRequirement, pnpmMajorOf, semverCompare } from "../../lib/envReq";
 import { api, tauri } from "../../lib/tauri";
 import { useAppStore } from "../../store/useAppStore";
+import { useUiStore } from "../../store/useUiStore";
+import DshUpdateModal, { type DshNpmInfo, type DshNpmState } from "./DshUpdateModal";
 
 /** GitHub 仓库（与 .github/workflows/release.yml 发布源一致） */
 const REPO = "jsoncode/deepseek-harness-desktop";
 const RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASE_PAGE = `https://github.com/${REPO}/releases/latest`;
 const REPO_PAGE = `https://github.com/${REPO}`;
+const AUTHOR = REPO.split("/")[0];
+const AUTHOR_PAGE = `https://github.com/${AUTHOR}`;
+
+/** @deepseek-ai/dsh 的 npm packument（版本检测：dist-tags.latest + 全部版本号） */
+const DSH_NPM_PACKUMENT = "https://registry.npmjs.org/@deepseek-ai/dsh";
 
 interface GitHubRelease {
   tag_name?: string;
@@ -43,18 +50,58 @@ function SystemEnvCard() {
   // 逐项检测完成标记：false = 该项仍在检测中（行内显示 loading）
   const envCheckDone = useAppStore((s) => s.envCheckDone);
   const [refreshing, setRefreshing] = useState(false);
+  // npm 上 @deepseek-ai/dsh 的版本信息（驱动 dsh 行的更新检测与更新弹框）
+  const [npmInfo, setNpmInfo] = useState<DshNpmInfo | null>(null);
+  const [npmState, setNpmState] = useState<DshNpmState>("checking");
+  const [updateOpen, setUpdateOpen] = useState(false);
+  /** 是否由插件市场的「本应用」条目引流而来：展示上下文提示 */
+  const [redirectedFromMarket, setRedirectedFromMarket] = useState(false);
+
+  const checkNpm = async () => {
+    setNpmState("checking");
+    try {
+      setNpmInfo(await fetchDshNpmInfo());
+      setNpmState("ok");
+    } catch {
+      setNpmState("error");
+    }
+  };
 
   // 进入区块 / phase 每次落定（启动、安装链结束）时自动检测：
   // 安装链内的 pullStatusFields 不刷新检查行，链路结束后在此补一次
   useEffect(() => {
     if (phase === "checking" || phase === "installing" || phase === "starting") return;
+    // 更新进行中的中间态不可信（卸载后/重装前 dsh 短暂缺失）：跳过，结束后由
+    // 更新完成回调统一刷新
+    if (useAppStore.getState().dshUpdate?.running) return;
     void refreshStatus();
   }, [phase, refreshStatus]);
+
+  // 进入区块即查一次 npm 最新版本（与 GitHub 检查同节奏；失败静默，行内可重试）
+  useEffect(() => {
+    void checkNpm();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 外部意图：插件管理里搜到本应用自身（dsh CLI）时，不就地安装，改为跳到本页
+  // 并打开 dsh CLI 更新弹框。按 seq 去重，同一个意图只消费一次。
+  const settingsIntent = useUiStore((s) => s.settingsIntent);
+  const clearSettingsIntent = useUiStore((s) => s.clearSettingsIntent);
+  const consumedIntentRef = useRef(0);
+  useEffect(() => {
+    if (!settingsIntent || settingsIntent.action !== "dsh-update") return;
+    if (settingsIntent.seq === consumedIntentRef.current) return;
+    consumedIntentRef.current = settingsIntent.seq;
+    clearSettingsIntent();
+    setRedirectedFromMarket(true);
+    setUpdateOpen(true);
+  }, [settingsIntent, clearSettingsIntent]);
 
   const recheck = async () => {
     setRefreshing(true);
     try {
       await refreshStatus();
+      void checkNpm();
     } finally {
       setRefreshing(false);
     }
@@ -124,6 +171,9 @@ function SystemEnvCard() {
 
     // dsh 已安装但读不出版本 = 安装损坏，启动链会按需自动重装
     const dshBroken = dshInstalled && !dshVersion;
+    // npm 有更新（当前 < dist-tags.latest；任一侧无法解析按无更新处理）
+    const dshOutdated =
+      dshVersion != null && npmInfo != null && (semverCompare(dshVersion, npmInfo.latest) ?? 0) < 0;
     envRows.push(
       !envCheckDone.dsh
         ? { name: "dsh CLI", state: "loading", detail: <span>检测中…</span> }
@@ -132,7 +182,19 @@ function SystemEnvCard() {
               name: "dsh CLI",
               state: dshBroken ? "warn" : "ok",
               detail: dshVersion ? (
-                <span>已安装 v{dshVersion}</span>
+                <span className="dsh-update-inline">
+                  已安装 v{dshVersion}
+                  {/* 常驻入口：落后 latest 时叫「更新」；已是最新也保留「切换版本」——
+                      alpha/next 等预发布通道不在 latest 里，只能从这里切换。
+                      npm 最新版等详情收进更新弹框，行内不再展示（避免行文案过密） */}
+                  <button
+                    className={"pm-btn pm-btn-sm dsh-update-btn" + (dshOutdated ? " primary" : "")}
+                    type="button"
+                    onClick={() => setUpdateOpen(true)}
+                  >
+                    {dshOutdated ? "更新" : "切换版本"}
+                  </button>
+                </span>
               ) : (
                 <span>已安装但无法读取版本（可能已损坏）· 启动应用时将自动重新全局安装</span>
               ),
@@ -145,22 +207,12 @@ function SystemEnvCard() {
     );
   }
 
-  // 卡片描边：任一行 bad → 红框；否则任一行 warn → 黄框；检测中不描边（值未落定）
-  const worst =
-    envRows.some((r) => r.state === "loading")
-      ? ""
-      : envRows.some((r) => r.state === "bad")
-        ? "bad"
-        : envRows.some((r) => r.state === "warn")
-          ? "warn"
-          : "";
+  // 环境行的状态完全由 ✓/○/✗ 标记与文案表达（不再用子卡片描边强调）
 
   return (
-    <div className="settings-card">
-      <div
-        className="settings-card-title"
-        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}
-      >
+    <>
+      {/* 平铺分区标题：应用信息卡片内的轻量行（带顶部分隔线），不再是独立子卡片 */}
+      <div className="about-section-head">
         <span>系统环境</span>
         <button
           className="pm-btn pm-btn-sm"
@@ -172,7 +224,7 @@ function SystemEnvCard() {
           {refreshing ? "检测中…" : "重新检测"}
         </button>
       </div>
-      <div className={"env-card about-env-card" + (worst ? " " + worst : "")}>
+      <div className="about-env-list">
         {envRows.map((r) => (
           <div key={r.name} className="env-row">
             <span className={"env-mark " + r.state}>
@@ -183,7 +235,25 @@ function SystemEnvCard() {
           </div>
         ))}
       </div>
-    </div>
+      {/* 插件市场引流说明：在插件管理里搜到本应用自身时改跳到这里更新 dsh CLI */}
+      {redirectedFromMarket ? (
+        <div className="about-update-callout">
+          <InfoCircleOutlined style={{ fontSize: 13, marginTop: 2 }} />
+          <span>
+            dsh CLI 是本应用的宿主运行时，<b>不从插件市场安装</b>——
+            请在上方 dsh CLI 行的弹框中选择版本更新（也可复制命令在终端手动执行）。
+          </span>
+        </div>
+      ) : null}
+      <DshUpdateModal
+        open={updateOpen}
+        onClose={() => setUpdateOpen(false)}
+        currentVersion={dshVersion}
+        npmInfo={npmInfo}
+        npmState={npmState}
+        onRetryFetch={() => void checkNpm()}
+      />
+    </>
   );
 }
 
@@ -225,6 +295,22 @@ async function fetchLatestRelease(): Promise<GitHubRelease> {
   const res = await fetch(RELEASE_API);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as GitHubRelease;
+}
+
+/** 从 npm packument 提取 dist-tags、dist-tags.latest 与全部版本号（semver 降序） */
+async function fetchDshNpmInfo(): Promise<DshNpmInfo> {
+  const text = tauri
+    ? await api.httpGetJson(DSH_NPM_PACKUMENT)
+    : await (await fetch(DSH_NPM_PACKUMENT)).text();
+  const doc = JSON.parse(text) as {
+    "dist-tags"?: Record<string, string>;
+    versions?: Record<string, unknown>;
+  };
+  const latest = doc["dist-tags"]?.latest ?? "";
+  if (!latest) throw new Error("packument 缺少 dist-tags.latest");
+  const versions = Object.keys(doc.versions ?? {}).filter((v) => /^\d/.test(v));
+  versions.sort((a, b) => semverCompare(b, a) ?? 0);
+  return { latest, tags: doc["dist-tags"] ?? {}, versions };
 }
 
 /**
@@ -274,20 +360,6 @@ export default function AboutSettings() {
 
   return (
     <>
-      <div className="settings-nav">
-        <span className="settings-nav-title">关于本应用</span>
-        <div className="settings-nav-actions">
-          <button
-            className="pm-btn"
-            type="button"
-            disabled={checking}
-            onClick={() => void check()}
-          >
-            <SyncOutlined style={{ fontSize: 12 }} />
-            {checking ? "检查中…" : "检查更新"}
-          </button>
-        </div>
-      </div>
       <div className="settings-body">
         <div className="settings-card">
           <div className="about-app-head">
@@ -306,68 +378,85 @@ export default function AboutSettings() {
             <span className="about-app-version">{__APP_VERSION__}</span>
           </div>
           <div className="settings-row">
+            <span>作者</span>
+            <button className="pm-btn" type="button" onClick={() => openUrl(AUTHOR_PAGE)}>
+              <UserOutlined style={{ fontSize: 13 }} />
+              {AUTHOR}
+            </button>
+          </div>
+          <div className="settings-row">
             <span>开源仓库</span>
             <button className="pm-btn" type="button" onClick={() => openUrl(REPO_PAGE)}>
               <GithubOutlined style={{ fontSize: 13 }} />
               github.com/{REPO}
             </button>
           </div>
-        </div>
 
-        {/* 系统环境：Node.js / pnpm / dsh CLI 检测结果（启动检查页已移除，收敛至此） */}
-        <SystemEnvCard />
+          {/* 系统环境：Node.js / pnpm / dsh CLI 检测结果（启动检查页已移除，收敛至此） */}
+          <SystemEnvCard />
 
-        <div className="settings-card">
-          <div className="settings-card-title">版本更新</div>
+          {/* 版本更新（平铺分区标题） */}
+          <div className="about-section-head">
+            <span>版本更新</span>
+            {/* 检查入口随所属模块走（原在右上角设置导航条上）：查的是本应用的
+                GitHub Release，放这里语义更贴切，样式与「系统环境 · 重新检测」一致 */}
+            <button
+              className="pm-btn pm-btn-sm"
+              type="button"
+              disabled={checking}
+              onClick={() => void check()}
+            >
+              <SyncOutlined style={{ fontSize: 12 }} spin={checking} />
+              {checking ? "检查中…" : "检查更新"}
+            </button>
+          </div>
           <p className="settings-desc">
             通过 GitHub Releases 检查最新版本。发现新版本后，可前往 Release 页面查看更新说明并下载安装包。
           </p>
-          <div className="about-update-box">
-            {checking ? (
-              <div className="about-update-status">
-                <span className="mk-op-spinner" />
-                <span>正在检查更新…</span>
-              </div>
-            ) : state === "latest" ? (
-              <div className="about-update-status">
-                <span className="about-update-dot ok" />
-                <span>
-                  当前已是最新版本 <b className="about-update-strong">{__APP_VERSION__}</b>
-                  {release?.published_at ? (
-                    <span className="about-update-muted">（发布于 {formatDate(release.published_at)}）</span>
-                  ) : null}
-                </span>
-              </div>
-            ) : state === "outdated" && release ? (
-              <div className="about-update-status">
-                <span className="about-update-dot warn" />
-                <span>
-                  发现新版本 <b className="about-update-strong">{release.tag_name}</b>
-                  {release.published_at ? (
-                    <span className="about-update-muted">（发布于 {formatDate(release.published_at)}）</span>
-                  ) : null}
-                </span>
-                <button className="pm-btn primary pm-btn-sm" type="button" onClick={() => openUrl(releaseUrl)}>
-                  查看更新
-                </button>
-              </div>
-            ) : state === "error" ? (
-              <div className="about-update-status">
-                <span className="about-update-dot bad" />
-                <span>
-                  检查更新失败：<span className="about-update-muted">{error}</span>
-                </span>
-                <button className="pm-btn pm-btn-sm" type="button" onClick={() => void check()}>
-                  重试
-                </button>
-              </div>
-            ) : (
-              <div className="about-update-status">
-                <span className="about-update-dot" />
-                <span>点击右上角「检查更新」查看是否有新版本。</span>
-              </div>
-            )}
-          </div>
+          {checking ? (
+            <div className="about-update-status">
+              <span className="mk-op-spinner" />
+              <span>正在检查更新…</span>
+            </div>
+          ) : state === "latest" ? (
+            <div className="about-update-status">
+              <span className="about-update-dot ok" />
+              <span>
+                当前已是最新版本 <b className="about-update-strong">{__APP_VERSION__}</b>
+                {release?.published_at ? (
+                  <span className="about-update-muted">（发布于 {formatDate(release.published_at)}）</span>
+                ) : null}
+              </span>
+            </div>
+          ) : state === "outdated" && release ? (
+            <div className="about-update-status">
+              <span className="about-update-dot warn" />
+              <span>
+                发现新版本 <b className="about-update-strong">{release.tag_name}</b>
+                {release.published_at ? (
+                  <span className="about-update-muted">（发布于 {formatDate(release.published_at)}）</span>
+                ) : null}
+              </span>
+              <button className="pm-btn primary pm-btn-sm" type="button" onClick={() => openUrl(releaseUrl)}>
+                查看更新
+              </button>
+            </div>
+          ) : state === "error" ? (
+            <div className="about-update-status">
+              <span className="about-update-dot bad" />
+              <span>
+                检查更新失败：<span className="about-update-muted">{error}</span>
+              </span>
+              <button className="pm-btn pm-btn-sm" type="button" onClick={() => void check()}>
+                重试
+              </button>
+            </div>
+          ) : (
+            <div className="about-update-status">
+              <span className="about-update-dot" />
+              <span>点击「检查更新」查看是否有新版本。</span>
+            </div>
+          )}
         </div>
       </div>
     </>

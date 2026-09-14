@@ -1,13 +1,13 @@
 //! 系统推送的投递层：把渲染好的通知消息分发给各通道。
 //!
-//! Windows toast 有两种实现、由 [`ToastStyle`] 切换（设置页「两种提示切换开关」
-//! 后续接入，见 `dsh::AppState::notify_style`）：
+//! Windows toast 有两种实现、由 [`ToastStyle`] 切换（设置页「带按钮 / 不带按钮」
+//! 开关，见 `dsh::AppState::notify_style`）：
 //!
 //! - `Legacy`：notify-rust 原实现，保留不删。其 4.17 的 Windows 后端不注册 toast
-//!   激活回调（actions/激活均为 XDG/Linux 专属），因此**无点击感知**。
+//!   激活回调（actions/激活均为 XDG/Linux 专属），因此**无点击感知**（「不带按钮」）。
 //! - `Clickable`（默认）：直连 `tauri-winrt-notification`，toast 上挂「打开对话」
 //!   按钮（激活参数 = 会话 id），点击后 `emit NOTIFY_ACTIVATE_EVENT` 给前端，
-//!   并把窗口恢复到前台。
+//!   并把窗口恢复到前台（「带按钮」）。
 //!
 //! 两种实现都使用 Windows Reminder 场景（`scenario="reminder"`）：toast 预展开
 //! 并保持显示在屏幕右下角，直到用户点击/关闭，不会几秒后自动消失（见
@@ -43,20 +43,21 @@ pub const SAMPLE_KIND: &str = "sample";
 
 // ---------------------------------------------------------------------------
 // toast 投递方式（Windows-only）：两种实现并存，按 `AppState::notify_style` 切换。
-// 设置页「两种提示切换开关」后续接入：只需写 `notify_style` 并重新投递。
+// 设置页是一个「带按钮 / 不带按钮」Switch：每次切换都会写 `notify_style`
+// 并补发一条自检通知，见 `dsh::set_notify_style`。
 // ---------------------------------------------------------------------------
 
 /// toast 投递方式
 #[cfg(windows)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToastStyle {
-    /// notify-rust 原实现：无点击感知（保留给切换开关）
+    /// notify-rust 原实现：无点击感知，即「不带按钮」
     Legacy,
-    /// winrt 直连：带「打开对话」按钮与激活回调（点击 → 打开对应会话对话框）
+    /// winrt 直连：带「打开对话」按钮与激活回调，即「带按钮」
     Clickable,
 }
 
-/// 当前 toast 投递方式（读 `AppState::notify_style`；默认 Clickable）
+/// 当前 toast 投递方式（读 `AppState::notify_style`；默认 Clickable / 带按钮）
 #[cfg(windows)]
 fn toast_style(app: &AppHandle) -> ToastStyle {
     use std::sync::atomic::Ordering;
@@ -205,7 +206,7 @@ fn legacy_toast(app: &AppHandle, msg: &NotifyMessage, name: &'static str) {
     }
 }
 
-/// 可点击实现：直连 tauri-winrt-notification。为什么不用 notify-rust：其 Windows
+/// 「带按钮」实现：直连 tauri-winrt-notification。为什么不用 notify-rust：其 Windows
 /// 后端（windows.rs::show_notification）不渲染 actions、不注册 Activated 处理器，
 /// `action()`/`wait_for_action` 均属 XDG/Linux 专属——点击感知必须用 fork 的
 /// `add_button` + `on_activated`。
@@ -289,11 +290,11 @@ pub fn dispatch(app: &AppHandle, msg: &NotifyMessage) {
     let _ = app.emit(dsh::NOTIFY_MESSAGE_EVENT, msg);
 }
 
-/// 自检通知：总开关「关→开」或样式切到「可点击」时补发，让用户立刻看到提醒长什么样。
+/// 自检通知：总开关「关→开」或消息样式 Switch 拨动时补发，让用户立刻看到提醒长什么样。
 /// 只走系统通知通道、不 emit：它不是会话事件，没必要让语音通道跟着念一遍。
-/// `session_id` 故意给非空占位：可点击样式下「打开对话」按钮会真实渲染出来
-/// （两种样式的视觉差异就是按钮）；点它只会恢复窗口——桥在 dsh web 里找不到
-/// 「sample」会话，按设计静默降级。legacy 样式（notify-rust）不渲染 actions，不受影响。
+/// `session_id` 故意给非空占位：带按钮样式下「打开对话」按钮会真实渲染出来
+/// （两种样式的视觉差异就是这颗按钮）；点它只会恢复窗口——桥在 dsh web 里找不到
+/// 「sample」会话，按设计静默降级。不带按钮样式（notify-rust）不渲染 actions，不受影响。
 pub fn push_sample(app: &AppHandle) {
     let msg = NotifyMessage {
         kind: SAMPLE_KIND,

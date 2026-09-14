@@ -249,9 +249,6 @@ export default function ProxySettings() {
 
   return (
     <>
-      <div className="settings-nav">
-        <span className="settings-nav-title">代理设置</span>
-      </div>
       <div className="settings-body">
         <div className="settings-card">
           <div className="settings-card-title">安装代理</div>

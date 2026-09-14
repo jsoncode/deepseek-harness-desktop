@@ -13,9 +13,9 @@
 //!
 //! # 桥接（iframe 时代的 postMessage → invoke 事件）
 //!
-//! 子 webview 没有父窗口，postMessage 通道不复存在。三个桥接脚本改经
+//! 子 webview 没有父窗口，postMessage 通道不复存在。桥接脚本改经
 //! `__TAURI_INTERNALS__.invoke("preview_bridge_report")` 上报，由本模块转发成
-//! 事件给主窗口（dsh://preview-theme / preview-plugin-failed / preview-session-acked）。
+//! 事件给主窗口（dsh://preview-plugin-failed / preview-session-acked）。
 //! 远程源默认禁止调用自定义命令，靠 capabilities/preview.json（remote.urls 白名单
 //! + preview-bridge:default 权限）放行，其余命令一概不可达。
 //!
@@ -94,24 +94,15 @@ pub async fn preview_hide() -> Result<(), String> {
 }
 
 /// 子 webview 桥接上报入口（远程源经 ACL 白名单调用，见 capabilities/preview.json）：
-/// - theme：宿主主题变化（body[data-ds-dark-theme]）→ 转发 dsh://preview-theme
 /// - plugin-failed：dsh web 渲染 "Failed to load plugins" 界面 → 转发错误项列表
 /// - session-acked：会话桥已点开目标会话 → 转发回执（前端清空待打开状态）
 #[tauri::command]
 pub fn preview_bridge_report(
     app: AppHandle,
     kind: String,
-    dark: Option<bool>,
     items: Option<Vec<String>>,
 ) -> Result<(), String> {
     match kind.as_str() {
-        "theme" => {
-            let _ = app.emit_to(
-                "main",
-                "dsh://preview-theme",
-                serde_json::json!({ "dark": dark }),
-            );
-        }
         "plugin-failed" => {
             let _ = app.emit_to(
                 "main",
@@ -143,41 +134,6 @@ pub fn preview_open_session(session_id: String) -> Result<(), String> {
     ))
     .map_err(|e| format!("下发会话打开指令失败: {e}"))
 }
-
-/// 注入到预览子 webview 的主题同步脚本：
-/// dsh web 前端切换主题时不推送任何事件（调研结论：仅 Cordis 内部
-/// `theme/change` + presenter 写 DOM），但会反映在 DOM 上：ui-layout 的
-/// ThemePresenter 在暗色时给 `body` 设置 `data-ds-dark-theme` 属性、亮色时移除。
-/// MutationObserver 监听该属性变化后经 preview_bridge_report 上报，壳跟随宿主主题。
-const THEME_SYNC_BRIDGE: &str = r##"
-(() => {
-  if (window.top !== window) return; // 只处理顶层文档（宿主页自身）
-  if (window.__dshThemeBridgeInstalled) return;
-  try {
-    Object.defineProperty(window, "__dshThemeBridgeInstalled", { value: true });
-  } catch { /* 忽略 */ }
-  let last = null;
-  const report = () => {
-    const dark = document.body ? document.body.hasAttribute("data-ds-dark-theme") : false;
-    if (dark === last) return;
-    last = dark;
-    try {
-      window.__TAURI_INTERNALS__.invoke("preview_bridge_report", { kind: "theme", dark });
-    } catch { /* IPC 不可用时静默：仅影响壳主题跟随 */ }
-  };
-  const watch = () => {
-    report();
-    if (!document.body) return;
-    const mo = new MutationObserver(report);
-    mo.observe(document.body, { attributes: true, attributeFilter: ["data-ds-dark-theme"] });
-  };
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", watch, { once: true });
-  } else {
-    watch();
-  }
-})();
-"##;
 
 /// 注入到预览子 webview 的插件加载失败监听脚本：
 /// dsh web 前端在插件 bundle 加载/注册失败时会在页面渲染
@@ -419,7 +375,6 @@ mod imp {
                 let _ = crate::dsh::open_url(url.as_str());
                 tauri::webview::NewWindowResponse::Deny
             })
-            .initialization_script(THEME_SYNC_BRIDGE)
             .initialization_script(PLUGIN_FAILURE_BRIDGE)
             .initialization_script(SESSION_OPEN_BRIDGE);
         // add_child 内部会切回主线程执行，必须在非主线程调用（async 命令满足），

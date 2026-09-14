@@ -17,6 +17,7 @@ commands.allow = [
   "check_tool",
   "probe_service",
   "install_dsh",
+  "update_dsh_cli",
   "install_env_tool",
   "refresh_search_path",
   "start_dsh_web",

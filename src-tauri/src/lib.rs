@@ -39,6 +39,7 @@ pub fn run() {
             dsh::check_tool,
             dsh::probe_service,
             dsh::install_dsh,
+            dsh::update_dsh_cli,
             dsh::install_env_tool,
             dsh::refresh_search_path,
             dsh::start_dsh_web,
@@ -230,7 +231,7 @@ pub fn run() {
                     "quit" => app.exit(0),
                     id => {
                         if let Some(section) = tray_settings_section(id) {
-                            if let Err(e) = settings::open_settings_window(app, section) {
+                            if let Err(e) = settings::open_settings_window(app, section, None) {
                                 eprintln!("[tray] 打开设置窗口失败: {e}");
                             }
                         }

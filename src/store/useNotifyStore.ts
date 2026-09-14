@@ -4,7 +4,8 @@ import { api, type VoiceConfig } from "../lib/tauri";
 /** 系统推送开关：关闭时 Rust 侧仍订阅并解析事件，只是不投递通知 */
 export type NotifyMode = "on" | "off";
 
-/** 系统推送样式：可点击（带「打开对话」按钮，点击直达对应会话）/ 不可点击（原样式仅展示） */
+/** 系统推送样式：带按钮（toast 上挂「打开对话」按钮，点击直达对应会话）/
+ *  不带按钮（原 notify-rust 样式，仅展示） */
 export type NotifyStyle = "clickable" | "plain";
 
 const STORAGE_KEY = "hl.notify";
@@ -76,7 +77,7 @@ function loadStyle(): NotifyStyle {
   } catch {
     /* ignore */
   }
-  // 默认可点击，与 Rust 侧 `AppState::notify_style` 的初值一致
+  // 默认带按钮，与 Rust 侧 `AppState::notify_style` 的初值一致
   return "clickable";
 }
 
