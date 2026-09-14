@@ -71,6 +71,31 @@ just use the AppImage:
 > `GLIBC_*` symbol version the binary actually references. If a baseline change ever pushes the real
 > floor above `2.35`, the release fails instead of letting the filename lie.
 
+#### Black window / won't open?
+
+On Wayland sessions (the KDE / GNOME default), WebKitGTK's DMA-BUF renderer fails to produce a first
+frame on some GPU + Mesa combinations — the window opens, the titlebar is there, but the content is
+**completely black**. The app already disables that renderer by default on Wayland (see
+`apply_webkit_env_defaults` in `src-tauri/src/lib.rs`). If you still get a black window, launch it
+from a **terminal** — a black window is almost never an app-logic problem, and stderr says which class
+it is:
+
+```bash
+# First tell "WebKit painted nothing" from "stuck on the splash": the latter shows a spinner
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./dhd_x.y.z_linux_glibc2.35_x86_64.AppImage 2>&1 | tee dhd.log
+# Installed from .deb / .rpm: WEBKIT_DISABLE_DMABUF_RENDERER=1 deepseek-harness-desktop 2>&1 | tee dhd.log
+```
+
+| Symptom / log keyword | Meaning | What to do |
+| --- | --- | --- |
+| Setting the variable makes it work | DMA-BUF renderer / compositing | Already worked around by default; use `WEBKIT_DISABLE_DMABUF_RENDERER=0` to get GPU compositing back |
+| Black window **but you can see the spinner and "正在启动服务…"** | WebKit is fine — the frontend bundle or the dsh service failed | App-level issue: send us `dhd.log` |
+| `Failed to create GBM buffer` / `libEGL` / `MESA` | GPU driver stack | Update Mesa, or use the variable above to take the shared-memory path |
+| `bwrap` / sandbox errors | WebKit sandbox can't start | Install bubblewrap (Arch: `sudo pacman -S bubblewrap`) |
+
+> Last resort — **only to confirm whether the sandbox is the culprit, don't keep running this way**:
+> `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`. It turns off the web-process sandbox (a security downgrade).
+
 > **Linux install notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
 > (AppIndicator) dependencies, so `sudo apt install ./xxx.deb` (or
 > `sudo dnf install ./xxx.rpm`) pulls everything in. The AppImage does **not** bundle

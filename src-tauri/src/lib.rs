@@ -22,8 +22,46 @@ use tauri::{
 /// 关闭主窗口时据此决定「隐藏到托盘继续跑」还是「随窗口退出」。
 static TRAY_READY: AtomicBool = AtomicBool::new(false);
 
+/// Linux/WebKitGTK 的启动环境兜底 —— 必须在**任何 webview 创建之前**执行。
+///
+/// WebKitGTK 的 DMA-BUF 渲染器在 Wayland + 较新 Mesa 的组合下会「窗口起来了、标题栏也在，
+/// 但整片全黑」：Web 进程建不出 GBM 缓冲，第一帧永远画不出来。滚动发行版最易撞上
+/// （Arch / CachyOS / Tumbleweed 的原生 Mesa 比 WebKitGTK 预期的新；AppImage 里那套按
+/// Ubuntu 22.04 打包的 WebKitGTK 撞上宿主 Mesa 时更容易对不上）。WebKitGTK 官方给出的
+/// 标准规避是关掉 DMA-BUF 渲染器、退回共享内存缓冲——代价是少一层 GPU 合成，
+/// 本应用界面很轻，感知很小；而撞上时是「完全没法用」，两害相权取轻。
+///
+/// 只在 **Wayland 会话**下兜底，且用户没自己设过该变量时：
+///   - X11 默认保持 WebKit 原生行为（那里这问题少得多），不白吃性能；
+///   - 用户显式设了 `WEBKIT_DISABLE_DMABUF_RENDERER`（哪怕设成 `0`）就不覆盖，
+///     保留手动反悔 / 自己调优的能力。
+#[cfg(target_os = "linux")]
+fn apply_webkit_env_defaults() {
+    const KEY: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(KEY).is_some() {
+        eprintln!("[dhd] {KEY} 已由用户设置，保持不动");
+        return;
+    }
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+    if !wayland {
+        return;
+    }
+    std::env::set_var(KEY, "1");
+    eprintln!(
+        "[dhd] 检测到 Wayland 会话：已设 {KEY}=1 以规避 WebKitGTK 全黑窗口。\
+         若你的机器本来不受影响、想换回 GPU 合成，用 {KEY}=0 启动即可"
+    );
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 必须在 Builder 之前：WebKitGTK 在创建第一个 webview 时就读掉这些环境变量
+    #[cfg(target_os = "linux")]
+    apply_webkit_env_defaults();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);

@@ -65,6 +65,29 @@
 > 兼容下限由发布流水线里的 `Verify glibc floor` 步骤**实测二进制引用的最高 GLIBC 符号版本**校验：
 > 一旦构建基线变动导致实际下限超过 `2.35`，流水线会直接失败，不会让文件名说谎。
 
+#### 黑屏 / 打不开？
+
+Wayland 会话下（KDE / GNOME 的默认会话），WebKitGTK 的 DMA-BUF 渲染器在部分 GPU + Mesa 组合上
+画不出第一帧，表现就是**窗口起来了、标题栏也在，但内容整片全黑**。应用已在 Wayland 下默认关掉
+该渲染器（见 `src-tauri/src/lib.rs` 的 `apply_webkit_env_defaults`）。若仍然黑屏，请从**终端**启动排查
+—— 黑屏几乎不会是「应用逻辑问题」，stderr 会直接说明属于哪一类：
+
+```bash
+# 先分清「WebKit 没画」与「前端卡在启动画面」：后者能看到转圈 +「正在启动服务…」
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./dhd_x.y.z_linux_glibc2.35_x86_64.AppImage 2>&1 | tee dhd.log
+# 装完 .deb / .rpm 的：WEBKIT_DISABLE_DMABUF_RENDERER=1 deepseek-harness-desktop 2>&1 | tee dhd.log
+```
+
+| 现象 / 日志关键词 | 含义 | 处理 |
+| --- | --- | --- |
+| 加上这个变量就能显示了 | DMA-BUF 渲染器 / 合成问题 | 已默认规避；想换回 GPU 合成可用 `WEBKIT_DISABLE_DMABUF_RENDERER=0` |
+| 窗口黑，但**看得到转圈和「正在启动服务…」** | WebKit 正常，是前端 bundle 或 dsh 服务没起来 | 属应用层问题，把 `dhd.log` 发出来 |
+| `Failed to create GBM buffer` / `libEGL` / `MESA` | GPU 驱动栈 | 升级 Mesa，或用上面的变量走共享内存路径 |
+| `bwrap` / sandbox 相关 | WebKit 沙箱起不来 | 安装 bubblewrap（Arch：`sudo pacman -S bubblewrap`） |
+
+> 最后手段——**仅用于确认沙箱是不是元凶，不要长期这么跑**：
+> `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`。它关掉的是 Web 进程沙箱，属安全降级。
+
 > **Linux 安装说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，
 > 用 `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 装即可，依赖会一起拉齐；
 > AppImage **不打包系统库**，需要目标机自备这些库 —— dpkg 系是
