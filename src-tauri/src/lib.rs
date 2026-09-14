@@ -121,6 +121,7 @@ pub fn run() {
             // 环境缓存的落盘目录（见 dsh::env_cache）：必须在预热线程之前设置，
             // 否则预热只能退回每次真读（pnpm --version 单次可达 1.9s）
             if let Ok(dir) = app.path().app_data_dir() {
+                dsh::init_managed_npm_prefix(dir.join("npm-global"));
                 dsh::init_env_cache_dir(dir);
             }
             let prewarm_handle = app.handle().clone();

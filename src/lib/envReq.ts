@@ -22,13 +22,6 @@ export function meetsNodeRequirement(version: string | null): boolean {
   );
 }
 
-/** pnpm 主版本号；无法解析时返回 0（视为未知，不触发 pnpm 11 处理） */
-export function pnpmMajorOf(version: string | null | undefined): number {
-  if (!version) return 0;
-  const m = /^(\d+)/.exec(version.trim());
-  return m ? Number(m[1]) : 0;
-}
-
 /** 解析 semver：主/次/补丁 + 可选预发布段（"0.1.5-rc.1" → core [0,1,5], pre ["rc","1"]） */
 function parseSemver(v: string): { core: number[]; pre: string[] | null } | null {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v.trim());

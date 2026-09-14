@@ -2,7 +2,7 @@ import { GithubOutlined, InfoCircleOutlined, SyncOutlined } from "@ant-design/ic
 import { App as AntApp } from "antd";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import logo from "../../assets/logo.svg";
-import { meetsNodeRequirement, pnpmMajorOf, semverCompare } from "../../lib/envReq";
+import { meetsNodeRequirement, semverCompare } from "../../lib/envReq";
 import { api, tauri } from "../../lib/tauri";
 import { useAppStore } from "../../store/useAppStore";
 import { useUiStore } from "../../store/useUiStore";
@@ -144,29 +144,20 @@ function SystemEnvCard() {
       });
     }
 
-    const pnpm11 = pnpmMajorOf(pnpmVersion) >= 11;
+    // pnpm：只显示版本，**不做版本门禁**（用户已有的 pnpm 含 11 都直接用，不降级）
     envRows.push(
       !envCheckDone.pnpm
         ? { name: "pnpm", state: "loading", detail: <span>检测中…</span> }
         : pnpmPath
           ? {
               name: "pnpm",
-              state: pnpm11 ? "warn" : "ok",
-              detail: pnpmVersion ? (
-                <span>
-                  已安装 v{pnpmVersion}
-                  {pnpm11 ? (
-                    <span className="env-warn-text">（dsh 不支持 pnpm 11，启动时将自动降级到 pnpm 10）</span>
-                  ) : null}
-                </span>
-              ) : (
-                <span>已安装</span>
-              ),
+              state: "ok",
+              detail: pnpmVersion ? <span>已安装 v{pnpmVersion}</span> : <span>已安装</span>,
             }
           : {
               name: "pnpm",
               state: "bad",
-              detail: <span>未检测到 · 启动应用时将自动全局安装 pnpm@10（dsh 不支持 pnpm 11）</span>,
+              detail: <span>未检测到 · 启动应用时将自动全局安装 pnpm</span>,
             },
     );
 

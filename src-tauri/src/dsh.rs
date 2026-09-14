@@ -471,6 +471,16 @@ pub fn ensure_search_path() {
             let _ = refresh_windows_path();
         });
     }
+    // 放最后：merge_into_process_path 是「前置」语义，最后合并的排在最前。
+    // 应用自管的那份 pnpm 10 必须稳稳压过系统 pnpm（全局目录不可写时用它顶替，
+    // 见 install_tool_pnpm），所以要在所有平台目录合并之后再做，且不加 Once——
+    // 它是在安装完成之后才出现的，用 Once 会把它挡在这次合并之外。
+    // 重复调用无副作用：merge_into_process_path 自身去重。
+    if let Some(dir) = managed_npm_bin_dir() {
+        if dir.is_dir() {
+            merge_into_process_path(vec![dir.to_string_lossy().into_owned()]);
+        }
+    }
 }
 
 /// 读取用户环境目录（如 %LOCALAPPDATA%）
@@ -1240,8 +1250,12 @@ fn detect_dsh_process_urls_cached() -> Vec<String> {
 /// 判断条件（任一不成立就安静退出，交给前端原有链路，行为与从前一致）：
 /// - 端口上已有服务（本应用上次遗留的实例 / 用户自启的实例）→ 不抢占、不重启；
 /// - dsh 未安装或安装损坏（读不出版本）→ 交给前端安装链；
-/// - pnpm 主版本 ≥11 → 必须由前端先降级，不能抢跑；
 /// - 已有自家子进程在跑 → 无事可做。
+///
+/// 注意：**不再按 pnpm 主版本设卡**。曾有一道「pnpm ≥11 就拒绝抢跑、要求前端先降级到 10」
+/// 的门禁，前提是「dsh 与 pnpm 11 的全局虚拟仓库布局不兼容」；实测用户自己的 pnpm 11
+/// 可以正常跑起 dsh web，该前提不成立。强制降级还会把用户推到「改系统级 npm 全局目录」
+/// 这种需要提权的操作上，本应用不做也不引导。现在用户装的是哪个版本就用哪个版本。
 pub fn optimistic_start_service(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
@@ -1252,9 +1266,6 @@ pub fn optimistic_start_service(app: &AppHandle) {
     // 环境不满足就先不启动（先看快照：磁盘缓存命中时是毫秒级的）
     let snap = env_snapshot(false);
     if snap.dsh.is_none() || snap.dsh_version.is_none() {
-        return;
-    }
-    if pnpm_major_at_least_11(&snap.pnpm_version) {
         return;
     }
     // 外部实例（含使用者以自定义端口启动的 dsh web）：本次不启动，交给前端的
@@ -1283,15 +1294,6 @@ pub fn optimistic_start_service(app: &AppHandle) {
         // 乐观启动失败不弹错、不改状态：前端随后的启动链会给出正式错误提示
         eprintln!("[optimistic] 预启动 dsh web 未成功: {e}");
     }
-}
-
-/// pnpm 主版本是否 ≥11（dsh 与 pnpm 11 的全局虚拟仓库布局不兼容）
-fn pnpm_major_at_least_11(version: &Option<String>) -> bool {
-    let Some(v) = version else { return false };
-    v.split('.')
-        .next()
-        .and_then(|s| s.trim_start_matches('v').parse::<u64>().ok())
-        .is_some_and(|major| major >= 11)
 }
 
 /// 自家子进程运行时的探测候选：只认子进程输出提及的 URL 与本应用的默认端口，
@@ -1661,8 +1663,33 @@ struct EnvCacheFile {
 /// 应用数据目录（setup 时写入）；未设置时缓存功能整体退化为「每次真读」
 static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// 应用自管的 npm 前缀（setup 时写入）：仅在「npm 全局目录归 root、当前用户不可写」时
+/// 用来装一份**用户级** pnpm 10，见 `install_tool_pnpm`。
+///
+/// 为什么不直接用系统全局目录：发行版自带的 node 把全局目录放在 /usr/lib/node_modules
+/// 这类 root 所有的地方，写进去**必须提权**。本应用的设计约束是**绝不替用户切换身份、
+/// 也不引导用户去提权装东西**——系统目录归包管理器管，绕过去写只会制造与包管理器的冲突。
+/// 所以这种情况下降级为「在用户自己的目录里装一份、并优先用它」，全程零管理员权限。
+static MANAGED_NPM_PREFIX: OnceLock<PathBuf> = OnceLock::new();
+
 pub fn init_env_cache_dir(dir: PathBuf) {
     let _ = CACHE_DIR.set(dir);
+}
+
+/// 初始化应用自管 npm 前缀目录（setup 时调用，取应用数据目录下的子目录）
+pub fn init_managed_npm_prefix(dir: PathBuf) {
+    let _ = MANAGED_NPM_PREFIX.set(dir);
+}
+
+/// 应用自管 pnpm 所在的可执行目录：unix 是 `<prefix>/bin`，Windows 是 `<prefix>` 本身
+/// （npm 在 Windows 把 .cmd 垫片直接放在 prefix 下）。
+fn managed_npm_bin_dir() -> Option<PathBuf> {
+    let prefix = MANAGED_NPM_PREFIX.get()?;
+    Some(if cfg!(windows) {
+        prefix.clone()
+    } else {
+        prefix.join("bin")
+    })
 }
 
 fn env_cache_file() -> Option<PathBuf> {
@@ -1829,8 +1856,8 @@ fn save_env_cache(snap: &EnvSnapshot) {
 
 /// 后台预热第一步（lib.rs setup 调用，在构建窗口之前发起）：
 /// 用磁盘缓存装出一个快照（零子进程，毫秒级），前端首个 app_status 与乐观启动
-/// 立刻可用。缓存里的版本号是上次启动读到的，够用（只用于「是否已安装/是否
-/// pnpm 11/是否低于 node 最低版本」这类门禁判断）。
+/// 立刻可用。缓存里的版本号是上次启动读到的，够用（只用于「是否已安装」
+/// 「是否低于 node 最低版本」这类门禁判断）。
 ///
 /// 返回 true 表示本次是从磁盘缓存装出来的 → 调用方应接着调用
 /// `refresh_env_snapshot_background()` 做一次真读校正。
@@ -2109,8 +2136,8 @@ fn spawn_streamed(
 /// - Windows / node：winget install -e --id OpenJS.NodeJS.LTS
 ///   （静默 + 免交互 + 自动接受协议；MSI 安装器可能弹 UAC 授权窗口，属正常现象）
 /// - macOS / node：brew install node（无 Homebrew 时报错并引导先安装 brew）
-/// - 两平台 / pnpm：npm install -g pnpm@10（锁定 10.x 主版本——dsh 不支持 pnpm 11；
-///   npm 随 Node.js 分发，全局目录用户可写）
+/// - 两平台 / pnpm：npm install -g pnpm@10（**仅在完全没装 pnpm 时**才走到这里；
+///   装一个已知可用的版本，不对用户已有的 pnpm 做任何版本判断/降级）
 #[tauri::command]
 pub fn install_env_tool(app: AppHandle, tool: String) -> Result<(), String> {
     match tool.as_str() {
@@ -2199,15 +2226,90 @@ fn linux_node_install_hint() -> String {
     tips.join("；")
 }
 
+/// `npm root -g`：npm 全局安装目录（如发行版自带 node 上的 `/usr/lib/node_modules`）。
+/// 读不到就返回 None，调用方按「未知」处理、保持原有行为。
+fn npm_global_root(npm: &Path) -> Option<PathBuf> {
+    let out = run_with_timeout(
+        {
+            let mut c = Command::new(npm);
+            c.args(["root", "-g"]);
+            c
+        },
+        Duration::from_secs(10),
+    )?;
+    if !out.status.success() {
+        return None;
+    }
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if dir.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(dir))
+    }
+}
+
+/// 目录是否真的可写：建一个探针文件再删掉。
+///
+/// 比看权限位可靠——ACL、root 身份、只读挂载都能覆盖。目录不存在时先尝试创建
+/// （全新的用户级 prefix 属于这种情况；系统目录建不出来，正好也算「不可写」）。
+fn dir_is_writable(dir: &Path) -> bool {
+    if !dir.exists() && std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".dhd-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn install_tool_pnpm(app: AppHandle) -> Result<(), String> {
     // 安装会改变 pnpm 的解析结果/版本：先让环境快照失效
     invalidate_env_snapshot();
     let npm =
         resolve_npm().ok_or("未找到 npm。请先安装 Node.js 后重试（npm 随 Node.js 一同分发）")?;
     log_npm_mirror(&app, ENV_INSTALL_LOG_EVENT);
+
+    // 目标前缀：默认用 npm 的全局目录；只有它**不可写**时才改用应用自管的用户级目录。
+    //
+    // 设计约束：绝不替用户提权、也不引导用户去提权（sudo）装东西。发行版自带的 node 把
+    // 全局目录放在 /usr/lib/node_modules 这类 root 所有的地方，普通用户写进去只会 EACCES
+    // ——而系统目录归发行版包管理器管，绕过去写会制造与包管理器的冲突。所以这种情况下降级为
+    // 「在用户自己的应用数据目录里装一份 pnpm 10，并优先用它」：零管理员权限、不碰系统文件。
+    let mut prefix: Option<PathBuf> = None;
+    if let Some(root) = npm_global_root(&npm) {
+        if !dir_is_writable(&root) {
+            let dir = MANAGED_NPM_PREFIX.get().ok_or(
+                "pnpm 全局目录（{root}）归系统所有、当前用户不可写，且应用数据目录不可用，\
+                 无法改为用户级安装。请在终端以当前用户执行（无需管理员权限）：\
+                 npm install -g pnpm@10 --prefix ~/.local　然后回到本页点「重新检测」"
+                    .replace("{root}", &root.display().to_string()),
+            )?;
+            emit_log(
+                &app,
+                ENV_INSTALL_LOG_EVENT,
+                "system",
+                &format!(
+                    "系统级 pnpm 全局目录不可写（{}）：改为在用户目录安装一份 pnpm 10 并使用它，\
+                     不修改任何系统文件、也不需要管理员权限",
+                    root.display()
+                ),
+            );
+            prefix = Some(dir.clone());
+        }
+    }
+
     let mut cmd = Command::new(&npm);
-    // 锁定 pnpm 10 主版本：dsh 与 pnpm 11 的全局虚拟仓库布局不兼容，不能用默认 latest（11.x）
+    // 只在「完全没装 pnpm」时才走这里，装一个已知可用的版本即可；
+    // 不再锁定主版本去迁就所谓「dsh 不支持 pnpm 11」——该前提已被实测推翻，
+    // 且锁版本会诱使降级已有安装（可能落到系统目录、需要提权）。
     cmd.args(["install", "-g", "pnpm@10"]);
+    if let Some(prefix) = &prefix {
+        cmd.arg("--prefix").arg(prefix);
+    }
     cmd.args(npm_mirror_args());
     crate::proxy_config::apply_proxy_env(&app, ENV_INSTALL_LOG_EVENT, &mut cmd);
     spawn_streamed(app, cmd, ENV_INSTALL_LOG_EVENT, ENV_INSTALL_EXIT_EVENT)
@@ -3634,6 +3736,33 @@ mod tests {
         for c in pnpm_global_bin_candidates() {
             assert!(c.is_absolute(), "候选目录应为绝对路径: {c:?}");
         }
+    }
+
+    /// 可写性探针：可写目录判真、且探针文件用完即删（不留垃圾）；建不出来的目录判假。
+    /// 这条守卫决定「系统级 npm 全局目录」的 EACCES 会不会被提前拦下，
+    /// 判错任一方向都会让用户要么白吃一屏 npm 报错、要么被误挡在正常安装之外。
+    #[test]
+    fn dir_is_writable_probes_real_write_and_cleans_up() {
+        let base = std::env::temp_dir().join(format!("dhd-writable-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 不存在的目录：能建出来 → 可写
+        assert!(dir_is_writable(&base), "临时目录应可写（含按需创建）");
+        // 探针必须清理干净，否则会在 npm 全局目录里留下垃圾文件
+        assert_eq!(
+            std::fs::read_dir(&base).unwrap().count(),
+            0,
+            "探针文件用后必须删除"
+        );
+
+        // 建不出来的路径：父级是文件 → 不可写，且不能 panic
+        std::fs::write(base.join("file"), b"x").unwrap();
+        assert!(
+            !dir_is_writable(&base.join("file").join("sub")),
+            "父级是文件时应判不可写"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 集成冒烟（依赖本机装有 pnpm）：完整走一遍探测链路

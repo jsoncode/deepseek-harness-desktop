@@ -2,7 +2,7 @@ import { ReloadOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
-import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
+import { meetsNodeRequirement } from "../lib/envReq";
 import { api, tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
@@ -16,10 +16,12 @@ import { useAppStore } from "../store/useAppStore";
  * 也会与封面 navigate 过来的这一次点击形成双重触发。
  */
 
-/** 按当前环境状态选择启动链：环境缺失/损坏（node/pnpm/dsh 或 pnpm 11）走一键
- *  安装链，否则走常规启动链。封面的启动意图、本页的「启动服务 / 重试」按钮共用此判定。
+/** 按当前环境状态选择启动链：环境缺失/损坏（node/pnpm/dsh）走一键安装链，
+ *  否则走常规启动链。封面的启动意图、本页的「启动服务 / 重试」按钮共用此判定。
  *  node 按「路径在 + 版本可读时达标」判定：版本读取偶发超时不等于未安装，
- *  不能据此走安装分支在好机器上重装 node；版本可读且低于要求才需要装 LTS。 */
+ *  不能据此走安装分支在好机器上重装 node；版本可读且低于要求才需要装 LTS。
+ *  **不判断 pnpm 主版本**：用户已有的 pnpm（含 11）直接使用，不做降级。
+ *  详见 dsh.rs `optimistic_start_service` 的说明。 */
 function startChain() {
   const s = useAppStore.getState();
   // dsh 已安装但读不出版本 = 安装损坏（与后端完整性校验一致）→ 走一键安装链重装；
@@ -30,8 +32,7 @@ function startChain() {
     nodeOk &&
     Boolean(s.pnpmPath) &&
     s.dshInstalled &&
-    Boolean(s.dshVersion) &&
-    pnpmMajorOf(s.pnpmVersion) < 11
+    Boolean(s.dshVersion)
   );
   void (needsInstall ? s.installEnvAndStart() : s.startFlow());
 }
@@ -79,8 +80,8 @@ export default function Loading() {
   // 不在此自动拉起——用户刚明确停止过服务，不应违背其意图自动启动
   const stoppedIdle = phase === "stopped" && !seenBusy.current && !fromRestart;
 
-  // 手动启动/重试：环境依赖缺失（node/pnpm/dsh 或 pnpm 11）时走一键安装链，
-  // 否则走常规启动链（停止态与失败态共用）
+  // 手动启动/重试：环境依赖缺失（node/pnpm/dsh）时走一键安装链，
+  // 否则走常规启动链（停止态与失败态共用）。pnpm 只判「在不在」，不判版本。
   const startNow = () => {
     if (starting) return;
     seenBusy.current = false;

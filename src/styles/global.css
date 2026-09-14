@@ -342,10 +342,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-.env-warn-text {
-  color: var(--warn);
-}
-
 /* 插件管理弹框（列表视图 + 操作终端视图） */
 .plugin-op-banner {
   margin-bottom: 12px;

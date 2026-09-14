@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, EVENTS, onEvent, tauri, withTimeout, type CredentialsCheck, type ExitPayload, type LogLine, type PluginVersionInfo, type StatusPayload, type ToolCheck, type UrlPayload } from "../lib/tauri";
-import { meetsNodeRequirement, pnpmMajorOf } from "../lib/envReq";
+import { meetsNodeRequirement } from "../lib/envReq";
 
 // ---------------------------------------------------------------------------
 // 应用状态机：checking → idle | installing → starting → running
@@ -110,8 +110,6 @@ interface AppStore {
   beginLogSession: (title: string) => Promise<void>;
   /** 预置下一次启动流程的日志会话标题（如「重启服务」），由 startFlow/installEnvAndStart 消费 */
   prepareLogSessionTitle: (title: string) => void;
-  /** pnpm ≥11（dsh 不支持）时降级到 pnpm 10；返回是否执行了降级 */
-  ensurePnpm10: () => Promise<boolean>;
   /** 正在通过自动链路安装的环境依赖（驱动启动页按钮/状态文案） */
   envInstallTool: "node" | "pnpm" | null;
   /** dsh web 因凭据配置文件格式问题启动失败时，弹框展示打码内容与最新格式模板，
@@ -823,33 +821,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    /** pnpm ≥11 时降级到 pnpm 10（dsh 与 pnpm 11 的全局虚拟仓库布局不兼容）。
-     *  复用后端 installEnvTool("pnpm") = npm install -g pnpm@10；返回是否发生了降级。 */
-    ensurePnpm10: async () => {
-      const major = pnpmMajorOf(get().pnpmVersion);
-      if (major < 11) return false;
-      get().appendLog("system", "检测到 pnpm 11：dsh 不支持 pnpm 11，开始降级到 pnpm 10…");
-      set({ phase: "installing", envInstallTool: "pnpm" });
-      const waiter = waitEnvExit();
-      try {
-        await api.installEnvTool("pnpm");
-      } catch (e) {
-        dropEnvExitWait();
-        throw e;
-      }
-      const code = await waiter;
-      if (code !== 0) {
-        throw new Error(`pnpm 降级失败（退出码 ${code}），请查看下方日志`);
-      }
-      get().appendLog("success", "已降级到 pnpm 10");
-      await api.refreshSearchPath();
-      await pullStatusFields();
-      if (pnpmMajorOf(get().pnpmVersion) >= 11) {
-        throw new Error("pnpm 降级后仍未生效，请重启本应用后重试");
-      }
-      return true;
-    },
-
     startFlow: async () => {
       const { phase, dshInstalled } = get();
       if (phase === "installing" || phase === "starting" || phase === "running") return;
@@ -867,28 +838,16 @@ export const useAppStore = create<AppStore>((set, get) => {
         return;
       }
 
-      // pnpm ≥11：先降级；失败则中止本次启动
-      let downgraded = false;
-      try {
-        downgraded = await get().ensurePnpm10();
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        get().appendLog("error", msg);
-        set({ phase: "error", error: msg });
-        return;
-      }
+      // 不再按 pnpm 主版本设卡：用户已有的 pnpm（含 11）直接用于启动 dsh web。
+      // 曾有一道「pnpm ≥11 先降级到 10、失败则中止启动」的门禁，前提是 dsh 与 pnpm 11
+      // 不兼容；实测 pnpm 11 可正常跑起 dsh web，且强制降级会把用户推向需要提权修改
+      // 系统级 npm 全局目录的操作——本应用不做也不引导。
 
       // dsh 已全局安装：启动链一律保留现有版本——绝不自动重装/更新（@latest 会
-      // 覆盖现有 dsh 版本，历史上曾因 dsh 升级引发兼容性问题）。pnpm 刚从 11 降级
-      // 时也不再重装；若旧 dsh 确因布局损坏无法启动，start_dsh_web 的完整性校验
-      // 会给出明确错误，由用户在启动页点击「安装」手动重装。
+      // 覆盖现有 dsh 版本，历史上曾因 dsh 升级引发兼容性问题）。若旧 dsh 确因布局
+      // 损坏无法启动，start_dsh_web 的完整性校验会给出明确错误，由用户在启动页
+      // 点击「安装」手动重装。
       if (dshInstalled) {
-        if (downgraded) {
-          get().appendLog(
-            "system",
-            "检测到 pnpm 刚从 11 降级到 10：保留现有 dsh 版本继续启动（不再自动重装 @latest，避免覆盖现有版本）",
-          );
-        }
         get().appendLog("system", "检测到 dsh 已全局安装，跳过安装步骤");
         void get().startService();
       } else {
@@ -977,9 +936,12 @@ export const useAppStore = create<AppStore>((set, get) => {
           );
         }
 
-        // ② pnpm（npm 全局安装，锁定 10.x——dsh 不支持 pnpm 11）
+        // ② pnpm：**只在完全没装时**才装一个已知可用版本。
+        //    用户已有的 pnpm 不做任何版本判断、也不降级——曾有一道「≥11 就强制降级到 10」
+        //    的门禁，前提是 dsh 与 pnpm 11 不兼容；实测用户的 pnpm 11 能正常跑 dsh web，
+        //    该前提不成立。强制降级还会把用户推到改系统级 npm 全局目录这种需要提权的操作上。
         if (!get().pnpmPath) {
-          get().appendLog("system", "未检测到 pnpm，开始通过 npm 全局安装 pnpm@10（锁定版本，dsh 不支持 pnpm 11）…");
+          get().appendLog("system", "未检测到 pnpm，开始通过 npm 全局安装 pnpm@10（仅缺省时安装，不覆盖已有版本）…");
           await runStep("pnpm", "pnpm");
           await api.refreshSearchPath();
           await pullStatusFields();
@@ -987,8 +949,6 @@ export const useAppStore = create<AppStore>((set, get) => {
             throw new Error("pnpm 已执行安装但当前会话仍未探测到，请重启本应用后重试");
           }
         }
-        // pnpm ≥11：一键降级到 10（dsh 不支持 pnpm 11）
-        const downgraded = await get().ensurePnpm10();
 
         set({ phase: "installing", envInstallTool: null });
         // ③ dsh：仅在「缺失」或「已安装但无法读取版本（安装损坏，用户已通过
@@ -1005,12 +965,6 @@ export const useAppStore = create<AppStore>((set, get) => {
           );
           await api.installDsh();
           return; // 后续流程由既有事件链驱动，本函数到此结束
-        }
-        if (downgraded) {
-          get().appendLog(
-            "system",
-            "检测到 pnpm 刚从 11 降级到 10：保留现有 dsh 版本继续启动（不再自动重装 @latest，避免覆盖现有版本）",
-          );
         }
 
         // 环境全部就绪 → 直接进入现有启动链（含 dsh web 启动、自动打开）
