@@ -7,18 +7,17 @@ import { api, tauri } from "../lib/tauri";
 import { useAppStore } from "../store/useAppStore";
 
 /**
- * 服务状态页（原启动过渡页）：启动检查页已移除，本页是唯一的服务级状态页。
- * 应用打开后自动完成「检测环境 →（缺失才安装）→ 启动」，各阶段全屏 loading；
- * 服务就绪（running）即刻进入预览页，失败/被手动停止时在本页给出启动入口。
+ * 服务状态页（启动过渡页）：只负责展示**进行中**的阶段（检测环境 → 安装 → 启动）与
+ * 失败/停止后的重试入口。服务就绪（running）即刻进入预览页。
  * 文案不出现「重启」字样——启动与重启共用本页，进度由阶段文案表达。
+ *
+ * 启动由启动封面的「启动应用」按钮触发（location.state.start），或由 BottomBar /
+ * ServiceRestartHandler 的重启链路触发；本页**不再自动启动**——那会让封面失去展示机会，
+ * 也会与封面 navigate 过来的这一次点击形成双重触发。
  */
 
-/** 自动启动标记：应用打开后的自动启动链只执行一次
- *  （本组件随导航反复重挂载，模块级标记防重复触发） */
-let autoStarted = false;
-
 /** 按当前环境状态选择启动链：环境缺失/损坏（node/pnpm/dsh 或 pnpm 11）走一键
- *  安装链，否则走常规启动链。自动启动与手动启动/重试共用同一判定。
+ *  安装链，否则走常规启动链。封面的启动意图、本页的「启动服务 / 重试」按钮共用此判定。
  *  node 按「路径在 + 版本可读时达标」判定：版本读取偶发超时不等于未安装，
  *  不能据此走安装分支在好机器上重装 node；版本可读且低于要求才需要装 LTS。 */
 function startChain() {
@@ -45,6 +44,9 @@ export default function Loading() {
 
   // 是否由重启链路进入（重启会先 stop() 停掉旧实例）：决定 stopped 阶段的提示文案
   const fromRestart = Boolean((location.state as { restart?: boolean } | null)?.restart);
+
+  // 是否由启动封面的「启动应用」进入：封面不参与启动流程，只把启动意图交过来
+  const fromStart = Boolean((location.state as { start?: boolean } | null)?.start);
 
   // 是否已经历过忙碌阶段（installing/starting）：
   // 重启链路会先短暂经过 stopped（停止旧服务），不能据此判定失败
@@ -74,36 +76,8 @@ export default function Loading() {
   if (phase === "installing" || phase === "starting") seenBusy.current = true;
 
   // 服务被手动停止（非重启链路、也未经历过启动流程）→ 展示停止态与启动入口；
-  // 自动启动不在此触发——用户刚明确停止过服务，不应违背其意图自动拉起
+  // 不在此自动拉起——用户刚明确停止过服务，不应违背其意图自动启动
   const stoppedIdle = phase === "stopped" && !seenBusy.current && !fromRestart;
-
-  // 应用打开后的自动启动（一次性）：先完成环境检测初始化，服务已在运行/
-  // 启动中则交给上方 phase 联动跳转，否则按环境状态自动续接启动链。
-  // 浏览器预览模式无后端，仅初始化为空闲态（避免误报启动失败）
-  useEffect(() => {
-    if (autoStarted) return;
-    autoStarted = true;
-    if (!tauri) {
-      void useAppStore.getState().init();
-      return;
-    }
-    void useAppStore
-      .getState()
-      .init()
-      .then(() => {
-        const s = useAppStore.getState();
-        if (s.phase === "running") return;
-        if (s.phase === "starting") {
-          // 后端已提前拉起服务（乐观启动：Rust 在预热线程里先启动了 dsh web），
-          // 此时不必再走启动链，但要补开日志会话——否则本次启动的日志没有归属，
-          // 日志管理里会缺一条记录
-          if (!s.logSessionId) void s.beginLogSession("启动服务");
-          return;
-        }
-        if (s.phase === "installing") return;
-        startChain();
-      });
-  }, []);
 
   // 手动启动/重试：环境依赖缺失（node/pnpm/dsh 或 pnpm 11）时走一键安装链，
   // 否则走常规启动链（停止态与失败态共用）
@@ -121,6 +95,18 @@ export default function Loading() {
     // phase 变化（installing/starting/running）后由上方联动接管，忙碌态随即失效
     setTimeout(() => setStarting(false), 1500);
   };
+
+  // 启动封面点「启动应用」进入本页：封面不参与启动流程，只带一个意图标记过来，
+  // 真正的启动/安装链在这里跑（与「重试 / 启动服务」按钮共用 startNow）。
+  // 一次性——重挂载不重复触发。
+  const startRequested = useRef(false);
+  useEffect(() => {
+    if (!fromStart) return;
+    if (startRequested.current) return;
+    startRequested.current = true;
+    startNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromStart]);
 
   const title = "正在启动服务…";
   let sub = "正在准备启动";

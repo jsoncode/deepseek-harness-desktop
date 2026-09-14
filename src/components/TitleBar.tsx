@@ -49,13 +49,13 @@ export default function TitleBar() {
       </div>
 
       <div className="titlebar-center">
-        {/* Home 入口：服务已启动 → 服务内（预览页）；未启动 → 服务状态页（启动过渡页） */}
+        {/* Home 入口：服务已启动 → 服务内（预览页）；未启动 → 启动页（未启动态的落地页） */}
         <button
           type="button"
           className="icon-btn"
-          title={phase === "running" ? "进入应用" : "服务状态"}
+          title={phase === "running" ? "进入应用" : "启动页"}
           aria-label="首页"
-          onClick={() => navigate(phase === "running" ? "/preview" : "/loading")}
+          onClick={() => navigate(phase === "running" ? "/preview" : "/")}
         >
           <img src={logo} alt="" draggable={false} className="titlebar-home-logo" />
         </button>

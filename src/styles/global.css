@@ -198,6 +198,86 @@ body {
 }
 
 /* ==========================================================================
+   品牌视觉：logo 玻璃瓷片 + 渐变标题
+   启动封面与「设置 → 关于本应用」头部共用同一套配方，只是尺寸不同。
+   尺寸由 --tile 一个旋钮控制（圆角/描边环/内部图标都按它换算），
+   避免两处各写一份渐变、阴影、遮罩而逐渐走样。
+   ========================================================================== */
+
+:is(.launch-logo, .about-hero-logo) {
+  /* --s 是唯一旋钮：1 = 启动封面原尺寸（96px 基准），两处共用同一套
+     尺寸/圆角/阴影/描边环换算，避免各写一份逐渐走样 */
+  --s: 1;
+  width: calc(96px * var(--s));
+  height: calc(96px * var(--s));
+  border-radius: calc(26px * var(--s));
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02)),
+    rgba(10, 13, 20, 0.6);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow:
+    0 calc(24px * var(--s)) calc(60px * var(--s)) calc(-18px * var(--s)) rgba(99, 102, 241, 0.45),
+    0 calc(8px * var(--s)) calc(24px * var(--s)) calc(-8px * var(--s)) rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  position: relative;
+}
+
+:is(.launch-logo, .about-hero-logo)::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: calc(27px * var(--s));
+  padding: 1px;
+  background: linear-gradient(150deg, rgba(99, 102, 241, 0.7), rgba(34, 211, 238, 0.4), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+:is(.launch-logo, .about-hero-logo) img {
+  width: calc(52px * var(--s));
+  height: calc(52px * var(--s));
+  filter: drop-shadow(0 4px 14px rgba(99, 102, 241, 0.55));
+}
+
+:is(.launch-title, .about-hero-title) {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  background: linear-gradient(120deg, #ffffff 20%, #c7d2fe 55%, #7dd3fc 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* ==========================================================================
+   启动页（封面）：只用未启动时的落地页，纯展示
+   ========================================================================== */
+
+.launch {
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.launch-logo-wrap {
+  margin-bottom: 26px;
+  animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.launch-title {
+  font-size: 42px;
+  animation: fadeUp 0.7s 0.08s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ==========================================================================
    环境检测卡片（设置-关于本应用-系统环境）
    ========================================================================== */
 
@@ -264,13 +344,6 @@ body {
 
 .env-warn-text {
   color: var(--warn);
-}
-
-.env-hint {
-  padding-top: 8px;
-  border-top: 1px dashed var(--border-strong);
-  font-size: 12.5px;
-  color: var(--danger);
 }
 
 /* 插件管理弹框（列表视图 + 操作终端视图） */
@@ -969,6 +1042,70 @@ html[data-theme="light"] .mk-op-banner {
   color: var(--text-2);
 }
 
+/* 启动页主按钮：渐变底 + 悬停上浮 + 循环流光（.btn-shine 覆盖层） */
+.launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  /* 标题与主按钮之间留出明确的呼吸位。原版这里夹着一枚状态胶囊
+     （margin 30px + 胶囊高 + 22px），胶囊拆掉后只剩 .launch 的 6px flex gap，
+     42px 大标题贴着按钮显得发闷。补 30px，合计 36px——比 logo→标题的 32px
+     略大，收尾才不会头重脚轻。 */
+  margin-top: 30px;
+  animation: fadeUp 0.7s 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.btn-primary {
+  position: relative;
+  border: none;
+  cursor: pointer;
+  padding: 15px 52px;
+  border-radius: 999px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #22d3ee 100%);
+  background-size: 180% 180%;
+  box-shadow:
+    0 12px 32px -10px rgba(99, 102, 241, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transition:
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.18s ease,
+    filter 0.18s ease;
+  overflow: hidden;
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+  box-shadow:
+    0 18px 44px -12px rgba(99, 102, 241, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+}
+
+.btn-primary:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.btn-primary .btn-shine {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.28) 50%, transparent 70%);
+  background-size: 200% 100%;
+  animation: shimmer 3.2s linear infinite;
+  pointer-events: none;
+}
+
 .btn-secondary {
   border: 1px solid var(--border-strong);
   background: var(--panel);
@@ -1655,6 +1792,27 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ---- 浅色下硬编码深色的覆盖（步骤 5 审计） ---- */
+
+/* 品牌大标题：原为白色渐变文字，浅色底上不可读 → 深色渐变（封面与关于页头部共用） */
+html[data-theme="light"] :is(.launch-title, .about-hero-title) {
+  background: linear-gradient(120deg, #1c2129 20%, #4f46e5 55%, #0891b2 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* 品牌 logo 瓷片：原为深色玻璃底，浅色下 logo（黑）不可读 → 浅色玻璃底 */
+html[data-theme="light"] :is(.launch-logo, .about-hero-logo) {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.35)),
+    rgba(255, 255, 255, 0.5);
+  border-color: rgba(15, 23, 42, 0.14);
+  box-shadow:
+    0 calc(24px * var(--s)) calc(60px * var(--s)) calc(-18px * var(--s)) rgba(99, 102, 241, 0.4),
+    0 calc(8px * var(--s)) calc(24px * var(--s)) calc(-8px * var(--s)) rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
 
 /* 次按钮悬停边框：原为白色半透明，浅色底上不可见 → 深色半透明 */
 html[data-theme="light"] .btn-secondary:hover {
@@ -2902,51 +3060,71 @@ html[data-theme="light"] .theme-option.active {
    关于本应用
    -------------------------------------------------------------------------- */
 
-.about-app-head {
+/* 头部 hero：沿用启动封面的品牌视觉（玻璃瓷片 + 渐变标题），居中收束成
+   「关于本应用」的门面。三行按封面同款节奏级联入场。
+   下方原有的三个信息行收进 chips 一行，纵向更紧凑。 */
+.about-hero {
+  position: relative;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 14px;
-  padding-bottom: 10px;
-  border-bottom: 1px dashed var(--border-strong);
+  text-align: center;
+  padding: 6px 0 20px;
 }
 
-.about-app-logo {
-  width: 52px;
-  height: 52px;
-  flex-shrink: 0;
-  border-radius: 14px;
-  display: grid;
-  place-items: center;
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02)),
-    rgba(10, 13, 20, 0.6);
-  border: 1px solid var(--border-strong);
-}
-
-html[data-theme="light"] .about-app-logo {
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.35)),
-    rgba(255, 255, 255, 0.5);
-  border-color: rgba(15, 23, 42, 0.14);
-}
-
-.about-app-logo img {
-  width: 28px;
-  height: 28px;
-  display: block;
+/* 顶部柔光：把 hero 拉成一整条「封面带」，呼应启动封面的极光底。
+   贴在卡片上沿、宽度自适应，不外溢（卡片无 overflow 裁切，靠尺寸约束）。 */
+.about-hero::before {
+  content: "";
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  width: min(440px, 100%);
+  height: 200px;
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, rgba(99, 102, 241, 0.18), transparent 100%);
   pointer-events: none;
 }
 
-.about-app-name {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-1);
-  line-height: 1.4;
+.about-hero > * {
+  position: relative;
+  z-index: 1;
 }
 
-.about-app-meta {
+html[data-theme="light"] .about-hero::before {
+  background: radial-gradient(closest-side, rgba(99, 102, 241, 0.13), transparent 100%);
+}
+
+.about-hero-logo {
+  --s: 0.8;
+}
+
+.about-hero-logo-wrap {
+  margin-bottom: 18px;
+  animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.about-hero-title {
+  font-size: 30px;
+  animation: fadeUp 0.7s 0.08s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.about-hero-sub {
+  margin-top: 10px;
   font-size: 12.5px;
   color: var(--text-3);
+  animation: fadeUp 0.7s 0.14s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 版本徽标 + 作者 / 仓库入口收成一行 chips */
+.about-hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  animation: fadeUp 0.7s 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* 版本徽标 */
@@ -2954,11 +3132,12 @@ html[data-theme="light"] .about-app-logo {
   font-family: var(--mono);
   font-size: 12.5px;
   font-weight: 600;
-  padding: 2px 10px;
+  padding: 5px 14px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   color: var(--text-1);
   background: var(--panel);
+  line-height: 1;
 }
 
 /* 更新检查结果行（平铺，无盒子；紧随分区标题/说明文字） */

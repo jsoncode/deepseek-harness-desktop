@@ -48,7 +48,7 @@ export default function BottomBar() {
     })();
   };
 
-  // 停止：原生确认后停止服务并回到服务状态页（展示停止态 + 启动入口）
+  // 停止：原生确认后停止服务并回到启动封面（未启动态的落地页）
   const handleStop = async () => {
     const ok = await nativeConfirm(
       "确定要停止当前服务吗？停止后需重新启动才能继续访问。",
@@ -57,7 +57,7 @@ export default function BottomBar() {
     );
     if (!ok) return;
     void stop();
-    navigate("/loading");
+    navigate("/");
   };
 
   // 「安装中」禁用重启（避免打断安装链路）；「启动中」保留重启/停止能力——

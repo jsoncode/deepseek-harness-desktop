@@ -66,7 +66,7 @@ chmod +x dhd_x.y.z_linux_amd64.AppImage
 **First run (two steps)**:
 
 1. Install [Node.js](https://nodejs.org/) ≥ 22.19 and [pnpm](https://pnpm.io/installation) — the app automatically runs `pnpm add -g @deepseek-ai/dsh@latest` to install DSH and start the local service;
-2. Open the app and click **Launch App** to start the service manually (the launch page shows the dsh CLI version and install/start progress); the service page opens automatically once it is ready.
+2. Open the app and click **Launch App** to start the service manually (the service status page then shows environment detection / install / start progress); the service page opens automatically once it is ready.
 
 > - On Windows, if SmartScreen warns you, choose **More info → Run anyway**.
 > - On macOS, the app is not notarized: on first open go to **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**.
@@ -77,7 +77,7 @@ chmod +x dhd_x.y.z_linux_amd64.AppImage
 
 - **Tiny installer** — installers are only **2–3 MB** across all platforms (~2 MB Windows NSIS, ~3 MB macOS DMG/PKG), so they download and install in seconds (vs. 100+ MB typical for Electron apps).
 - **One-click setup** — automatically installs `@deepseek-ai/dsh` (pnpm global) and starts the local web service; no manual configuration.
-- **pnpm compatible** — works with the pnpm 10 global layout (shims in `PNPM_HOME`). Even if `pnpm setup` was never run, it injects the bin dir into the session PATH and persists it to the user PATH, so the service starts immediately and stays installed across launches. **pnpm 11 is not supported** (dsh is incompatible with its global virtual store layout; the launch page shows a hint).
+- **pnpm compatible** — works with the pnpm 10 global layout (shims in `PNPM_HOME`). Even if `pnpm setup` was never run, it injects the bin dir into the session PATH and persists it to the user PATH, so the service starts immediately and stays installed across launches. **pnpm 11 is not supported** (dsh is incompatible with its global virtual store layout; the start chain downgrades to pnpm 10 automatically).
 - **Smart service detection** — probes the default port and only trusts URLs printed by its own child process, so it never hijacks an external instance.
 - **Streaming terminal** — macOS-style terminal with live install/start logs, stop/restart, and crash notifications.
 - **Embedded preview** — on Windows / macOS the local DSH web UI is loaded as a native child webview floating over the content area (health polling + titlebar reload); **on Linux it opens in a standalone preview window** (WebKitGTK child webviews cannot be positioned over the shell UI — see Notes).
@@ -187,8 +187,8 @@ Linux** — Windows/macOS development cannot catch its compile errors.
 
 | Page | Description |
 | --- | --- |
-| `/` Launch | Centered logo + environment pre-check card (Node.js / pnpm / dsh CLI versions) + primary button. Shows **Open App** when a service is already running, otherwise **Launch App** (starts only on manual click — never auto-starts on page entry). |
-| `/terminal` Terminal | Streaming logs of the global install (`pnpm add -g @deepseek-ai/dsh@latest`) and `dsh web` startup; entering the page never auto-starts the service, it only shows logs. |
+| `/` Launch cover | A **purely presentational cover**: centered logo + title + gradient **Launch App** button (with a shimmer effect). It appears **only when the service is not running** — a running service goes straight to the preview page, and starting/installing goes straight to the status page. The cover takes no part in the startup flow (no environment detection, no install, no start); its button just hands the start intent to the status page. Stopping the service returns here. |
+| `/loading` Service status | The **single home of the start/install/restart flow**: a full-screen loading view stepping through environment detection → dependency install → service start, then auto-entering the preview page; on failure or stop it offers retry / start / view logs. |
 | `/preview` Preview | The local service loaded as a native child webview (Windows / macOS) with titlebar reload. **On Linux** the host UI opens in a standalone preview window and this page shows an explanation plus *Reopen preview window* / *Open in browser* buttons. The titlebar indicator turns red when the service disconnects. |
 
 System tray (right-click): **Open** restores the window, **Open in Browser** opens the service URL in your default browser, **Quit** stops the service and exits.
@@ -217,7 +217,7 @@ libs/               Offline NSIS toolchain (nsis-3.11.zip + nsis_tauri_utils.dll
 - `dsh web` listens on `127.0.0.1:3080` by default (release); the launcher confirms readiness by parsing `http://...` lines from its stdout plus TCP probing.
 - The host's newer process-token browser auth (root request exchanges for a `SameSite=Strict` cookie) cannot be completed by a DOM iframe in a packaged build: the shell origin is `tauri://localhost`, so an iframe is **cross-site** and Strict cookies are never sent back. The preview therefore always loads the host URL as a **top-level document** — a same-window native child webview on Windows/macOS (positioned over the content area), and a **standalone preview window on Linux**, where Tauri hands child webviews to the window's `GtkBox` and wry only honours coordinates inside a `GtkFixed` parent. Both paths share the same auth and bridge semantics (`src-tauri/src/preview.rs`).
 - Debug builds are fully isolated: app id `com.deepseek.harness.desktop.dev`, service port 6088, UI port 6089.
-- **Linux differences**: ① preview runs in a standalone window (above); ② system notifications go through D-Bus (notify-rust) but have **no "Open conversation" button** — click-through only exists on Windows' toast activation callback; ③ voice playback is unavailable (rodio's Linux backend needs ALSA, not part of this release; the UI hides the entry point); ④ Node.js cannot be installed by the app (system packages need sudo) — the launch page prints the per-distribution install command; ⑤ port-occupancy checks prefer `lsof` and fall back to a `/proc` lookup when it is missing; ⑥ the tray needs the system's `libayatana-appindicator3-1` (declared by the .deb/.rpm) — and if it really is missing the app **still starts**: it skips the tray, and closing the main window then quits the app (AppImage users should make sure that library is present).
+- **Linux differences**: ① preview runs in a standalone window (above); ② system notifications go through D-Bus (notify-rust) but have **no "Open conversation" button** — click-through only exists on Windows' toast activation callback; ③ voice playback is unavailable (rodio's Linux backend needs ALSA, not part of this release; the UI hides the entry point); ④ Node.js cannot be installed by the app (system packages need sudo) — the start chain prints the per-distribution install command into the start log; ⑤ port-occupancy checks prefer `lsof` and fall back to a `/proc` lookup when it is missing; ⑥ the tray needs the system's `libayatana-appindicator3-1` (declared by the .deb/.rpm) — and if it really is missing the app **still starts**: it skips the tray, and closing the main window then quits the app (AppImage users should make sure that library is present).
 
 ## 📖 Readme in other languages
 

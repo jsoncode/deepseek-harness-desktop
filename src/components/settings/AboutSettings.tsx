@@ -1,4 +1,4 @@
-import { GithubOutlined, InfoCircleOutlined, SyncOutlined, UserOutlined } from "@ant-design/icons";
+import { GithubOutlined, InfoCircleOutlined, SyncOutlined } from "@ant-design/icons";
 import { App as AntApp } from "antd";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import logo from "../../assets/logo.svg";
@@ -12,9 +12,10 @@ import DshUpdateModal, { type DshNpmInfo, type DshNpmState } from "./DshUpdateMo
 const REPO = "jsoncode/deepseek-harness-desktop";
 const RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASE_PAGE = `https://github.com/${REPO}/releases/latest`;
+/** 仓库主页：作者与仓库合并后的唯一入口 */
 const REPO_PAGE = `https://github.com/${REPO}`;
+/** 作者名（取自仓库 owner），作为仓库入口按钮的文案 */
 const AUTHOR = REPO.split("/")[0];
-const AUTHOR_PAGE = `https://github.com/${AUTHOR}`;
 
 /** @deepseek-ai/dsh 的 npm packument（版本检测：dist-tags.latest + 全部版本号） */
 const DSH_NPM_PACKUMENT = "https://registry.npmjs.org/@deepseek-ai/dsh";
@@ -362,34 +363,31 @@ export default function AboutSettings() {
     <>
       <div className="settings-body">
         <div className="settings-card">
-          <div className="about-app-head">
-            <div className="about-app-logo">
-              <img src={logo} alt="Harness" draggable={false} />
-            </div>
-            <div>
-              <div className="about-app-name">DeepSeek Harness Desktop</div>
-              <div className="about-app-meta">
-                本地 DeepSeek Harness 网页服务的轻量桌面壳
+          {/* 头部：直接沿用启动封面的品牌视觉（玻璃瓷片 logo + 渐变标题 + 级联入场），
+              把原来的「小 logo + 名称 + 三行信息」压成居中的 hero + 一行 chips */}
+          <div className="about-hero">
+            <div className="about-hero-logo-wrap">
+              <div className="about-hero-logo">
+                <img src={logo} alt="Harness" draggable={false} />
               </div>
             </div>
-          </div>
-          <div className="settings-row">
-            <span>当前版本</span>
-            <span className="about-app-version">{__APP_VERSION__}</span>
-          </div>
-          <div className="settings-row">
-            <span>作者</span>
-            <button className="pm-btn" type="button" onClick={() => openUrl(AUTHOR_PAGE)}>
-              <UserOutlined style={{ fontSize: 13 }} />
-              {AUTHOR}
-            </button>
-          </div>
-          <div className="settings-row">
-            <span>开源仓库</span>
-            <button className="pm-btn" type="button" onClick={() => openUrl(REPO_PAGE)}>
-              <GithubOutlined style={{ fontSize: 13 }} />
-              github.com/{REPO}
-            </button>
+            <h1 className="about-hero-title">DeepSeek Harness Desktop</h1>
+            <div className="about-hero-sub">本地 DeepSeek Harness 网页服务的轻量桌面壳</div>
+            <div className="about-hero-chips">
+              <span className="about-app-version">{__APP_VERSION__}</span>
+              {/* 作者与仓库合成一个入口：GitHub 图标 + 作者名，点了直接进仓库。
+                  仓库地址收进原生 title（与 BottomBar 一致——预览页上的原生子
+                  webview 会挡住 antd Tooltip，这里也统一不用浮层） */}
+              <button
+                className="pm-btn pm-btn-sm"
+                type="button"
+                title={`github.com/${REPO}`}
+                onClick={() => openUrl(REPO_PAGE)}
+              >
+                <GithubOutlined style={{ fontSize: 12 }} />
+                {AUTHOR}
+              </button>
+            </div>
           </div>
 
           {/* 系统环境：Node.js / pnpm / dsh CLI 检测结果（启动检查页已移除，收敛至此） */}

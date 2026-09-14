@@ -9,6 +9,7 @@ import PluginFailureModal from "./components/PluginFailureModal";
 import ServiceRestartHandler from "./components/ServiceRestartHandler";
 import StudioTitleBar from "./components/StudioTitleBar";
 import TitleBar from "./components/TitleBar";
+import Launch from "./pages/Launch";
 import Loading from "./pages/Loading";
 import Preview from "./pages/Preview";
 import Settings from "./pages/Settings";
@@ -16,6 +17,7 @@ import TtsStudio from "./pages/TtsStudio";
 import TtsHistory from "./pages/TtsHistory";
 import KokoroStudio from "./pages/KokoroStudio";
 import { useThemeStore, EFFECTIVE_STORAGE_KEY } from "./store/useThemeStore";
+import { useAppStore } from "./store/useAppStore";
 import { initNotifySync } from "./store/useNotifyStore";
 import { startNotifyListener } from "./lib/notify";
 
@@ -61,6 +63,13 @@ export default function App() {
     // 「打开过设置页/语音工具窗口」时——重启后 Rust 侧语音配置停留在默认
     // （enabled=false），通知语音被静默跳过。根因修复，见 initNotifySync 注释。
     initNotifySync();
+  }, []);
+
+  // 应用级引导：服务状态探测（app_status）放在壳层，任何入口路由拿到的都是已初始化的
+  // store —— 启动封面据此判断该不该出现，状态页/预览页据此决定渲染分支。
+  // init 幂等（内部有 initialized 守卫，且非主窗口只做一次收尾），整个生命周期只真跑一次。
+  useEffect(() => {
+    void useAppStore.getState().init();
   }, []);
 
   // 把实际主题同步到 <html> 的 data-theme 与 color-scheme（驱动 CSS 变量）
@@ -172,12 +181,13 @@ function Shell() {
         <TitleBar />
         <div className="app-content" key={reloadKey}>
           <Routes>
-            {/* 启动检查页已移除：根路径直接进服务状态页（自动检测环境并启动），
-                旧「/」入口（含通配兜底）一律重定向到 /loading */}
-            <Route path="/" element={<Navigate to="/loading" replace />} />
+            {/* 启动封面是「未启动」时的落地页：纯展示（logo + 标题 + 启动按钮），
+                不参与启动流程——点按钮带 state.start 进 /loading，由它跑完整条链。
+                封面自己只按 phase 分流：running → 预览页，installing/starting → 状态页。 */}
+            <Route path="/" element={<Launch />} />
             <Route path="/loading" element={<Loading />} />
             <Route path="/preview" element={<Preview />} />
-            <Route path="*" element={<Navigate to="/loading" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
         {/* 底部导航条：flex 布局最后一个元素，占位且固定在窗口底部 */}
