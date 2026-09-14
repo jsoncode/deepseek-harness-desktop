@@ -16,16 +16,26 @@
 #   Linux:   .deb + .rpm + .AppImage（在 ubuntu-22.04 上构建：glibc 向下兼容，
 #            22.04 产物可在 22.04 及更新的发行版上运行；24.04 构建会抬高门槛）
 #
-# 产物命名：`dhd_{version}_{platform}_{arch}[-setup].{ext}`，由 scripts/tag-release-assets.mjs
-# 在 build 之后改名（tauri 产物名写死在打包器里、没有模板可配）。产品名统一缩成 `dhd`：
-# 短、且不含空格 —— 带空格时 GitHub 会把空格替换成 `.`，下载页上的名字和本地产物名对不上，
-# 命令行里也得到处加引号。脚本里的 --name 是这个前缀的唯一来源（默认 dhd）。
+# 产物命名：`dhd_{version}_{platform}[_{compat}]_{arch}[-setup].{ext}`，由
+# scripts/tag-release-assets.mjs 在 build 之后改名（tauri 产物名写死在打包器里、
+# 没有模板可配）。产品名统一缩成 `dhd`：短、且不含空格 —— 带空格时 GitHub 会把空格
+# 替换成 `.`，下载页上的名字和本地产物名对不上，命令行里也得到处加引号。
+# 脚本里的 --name 是这个前缀的唯一来源（默认 dhd）。
 #   dhd_1.0.2_windows_x64-setup.exe
 #   dhd_1.0.2_macos_arm64.dmg / dhd_1.0.2_macos_arm64.pkg
 #   dhd_1.0.2_macos_x64.dmg   / dhd_1.0.2_macos_x64.pkg
-#   dhd_1.0.2_linux_amd64.deb
-#   dhd_1.0.2_linux_x86_64.rpm
-#   dhd_1.0.2_linux_amd64.AppImage
+#   dhd_1.0.2_linux_glibc2.35_amd64.deb
+#   dhd_1.0.2_linux_glibc2.35_x86_64.rpm
+#   dhd_1.0.2_linux_glibc2.35_x86_64.AppImage
+#
+# Linux 的 `glibc2.35` 是**兼容下限**，取自构建基线 ubuntu-22.04（glibc 2.35）：产物可在
+# glibc ≥ 2.35 且装了 webkit2gtk-4.1 的系统上运行。写进文件名是因为只标 `linux_amd64`
+# 用户无从判断自己的系统够不够，RHEL 9（glibc 2.34）、openSUSE Leap 15（2.31）、
+# Ubuntu 20.04（无 webkit2gtk-4.1）这些低于基线的系统会下载后才发现跑不起来。
+# 22.04 已是本技术栈（tauri v2 + webkit2gtk-4.1）能取到的最低基线，再往下压会失去
+# webkit2gtk-4.1；因此**不再为各发行版单独打包**，Arch 等滚动发行版用 AppImage 即可。
+# 这个 token 由 linux 腿的 "Verify glibc floor" 步骤实测校验，防止基线漂移后名字说谎。
+#
 # 注意：**只改产物文件名**。tauri.conf.json 的 productName 不动，安装后的应用名、.app、
 # 窗口标题与卸载项仍然叫 DeepSeek Harness Desktop。
 #
@@ -151,17 +161,30 @@ jobs:
           - **Windows**：\`dhd_${TAG#v}_windows_x64-setup.exe\`（NSIS 安装包）
           - **macOS Apple Silicon**：\`dhd_${TAG#v}_macos_arm64.dmg\` + \`dhd_${TAG#v}_macos_arm64.pkg\`
           - **macOS Intel**：\`dhd_${TAG#v}_macos_x64.dmg\` + \`dhd_${TAG#v}_macos_x64.pkg\`
-          - **Linux x86_64**：\`dhd_${TAG#v}_linux_amd64.deb\`（Debian/Ubuntu）、\`dhd_${TAG#v}_linux_x86_64.rpm\`
-            （Fedora/openSUSE）、\`dhd_${TAG#v}_linux_amd64.AppImage\`（免安装）
+          - **Linux x86_64**（名字里的 \`glibc2.35\` 就是兼容下限，见下）：
+            - \`dhd_${TAG#v}_linux_glibc2.35_amd64.deb\` —— Debian / Ubuntu / Mint / Pop!_OS 等 dpkg 系
+            - \`dhd_${TAG#v}_linux_glibc2.35_x86_64.rpm\` —— Fedora 36+ / openSUSE Tumbleweed 等 rpm 系（仓库需有 webkit2gtk4.1）
+            - \`dhd_${TAG#v}_linux_glibc2.35_x86_64.AppImage\` —— **通用**：任何发行版，含 Arch / CachyOS 等滚动发行版
+
+          ### Linux 支持范围
+          三个包都构建在 \`ubuntu-22.04\` 上，因此要求 **glibc ≥ 2.35** 且系统提供 **webkit2gtk-4.1**。
+          这是 tauri v2 + webkit2gtk-4.1 能取到的最低基线，所以**不为各发行版单独打包**：
+
+          | 系统 | 可用产物 |
+          | --- | --- |
+          | Ubuntu 22.04+ / Debian 12+ / Mint 21+ / Pop!_OS 22.04+ | \`.deb\`（或 AppImage） |
+          | Fedora 36+ / openSUSE Tumbleweed（rpm 系，仓库需提供 webkit2gtk4.1） | \`.rpm\`（或 AppImage） |
+          | Arch / CachyOS / Manjaro 等滚动发行版 | \`.AppImage\` |
+          | ❌ RHEL / Rocky / Alma 9（glibc 2.34）、openSUSE **Leap** 15.x（2.31）、Ubuntu 20.04（无 webkit2gtk-4.1） | 低于基线，不支持 |
 
           > macOS 未签名时，首次打开需在「系统设置 → 隐私与安全性」中允许，或右键选择「打开」。
           > Windows 若提示 SmartScreen，请选择「更多信息 → 仍要运行」。
-          > Linux 的 .deb / .rpm 会自动带上 WebKitGTK 4.1、GTK3 与托盘依赖；AppImage 不含
-          > 系统库，需要发行版已装 \`libwebkit2gtk-4.1-0\`（Ubuntu 22.04+ / Debian 12+ 默认仓库即
-          > 提供）。AppImage 首次运行需 \`chmod +x\`。
+          > Linux 的 .deb / .rpm 会自动声明 WebKitGTK 4.1、GTK3 与托盘依赖；AppImage 不含系统库，
+          > 需目标机自备 \`webkit2gtk-4.1\` 与 \`libayatana-appindicator\`（Arch 上是
+          > \`sudo pacman -S webkit2gtk-4.1 libayatana-appindicator\`）。AppImage 首次运行需 \`chmod +x\`。
 
           ### 功能
-          - 启动页一键启动本地服务（按钮随服务状态切换为「启动应用 / 打开应用」）
+          - 启动封面一键启动本地服务（未启动时显示，已启动/启动中自动让位给状态页/预览页）
           - 首次使用自动全局安装 \`@deepseek-ai/dsh@latest\`
           - 模拟终端实时展示安装与启动日志，服务就绪后自动进入预览页
           - 预览页支持刷新 / 复制地址 / 浏览器打开
@@ -240,7 +263,7 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev patchelf file wget rpm
+            librsvg2-dev patchelf file wget rpm binutils
 
       - name: Sync version files
         shell: bash
@@ -317,6 +340,31 @@ jobs:
           # 宁可让发版红掉，也不要静默少传一个安装包。
           fail_on_unmatched_files: true
 
+      # 校验文件名里的兼容下限没说谎：实测二进制引用到的最高 GLIBC 符号版本。
+      # 构建机固定在 ubuntu-22.04（glibc 2.35），正常情况下实测就是 2.35；一旦有人
+      # 换了 runner 或引入需要更新 glibc 的依赖，这里会红——否则用户会照着一个
+      # 标着 glibc2.35、实际却要 2.38 的名字下载安装，然后在旧系统上莫名其妙地失败。
+      - name: Verify glibc floor matches the filename token (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          BIN=src-tauri/target/release/deepseek-harness-desktop
+          test -f "$BIN" || { echo "::error::未找到二进制 $BIN"; exit 1; }
+          MAX=$(objdump -T "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -Vu | tail -1 || true)
+          # fail-closed：读不出符号版本（objdump 缺失 / 命令失败）也算失败，
+          # 否则这条校验会静默通过、名字照样可能说谎
+          if [ -z "$MAX" ]; then
+            echo "::error::读不到 GLIBC 符号版本——objdump 是否可用？校验无法进行"
+            exit 1
+          fi
+          echo "实测最高 GLIBC 符号版本: $MAX"
+          declare -r EXPECTED=2.35
+          if [ "$(printf '%s\n' "$EXPECTED" "$MAX" | sort -Vu | tail -1)" != "$EXPECTED" ]; then
+            echo "::error::实测 glibc 下限 $MAX 高于产物名里声明的 $EXPECTED——请同步改文件名 token"
+            exit 1
+          fi
+          echo "✓ 兼容下限与文件名声明的 glibc$EXPECTED 一致"
+
       - name: Tag platform into asset names (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         id: tag-linux
@@ -325,6 +373,7 @@ jobs:
           node scripts/tag-release-assets.mjs \
             --platform '${{ matrix.asset_platform }}' \
             --version '${{ needs.create-release.outputs.version }}' \
+            --compat 'glibc2.35' \
             --github-output files \
             src-tauri/target/release/bundle/deb \
             src-tauri/target/release/bundle/rpm \

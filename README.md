@@ -22,42 +22,61 @@
 | Windows 10/11（64 位） | [下载 .exe（NSIS 安装包）](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.0 MB |
 | macOS Apple Silicon | [下载 .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [下载 .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.9 MB |
 | macOS Intel（64 位） | [下载 .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [下载 .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3.0 MB |
-| Linux x86_64 | [下载 .deb](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.rpm](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.AppImage](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3 MB |
+| Linux x86_64 | [下载 .deb](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.rpm](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.AppImage](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) —— 支持范围见下 | ~10 MB（AppImage ~88 MB） |
 
 > 所有安装包统一发布在 [GitHub Releases](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest)，选择最新版本、下载对应平台的安装包即可。
 
-> **产物命名**：`dhd_{版本}_{平台}_{架构}.{后缀}` —— `dhd` 是 DeepSeek Harness Desktop 的缩写，
-> 由发版流水线在打包后统一改名（tauri 把产物名写死在打包器里、没有模板可配）。用缩写是为了短、
+> **产物命名**：`dhd_{版本}_{平台}[_{兼容下限}]_{架构}.{后缀}` —— `dhd` 是 DeepSeek Harness Desktop 的
+> 缩写，由发版流水线在打包后统一改名（tauri 把产物名写死在打包器里、没有模板可配）。用缩写是为了短、
 > 且**不含空格**：名字里带空格时 GitHub 会把空格换成 `.`，下载页上的名字和本地打包产物对不上，
 > 命令行里也得到处加引号。看一眼文件名就知道该下哪个包：
 >
 > ```
-> dhd_1.0.2_windows_x64-setup.exe
-> dhd_1.0.2_macos_arm64.dmg   / dhd_1.0.2_macos_arm64.pkg
-> dhd_1.0.2_macos_x64.dmg     / dhd_1.0.2_macos_x64.pkg
-> dhd_1.0.2_linux_amd64.deb
-> dhd_1.0.2_linux_x86_64.rpm
-> dhd_1.0.2_linux_amd64.AppImage
+> dhd_1.0.5_windows_x64-setup.exe
+> dhd_1.0.5_macos_arm64.dmg            / dhd_1.0.5_macos_arm64.pkg
+> dhd_1.0.5_macos_x64.dmg              / dhd_1.0.5_macos_x64.pkg
+> dhd_1.0.5_linux_glibc2.35_amd64.deb
+> dhd_1.0.5_linux_glibc2.35_x86_64.rpm
+> dhd_1.0.5_linux_glibc2.35_x86_64.AppImage
 > ```
 >
 > > **只改了文件名**：安装后的应用、macOS 的 `.app`、窗口标题与卸载项仍然是
 > > **DeepSeek Harness Desktop**，`dhd` 只出现在下载到的安装包名字上。
 >
-> macOS 的 `.dmg` 与 `.pkg` 统一用 `arm64` / `x64`（tauri 的 dmg 原生产物名是 `aarch64` / `x86_64`，
-> 两者不一致，已在发版时归一）；Linux 的 `.deb` / `.AppImage` 用 `amd64`、`.rpm` 用 `x86_64`——
-> 各自沿用包管理器的既定架构词汇。
+> Linux 名字里的 `glibc2.35` 是**兼容下限**（下一节），不是版本号的一部分。
+> 架构标记：macOS 的 `.dmg` / `.pkg` 统一用 `arm64` / `x64`（tauri 的 dmg 原生产物名是
+> `aarch64` / `x86_64`，两者不一致，已在发版时归一）；Linux 的 `.deb` 用 Debian 的 `amd64`，
+> `.rpm` / `.AppImage` 用通用的 `x86_64`。
 
-> **Linux 说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，用
-> `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 安装即可；AppImage **不打包系统库**，
-> 需要发行版已提供 `libwebkit2gtk-4.1-0` 与 `libayatana-appindicator3-1`（Ubuntu 22.04+ /
-> Debian 12+ 仓库默认就有）：
+### 🐧 Linux 支持范围
+
+三个 Linux 包都构建在 `ubuntu-22.04` 上，所以要求 **glibc ≥ 2.35** 且系统提供 **webkit2gtk-4.1**。
+
+**这是 tauri v2 + webkit2gtk-4.1 能取到的最低基线**（再往下的 Ubuntu 20.04 只有 webkit2gtk-4.0），
+所以**不为各发行版单独打包**——滚动发行版（Arch 等）直接用 AppImage 即可：
+
+| 系统 | 建议产物 |
+| --- | --- |
+| Ubuntu 22.04+ / Debian 12+ / Mint 21+ / Pop!_OS 22.04+ | `.deb` |
+| Fedora 36+ / openSUSE Tumbleweed（rpm 系，仓库需提供 `webkit2gtk4.1`） | `.rpm` |
+| Arch / CachyOS / Manjaro 等滚动发行版 | `.AppImage`（需自备 `webkit2gtk-4.1` 与 `libayatana-appindicator`） |
+| ❌ RHEL / Rocky / Alma **9**（glibc 2.34）、openSUSE **Leap** 15.x（2.31）、Ubuntu 20.04（无 webkit2gtk-4.1） | 低于基线，跑不起来 |
+
+> 兼容下限由发布流水线里的 `Verify glibc floor` 步骤**实测二进制引用的最高 GLIBC 符号版本**校验：
+> 一旦构建基线变动导致实际下限超过 `2.35`，流水线会直接失败，不会让文件名说谎。
+
+> **Linux 安装说明**：`.deb` / `.rpm` 会自动声明 WebKitGTK 4.1、GTK3 与托盘（AppIndicator）依赖，
+> 用 `sudo apt install ./xxx.deb` 或 `sudo dnf install ./xxx.rpm` 装即可，依赖会一起拉齐；
+> AppImage **不打包系统库**，需要目标机自备这些库 —— dpkg 系是
+> `sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1`，Arch 系是
+> `sudo pacman -S webkit2gtk-4.1 libayatana-appindicator`：
 
 ```bash
-chmod +x dhd_x.y.z_linux_amd64.AppImage
-./dhd_x.y.z_linux_amd64.AppImage
+chmod +x dhd_x.y.z_linux_glibc2.35_x86_64.AppImage
+./dhd_x.y.z_linux_glibc2.35_x86_64.AppImage
 ```
 
-> 💡 **轻量**：以上为 v0.1.2 实测大小（Windows 2.02 MB、macOS 2.91~3.01 MB），各版本略有差异——全平台安装包都只有 2~3 MB，秒级下载、秒级安装。
+> 💡 **轻量**：以上为 v0.1.2 实测大小（Windows 2.02 MB、macOS 2.91~3.01 MB），各版本略有差异——全平台安装包都只有 2~3 MB，秒级下载、秒级安装。Linux 侧 `.deb` / `.rpm` 约 10 MB；AppImage 因为要自带运行时而接近 88 MB（体积大但仍远小于 Electron 应用）。
 
 **首次使用（两步完成）**：
 
@@ -171,7 +190,7 @@ pnpm release minor         # bump minor 并发布
 pnpm release:tag-only      # 仅给当前版本打标签推送（不 bump）
 ```
 
-流水线（`.github/workflows/release.yml`）：质量门禁（tsc + vite 构建 + Rust 测试）→ 创建**已发布**的正式 Release → 矩阵构建（Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage，基线 `ubuntu-22.04`）→ 用 `scripts/tag-release-assets.mjs` 把产物统一改名为 `dhd_{版本}_{平台}_{架构}` 后追加到同一 Release。tauri 的产物名写死在打包器里、没有模板可配，所以改名只能放在 build 之后、上传之前；改名后的路径由脚本写进 `$GITHUB_OUTPUT`，上传步骤直接消费这份列表而不是 glob，避免改名与 glob 漂移导致漏传。
+流水线（`.github/workflows/release.yml`）：质量门禁（tsc + vite 构建 + Rust 测试）→ 创建**已发布**的正式 Release → 矩阵构建（Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage，基线 `ubuntu-22.04`）→ 用 `scripts/tag-release-assets.mjs` 把产物统一改名为 `dhd_{版本}_{平台}[_{兼容下限}]_{架构}` 后追加到同一 Release；Linux 腿会先用 `objdump` 实测二进制引用的最高 GLIBC 符号版本，与文件名里的 `glibc2.35` 对不上就直接失败。tauri 的产物名写死在打包器里、没有模板可配，所以改名只能放在 build 之后、上传之前；改名后的路径由脚本写进 `$GITHUB_OUTPUT`，上传步骤直接消费这份列表而不是 glob，避免改名与 glob 漂移导致漏传。
 
 另有一条 **Linux 构建验证**流水线（`.github/workflows/linux-build.yml`）：只要改动
 `src-tauri/**`、`src/**` 等路径就自动跑 `cargo fmt --check` + `cargo test` + 打包，

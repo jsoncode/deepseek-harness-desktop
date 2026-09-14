@@ -6,17 +6,22 @@
  *   DeepSeek Harness Desktop_1.0.2_x64-setup.exe   →  dhd_1.0.2_windows_x64-setup.exe
  *   DeepSeek Harness Desktop_1.0.2_aarch64.dmg     →  dhd_1.0.2_macos_arm64.dmg
  *   DeepSeek Harness Desktop_1.0.2_arm64.pkg       →  dhd_1.0.2_macos_arm64.pkg
- *   DeepSeek Harness Desktop_1.0.2_amd64.deb       →  dhd_1.0.2_linux_amd64.deb
- *   DeepSeek Harness Desktop-1.0.2-1.x86_64.rpm    →  dhd_1.0.2_linux_x86_64.rpm
- *   DeepSeek Harness Desktop_1.0.2_amd64.AppImage  →  dhd_1.0.2_linux_amd64.AppImage
+ *   DeepSeek Harness Desktop_1.0.2_amd64.deb       →  dhd_1.0.2_linux_glibc2.35_amd64.deb
+ *   DeepSeek Harness Desktop-1.0.2-1.x86_64.rpm    →  dhd_1.0.2_linux_glibc2.35_x86_64.rpm
+ *   DeepSeek Harness Desktop_1.0.2_amd64.AppImage  →  dhd_1.0.2_linux_glibc2.35_x86_64.AppImage
  *
- * 统一目标格式：`{name}_{version}_{platform}_{arch}{-setup}.{ext}`
+ * 统一目标格式：`{name}_{version}_{platform}[_{compat}]_{arch}{-setup}.{ext}`
  *   - name 默认 `dhd`（见 --name）：发布名要短、且**不含空格**——带空格时 GitHub 会把
  *     空格替换成 `.`，于是下载页的名字和本地产物名对不上，命令行里还得到处加引号；
  *   - platform ∈ windows | macos | linux；
- *   - arch 归一化：macOS 的 aarch64/x86_64 → arm64/x64（与 .pkg 对齐），
- *     Windows 保持 Tauri 的 x64/arm64；Linux 保留各自生态的原生标记
- *     （deb/AppImage 用 amd64，rpm 用 x86_64）——这是包管理器约定，不强行统一；
+ *   - compat 可选（见 --compat）：Linux 用它标明**兼容下限**，即这批产物构建在哪个 ABI
+ *     基线上。构建机是 ubuntu-22.04 → glibc 2.35，产物可在 glibc ≥ 2.35 的发行版上运行。
+ *     没有这个 token 时用户只看到「linux_amd64」，无从判断自己的系统够不够，于是
+ *     RHEL 9（glibc 2.34）、openSUSE Leap 15（2.31）这类低于基线的系统要下载后才发现
+ *     跑不起来；
+ *   - arch 归一化：macOS 的 aarch64/x86_64 → arm64/x64（与 .pkg 对齐），Windows 保持
+ *     Tauri 的 x64/arm64；Linux 见 normalizeArch —— deb 用 Debian 的 `amd64`（dpkg 认
+ *     这个名字），rpm / AppImage 用通用的 `x86_64`；
  *   - rpm 原有的 `-{release}.` 段（如 `-1.`）被丢弃，只保留 arch。
  *
  * 注意：**只改产物文件名**，不动 tauri.conf.json 的 productName —— 安装后的应用名、
@@ -26,7 +31,7 @@
  * 所以只能在 build 之后、上传之前改名。
  *
  * Usage（在 CI 里由 release.yml 调用，也可本地用 --dry-run 预演）：
- *   node scripts/tag-release-assets.mjs --platform windows --version 1.0.2 \
+ *   node scripts/tag-release-assets.mjs --platform linux --version 1.0.2 --compat glibc2.35 \
  *     [--name dhd] [--github-output files] [--dry-run] <dir|file>...
  *
  * 输出：改名后的路径按行打印到 stdout（供 CI 日志查看）；给了 --github-output NAME
@@ -50,12 +55,25 @@ const DEFAULT_ASSET_NAME = 'dhd'
  * 各平台的 arch 归一化表。
  * macOS 必须归一：dmg 来自 tauri（aarch64/x86_64），pkg 由 workflow 的 pkgbuild 生成
  * （matrix.arch 是 arm64/x64），不归一就会出现 `aarch64.dmg` 与 `arm64.pkg` 并存。
- * Linux 不归一：deb/AppImage 的 amd64 与 rpm 的 x86_64 各自是包管理器的既定词汇。
+ * Linux 的单值归一在 normalizeArch 里按「包类型」再做一次（deb 要 amd64，rpm 要 x86_64），
+ * 这里只把各种写法收敛成规范形。
  */
 const ARCH_ALIASES = {
   windows: { x64: 'x64', x86_64: 'x64', arm64: 'arm64', aarch64: 'arm64', i686: 'x86', i386: 'x86' },
   macos: { aarch64: 'arm64', arm64: 'arm64', x86_64: 'x64', x64: 'x64' },
-  linux: {},
+  linux: { amd64: 'amd64', x86_64: 'amd64', x64: 'amd64', arm64: 'arm64', aarch64: 'arm64' },
+}
+
+/**
+ * Linux 按**包类型**选架构名（`rest` 是 arch 之后的后缀，如 `.deb` / `.rpm` / `.AppImage`）：
+ *   - .deb 必须用 Debian 的架构名 `amd64`——dpkg 系工具按这个名字解析文件名；
+ *   - .rpm 与 .AppImage 用通用的 `x86_64`（RPM 的既定词汇；AppImage 不属于任何发行版，
+ *     用通用的 x86_64 比 Debian 专有的 amd64 更贴切）。
+ * 归一表已把 x86_64 归到 amd64，所以这里只需把非 deb 的 amd64 换回 x86_64。
+ */
+function linuxArch(arch, rest) {
+  if (rest.toLowerCase().endsWith('.deb')) return arch
+  return arch === 'amd64' ? 'x86_64' : arch
 }
 
 function fail(msg) {
@@ -67,7 +85,7 @@ function usage() {
   console.error(
     [
       'Usage: node scripts/tag-release-assets.mjs --platform <windows|macos|linux> --version <x.y.z>',
-      `         [--name <${DEFAULT_ASSET_NAME}>] [--github-output <name>] [--dry-run] <dir|file>...`,
+      `         [--compat <token>] [--name <${DEFAULT_ASSET_NAME}>] [--github-output <name>] [--dry-run] <dir|file>...`,
     ].join('\n'),
   )
   process.exit(1)
@@ -78,6 +96,7 @@ function parseArgs(argv) {
   const opts = {
     platform: '',
     version: '',
+    compat: '',
     name: DEFAULT_ASSET_NAME,
     githubOutput: '',
     dryRun: false,
@@ -85,12 +104,19 @@ function parseArgs(argv) {
   }
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (arg === '--platform' || arg === '--version' || arg === '--name' || arg === '--github-output') {
+    if (
+      arg === '--platform' ||
+      arg === '--version' ||
+      arg === '--compat' ||
+      arg === '--name' ||
+      arg === '--github-output'
+    ) {
       const value = argv[i + 1]
       if (!value || value.startsWith('--')) fail(`${arg} needs a value`)
       i += 1
       if (arg === '--platform') opts.platform = value
       else if (arg === '--version') opts.version = value.replace(/^v/i, '')
+      else if (arg === '--compat') opts.compat = value
       else if (arg === '--name') opts.name = value
       else opts.githubOutput = value
     } else if (arg === '--dry-run') {
@@ -107,6 +133,10 @@ function parseArgs(argv) {
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(opts.name)) {
     // 发布名必须无空格（GitHub 会把空格换成 `.`），且不含路径分隔符
     fail(`--name must be a lowercase token without spaces (got ${opts.name || '<empty>'})`)
+  }
+  // 兼容下限 token：小写字母数字加点（如 glibc2.35），同样是文件名安全字符
+  if (opts.compat && !/^[a-z0-9][a-z0-9._-]*$/.test(opts.compat)) {
+    fail(`--compat must be a lowercase token without spaces (got ${opts.compat})`)
   }
   if (!/^\d+\.\d+\.\d+(?:[-.+][\w.-]+)?$/.test(opts.version)) {
     fail(`--version must look like 1.2.3 (got ${opts.version || '<empty>'})`)
@@ -205,8 +235,11 @@ function main() {
 
     // 产品名换成发布名（默认 dhd）：短、无空格。原始 productName 只用于校验，
     // 不进产物名——装了应用的人看到的仍是 DeepSeek Harness Desktop。
-    const arch = normalizeArch(opts.platform, parsed.arch)
-    const target = `${opts.name}_${opts.version}_${opts.platform}_${arch}${parsed.rest}`
+    let arch = normalizeArch(opts.platform, parsed.arch)
+    if (opts.platform === 'linux') arch = linuxArch(arch, parsed.rest)
+    // 可选兼容下限 token（Linux 用）：插在平台与架构之间
+    const compat = opts.compat ? `_${opts.compat}` : ''
+    const target = `${opts.name}_${opts.version}_${opts.platform}${compat}_${arch}${parsed.rest}`
     const targetPath = join(dirname(file), target)
 
     if (target === name) {

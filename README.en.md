@@ -22,43 +22,65 @@ For new users: grab the installer for your platform and double-click to install 
 | Windows 10/11 (64-bit) | [Download .exe (NSIS installer)](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.0 MB |
 | macOS Apple Silicon | [Download .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [Download .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~2.9 MB |
 | macOS Intel (64-bit) | [Download .dmg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [Download .pkg](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3.0 MB |
-| Linux x86_64 | [Download .deb](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.rpm](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.AppImage](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) | ~3 MB |
+| Linux x86_64 | [Download .deb](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.rpm](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) / [.AppImage](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) — see the support matrix below | ~10 MB (AppImage ~88 MB) |
 
 > All installers are published on [GitHub Releases](https://github.com/jsoncode/deepseek-harness-desktop/releases/latest) — pick the latest release and download the package for your platform.
 
-> **Asset naming**: `dhd_{version}_{platform}_{arch}.{ext}` — `dhd` is short for DeepSeek Harness
-> Desktop, stamped in by the release pipeline after bundling (Tauri hard-codes bundle names, there
-> is no template hook). The short form keeps names compact and **space-free**: GitHub rewrites
+> **Asset naming**: `dhd_{version}_{platform}[_{compat}]_{arch}.{ext}` — `dhd` is short for DeepSeek
+> Harness Desktop, stamped in by the release pipeline after bundling (Tauri hard-codes bundle names,
+> there is no template hook). The short form keeps names compact and **space-free**: GitHub rewrites
 > spaces in uploaded asset names to `.`, which makes the download page disagree with the local
 > bundle name and forces quoting everywhere on the command line. The right download is obvious at
 > a glance:
 >
 > ```
-> dhd_1.0.2_windows_x64-setup.exe
-> dhd_1.0.2_macos_arm64.dmg   / dhd_1.0.2_macos_arm64.pkg
-> dhd_1.0.2_macos_x64.dmg     / dhd_1.0.2_macos_x64.pkg
-> dhd_1.0.2_linux_amd64.deb
-> dhd_1.0.2_linux_x86_64.rpm
-> dhd_1.0.2_linux_amd64.AppImage
+> dhd_1.0.5_windows_x64-setup.exe
+> dhd_1.0.5_macos_arm64.dmg            / dhd_1.0.5_macos_arm64.pkg
+> dhd_1.0.5_macos_x64.dmg              / dhd_1.0.5_macos_x64.pkg
+> dhd_1.0.5_linux_glibc2.35_amd64.deb
+> dhd_1.0.5_linux_glibc2.35_x86_64.rpm
+> dhd_1.0.5_linux_glibc2.35_x86_64.AppImage
 > ```
 >
 > > **Only the filenames changed**: the installed app, the macOS `.app`, the window title and the
 > > uninstall entry are still **DeepSeek Harness Desktop**. `dhd` appears only on the installer you
 > > download.
 >
-> macOS `.dmg` and `.pkg` both use `arm64` / `x64` (Tauri names the dmg `aarch64` / `x86_64`,
-> so the release step normalises them). Linux keeps each ecosystem's own arch token:
-> `amd64` for `.deb` / `.AppImage` and `x86_64` for `.rpm`.
+> The `glibc2.35` token in the Linux names is a **compatibility floor** (next section), not part of
+> the version. Arch tokens: macOS `.dmg` / `.pkg` both use `arm64` / `x64` (Tauri names the dmg
+> `aarch64` / `x86_64`, so the release step normalises them); Linux `.deb` uses Debian's `amd64`
+> while `.rpm` / `.AppImage` use the generic `x86_64`.
 
-> **Linux notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
+### 🐧 Linux support
+
+All three Linux packages are built on `ubuntu-22.04`, so they require **glibc ≥ 2.35** and a system
+that provides **webkit2gtk-4.1**.
+
+That is **the lowest baseline this stack can reach** (Ubuntu 20.04 only ships webkit2gtk-4.0, which
+tauri v2 does not use), so there is **no per-distribution packaging** — rolling releases such as Arch
+just use the AppImage:
+
+| System | Recommended artifact |
+| --- | --- |
+| Ubuntu 22.04+ / Debian 12+ / Mint 21+ / Pop!_OS 22.04+ | `.deb` |
+| Fedora 36+ / openSUSE Tumbleweed (rpm family — the repo must provide `webkit2gtk4.1`) | `.rpm` |
+| Arch / CachyOS / Manjaro and other rolling releases | `.AppImage` (bring `webkit2gtk-4.1` + `libayatana-appindicator`) |
+| ❌ RHEL / Rocky / Alma **9** (glibc 2.34), openSUSE **Leap** 15.x (2.31), Ubuntu 20.04 (no webkit2gtk-4.1) | below the floor — won't run |
+
+> The floor is verified by the pipeline's `Verify glibc floor` step, which measures the highest
+> `GLIBC_*` symbol version the binary actually references. If a baseline change ever pushes the real
+> floor above `2.35`, the release fails instead of letting the filename lie.
+
+> **Linux install notes**: the `.deb` / `.rpm` declare their WebKitGTK 4.1, GTK3 and tray
 > (AppIndicator) dependencies, so `sudo apt install ./xxx.deb` (or
 > `sudo dnf install ./xxx.rpm`) pulls everything in. The AppImage does **not** bundle
-> system libraries and needs `libwebkit2gtk-4.1-0` **and** `libayatana-appindicator3-1`
-> from the distribution (Ubuntu 22.04+ / Debian 12+ ship both by default):
+> system libraries and needs the target machine to provide them — on dpkg distros
+> `sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1`, on Arch
+> `sudo pacman -S webkit2gtk-4.1 libayatana-appindicator`:
 
 ```bash
-chmod +x dhd_x.y.z_linux_amd64.AppImage
-./dhd_x.y.z_linux_amd64.AppImage
+chmod +x dhd_x.y.z_linux_glibc2.35_x86_64.AppImage
+./dhd_x.y.z_linux_glibc2.35_x86_64.AppImage
 ```
 
 > 💡 **Lightweight**: sizes above are measured on v0.1.2 (Windows 2.02 MB, macOS 2.91–3.01 MB) and vary slightly per release — every installer is only 2–3 MB, so downloads and installs take seconds.
@@ -174,7 +196,7 @@ pnpm release minor         # bump minor and release
 pnpm release:tag-only      # tag and push the current version only
 ```
 
-The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage on the `ubuntu-22.04` baseline) → rename every bundle to `dhd_{version}_{platform}_{arch}` via `scripts/tag-release-assets.mjs` and append it to that same release. Tauri hard-codes bundle filenames with no template hook, so the rename has to happen after the build and before the upload; the script writes the renamed paths to `$GITHUB_OUTPUT` and the upload steps consume that list instead of a glob, so a naming/glob drift can never silently drop an asset.
+The pipeline (`.github/workflows/release.yml`): quality gate (tsc + vite build + Rust tests) → create a **published** GitHub Release → matrix build (Windows NSIS / macOS arm64 / macOS x64 / Linux deb+rpm+AppImage on the `ubuntu-22.04` baseline) → rename every bundle to `dhd_{version}_{platform}[_{compat}]_{arch}` via `scripts/tag-release-assets.mjs` and append it to that same release (the Linux leg first measures the highest `GLIBC_*` symbol version the binary references with `objdump` and fails if it exceeds the `glibc2.35` in the filename). Tauri hard-codes bundle filenames with no template hook, so the rename has to happen after the build and before the upload; the script writes the renamed paths to `$GITHUB_OUTPUT` and the upload steps consume that list instead of a glob, so a naming/glob drift can never silently drop an asset.
 
 A second workflow, **Linux build** (`.github/workflows/linux-build.yml`), runs
 `cargo fmt --check` + `cargo test` + bundling whenever `src-tauri/**`, `src/**` and
