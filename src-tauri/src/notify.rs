@@ -72,8 +72,13 @@ fn toast_style(app: &AppHandle) -> ToastStyle {
 }
 
 /// toast 激活事件的负载（与前端 `tauri.ts` 的 `NotifyActivatePayload` 同形，
-/// serde camelCase）
+/// serde camelCase）。
+///
+/// 只在 Windows 的非测试构建里构造：唯一的构造点是 winrt toast 的 `on_activated`
+/// 回调，它被 `#[cfg(not(test))]` 排除（见 `clickable_toast` 的说明），故测试构建
+/// 显式放行死代码告警，而不是把这处平台事实变成噪音。
 #[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivatePayload {

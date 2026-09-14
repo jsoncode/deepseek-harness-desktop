@@ -34,7 +34,13 @@ pub const RESTART_REQUEST_EVENT: &str = "dsh://restart-request";
 pub const NOTIFY_MESSAGE_EVENT: &str = "dsh://notify-message";
 /// 用户点击了系统通知（toast 激活）：负载为 `notify::ActivatePayload`
 /// （sessionId 为空表示点到 toast 正文、未落到具体会话按钮上）。
-/// 前端据此切到预览页并让预览 iframe 打开对应会话对话框。
+/// 前端据此切到预览页并让预览承载（子 webview / 独立窗口）打开对应会话对话框。
+///
+/// **仅 Windows**：发出方是 winrt toast 的激活回调（notify.rs `clickable_toast`），
+/// 其它平台的系统通知没有点击感知，这里不声明该常量以免留下死代码告警。
+/// 测试构建也取不到它（那条回调被 `#[cfg(not(test))]` 排除，见 notify.rs 的说明）。
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))] // 测试构建里那条激活回调被 cfg(not(test)) 排除
 pub const NOTIFY_ACTIVATE_EVENT: &str = "dsh://notify-activate";
 
 // ---------------------------------------------------------------------------

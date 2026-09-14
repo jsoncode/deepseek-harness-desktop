@@ -10,6 +10,16 @@ rust-version = "1.77.2"
 name = "deepseek_harness_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 发布档：剥掉符号表（默认不剥，安装包会白背几 MB）。
+# 只开 strip：它是纯链接期开关，不增加构建时间、不改运行时行为。
+#
+# ⚠️ 不要加 `panic = "abort"`：托盘创建失败要能被 lib.rs 的 catch_unwind 兜住
+# （Linux 缺 libayatana-appindicator3.so.1 时 libappindicator-sys 会 panic），
+# 改成 abort 会让「缺库」直接变成「启动即崩」，失去那层保护。
+# lto / codegen-units 也刻意不开：体积收益有限，而 CI 全平台打包时间会明显变长。
+[profile.release]
+strip = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
