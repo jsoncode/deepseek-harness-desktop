@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "deepseek-harness-desktop"
-version = "0.1.29"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "hound",
